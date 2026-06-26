@@ -92,6 +92,7 @@ static void showAlert(NSString *title, NSString *msg) {
     }
     [vc presentViewController:alert animated:YES completion:nil];
 }
+
 #pragma mark - 核心 API
 
 static void fetchDlink(NSString *filePath, NSInteger retry, void (^completion)(NSString *dlink, NSError *err)) {
@@ -198,7 +199,9 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
         NSString *filePath = [currentPath isEqualToString:@"/"] ? [NSString stringWithFormat:@"/%@", originalName] : [NSString stringWithFormat:@"%@/%@", currentPath, originalName];
         fetchDlink(filePath, 0, finish);
     }
-}#pragma mark - 悬浮按钮 Helper
+}
+
+#pragma mark - 悬浮按钮 Helper
 
 @interface HKCButtonHelper : NSObject
 + (instancetype)shared;
@@ -206,14 +209,15 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
 - (void)pan:(UIPanGestureRecognizer *)pan;
 @end
 
-@implementation HKCButtonHelper : NSObject
-+ (instancetype)shared {
+@implementation HKCButtonHelper
 
++ (instancetype)shared {
     static HKCButtonHelper *instance = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{ instance = [[HKCButtonHelper alloc] init]; });
     return instance;
 }
+
 - (void)buttonTapped:(UIButton *)sender {
     UIViewController *vc = topViewController();
     UIAlertController *input = [UIAlertController alertControllerWithTitle:@"复制直链" message:@"输入当前目录下的文件名" preferredStyle:UIAlertControllerStyleAlert];
@@ -228,17 +232,20 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
     }]];
     [vc presentViewController:input animated:YES completion:nil];
 }
+
 - (void)pan:(UIPanGestureRecognizer *)pan {
     UIView *btn = pan.view;
     CGPoint translation = [pan translationInView:btn.superview];
     btn.center = CGPointMake(btn.center.x + translation.x, btn.center.y + translation.y);
     [pan setTranslation:CGPointZero inView:btn.superview];
 }
+
 @end
 
 #pragma mark - Hook 入口（纯 Runtime Swizzling）
 
 static void (*orig_layoutSubviews)(id, SEL);
+
 static void hkc_layoutSubviews(id self, SEL _cmd) {
     orig_layoutSubviews(self, _cmd);
     static UIButton *gFloatingButton = nil;
@@ -270,4 +277,3 @@ __attribute__((constructor)) static void init() {
     Method m = class_getInstanceMethod(cls, @selector(layoutSubviews));
     orig_layoutSubviews = (void (*)(id, SEL))method_setImplementation(m, (IMP)hkc_layoutSubviews);
 }
-
