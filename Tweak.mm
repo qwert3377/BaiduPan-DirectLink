@@ -206,8 +206,9 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
 - (void)pan:(UIPanGestureRecognizer *)pan;
 @end
 
-@implementation HKCButtonHelper
+@implementation HKCButtonHelper : NSObject
 + (instancetype)shared {
+
     static HKCButtonHelper *instance = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{ instance = [[HKCButtonHelper alloc] init]; });
