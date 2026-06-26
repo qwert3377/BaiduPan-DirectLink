@@ -16,6 +16,8 @@ static const NSInteger kWaitTimeAfterRename = 4000;
 static const NSInteger kLargeFileExtraWait = 10000;
 static const NSInteger kDlinkRetryCount = 3;
 
+static NSString *gManualToken = nil;
+
 #pragma mark - 工具函数
 
 static UIViewController * topViewController(void) {
@@ -68,6 +70,11 @@ static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *header
 }
 
 static NSString * getBdstoken(void) {
+    // 优先使用手动输入的 token
+    if (gManualToken && gManualToken.length > 0) {
+        return gManualToken;
+    }
+    // 尝试从 NSUserDefaults 读取
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSString *token = [defaults stringForKey:@"bdstoken"];
     if (token.length > 0) return token;
@@ -99,7 +106,7 @@ static void showAlert(NSString *title, NSString *msg) {
 static void fetchDlink(NSString *filePath, NSInteger retry, void (^completion)(NSString *dlink, NSError *err)) {
     NSString *token = getBdstoken();
     if (!token) {
-        completion(nil, [NSError errorWithDomain:@"BaiduPan" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"未获取到 bdstoken，请确保已登录"}]);
+        completion(nil, [NSError errorWithDomain:@"BaiduPan" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"未获取到 bdstoken，请确保已登录或手动输入 token"}]);
         return;
     }
     NSString *encPath = [filePath stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
@@ -223,14 +230,22 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
     @try {
         UIViewController *vc = topViewController();
         if (!vc) return;
-        UIAlertController *input = [UIAlertController alertControllerWithTitle:@"复制直链" message:@"输入当前目录下的文件名" preferredStyle:UIAlertControllerStyleAlert];
+        UIAlertController *input = [UIAlertController alertControllerWithTitle:@"复制直链" message:@"输入文件名和 bdstoken" preferredStyle:UIAlertControllerStyleAlert];
         [input addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-            tf.placeholder = @"例如: example.zip";
+            tf.placeholder = @"文件名，例如: example.zip";
+        }];
+        [input addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+            tf.placeholder = @"bdstoken (从网页版获取)";
+            tf.text = gManualToken ?: @"";
         }];
         [input addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
         [input addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            NSString *fileName = input.textFields.firstObject.text;
+            NSString *fileName = input.textFields[0].text;
+            NSString *token = input.textFields[1].text;
             if (fileName.length == 0) return;
+            if (token.length > 0) {
+                gManualToken = token;
+            }
             runPipeline(fileName, @"0", getCurrentPath(), 0);
         }]];
         [vc presentViewController:input animated:YES completion:nil];
