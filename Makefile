@@ -1,13 +1,19 @@
-TARGET := iphone:clang:latest:13.0
-ARCHS = arm64 arm64e
+# BaiduPan-DirectLink
 
-include $(THEOS)/makefiles/common.mk
+百度网盘 iOS 直链助手 - TrollStore 版
 
-LIBRARY_NAME = BaiduPanTroll
+## 功能
+- 通过 TrollFools 注入百度网盘 IPA
+- 悬浮按钮一键获取文件直链
+- 自动重命名骗链（非 PDF 临时加 .pdf 后缀）
+- 获取成功后自动复制到剪贴板
 
-BaiduPanTroll_FILES = Tweak.mm
-BaiduPanTroll_CFLAGS = -fobjc-arc
-BaiduPanTroll_FRAMEWORKS = UIKit Foundation
-BaiduPanTroll_INSTALL_PATH = /usr/lib
+## 使用
+1. 用 Theos 编译 `make`
+2. 通过 TrollFools 将生成的 `BaiduPanTroll.dylib` 注入百度网盘
+3. 打开 App，点击悬浮「直链」按钮，输入文件名即可
 
-include $(THEOS_MAKE_PATH)/library.mk
+## 编译
+需要安装 [Theos](https://theos.dev/)：
+```bash
+make
