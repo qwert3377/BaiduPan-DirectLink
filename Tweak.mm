@@ -29,6 +29,7 @@ static UIViewController * topViewController(void) {
         }
     }
     if (!window) window = [[UIApplication sharedApplication] keyWindow];
+    if (!window) return nil;
     UIViewController *vc = window.rootViewController;
     while (vc.presentedViewController) vc = vc.presentedViewController;
     if ([vc isKindOfClass:[UINavigationController class]]) {
@@ -159,7 +160,7 @@ static void renameFile(NSString *fileId, NSString *path, NSString *newName, void
 
 static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentPath, NSInteger fileSize) {
     NSString *originalName = fileName;
-    (void)originalName; // 避免 unused 警告
+    (void)originalName;
     void (^finish)(NSString *, NSError *) = ^(NSString *dlink, NSError *err) {
         if (dlink) {
             [[UIPasteboard generalPasteboard] setString:dlink];
@@ -219,18 +220,23 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
 }
 
 - (void)buttonTapped:(UIButton *)sender {
-    UIViewController *vc = topViewController();
-    UIAlertController *input = [UIAlertController alertControllerWithTitle:@"复制直链" message:@"输入当前目录下的文件名" preferredStyle:UIAlertControllerStyleAlert];
-    [input addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"例如: example.zip";
-    }];
-    [input addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [input addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        NSString *fileName = input.textFields.firstObject.text;
-        if (fileName.length == 0) return;
-        runPipeline(fileName, @"0", getCurrentPath(), 0);
-    }]];
-    [vc presentViewController:input animated:YES completion:nil];
+    @try {
+        UIViewController *vc = topViewController();
+        if (!vc) return;
+        UIAlertController *input = [UIAlertController alertControllerWithTitle:@"复制直链" message:@"输入当前目录下的文件名" preferredStyle:UIAlertControllerStyleAlert];
+        [input addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+            tf.placeholder = @"例如: example.zip";
+        }];
+        [input addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+        [input addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            NSString *fileName = input.textFields.firstObject.text;
+            if (fileName.length == 0) return;
+            runPipeline(fileName, @"0", getCurrentPath(), 0);
+        }]];
+        [vc presentViewController:input animated:YES completion:nil];
+    } @catch (NSException *e) {
+        DLog(@"按钮点击异常: %@", e.reason);
+    }
 }
 
 - (void)pan:(UIPanGestureRecognizer *)pan {
@@ -242,38 +248,76 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
 
 @end
 
-#pragma mark - Hook 入口（纯 Runtime Swizzling）
+#pragma mark - 添加悬浮按钮（安全方式）
 
-static void (*orig_layoutSubviews)(id, SEL);
+static void addFloatingButton(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            @try {
+                UIWindow *window = nil;
+                if (@available(iOS 13.0, *)) {
+                    for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
+                        if (scene.activationState == UISceneActivationStateForegroundActive) {
+                            window = scene.windows.firstObject;
+                            break;
+                        }
+                    }
+                }
+                if (!window) window = [[UIApplication sharedApplication] keyWindow];
+                if (!window) return;
 
-static void hkc_layoutSubviews(id self, SEL _cmd) {
-    orig_layoutSubviews(self, _cmd);
-    static UIButton *gFloatingButton = nil;
-    if (gFloatingButton) return;
-    UIWindow *window = (UIWindow *)self;
-    if (!window.isKeyWindow) return;
-    UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
-    btn.frame = CGRectMake([UIScreen mainScreen].bounds.size.width - 70, 250, 56, 56);
-    btn.backgroundColor = [UIColor colorWithRed:0.4 green:0.48 blue:0.92 alpha:0.95];
-    btn.layer.cornerRadius = 28;
-    btn.layer.shadowColor = [UIColor blackColor].CGColor;
-    btn.layer.shadowOffset = CGSizeMake(0, 2);
-    btn.layer.shadowOpacity = 0.3;
-    btn.layer.shadowRadius = 4;
-    [btn setTitle:@"直链" forState:UIControlStateNormal];
-    [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    btn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
-    btn.alpha = 0.9;
-    [btn addTarget:[HKCButtonHelper shared] action:@selector(buttonTapped:) forControlEvents:UIControlEventTouchUpInside];
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:[HKCButtonHelper shared] action:@selector(pan:)];
-    [btn addGestureRecognizer:pan];
-    [window addSubview:btn];
-    gFloatingButton = btn;
+                UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
+                btn.frame = CGRectMake([UIScreen mainScreen].bounds.size.width - 70, 250, 56, 56);
+                btn.backgroundColor = [UIColor colorWithRed:0.4 green:0.48 blue:0.92 alpha:0.95];
+                btn.layer.cornerRadius = 28;
+                btn.layer.shadowColor = [UIColor blackColor].CGColor;
+                btn.layer.shadowOffset = CGSizeMake(0, 2);
+                btn.layer.shadowOpacity = 0.3;
+                btn.layer.shadowRadius = 4;
+                [btn setTitle:@"直链" forState:UIControlStateNormal];
+                [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+                btn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
+                btn.alpha = 0.9;
+                [btn addTarget:[HKCButtonHelper shared] action:@selector(buttonTapped:) forControlEvents:UIControlEventTouchUpInside];
+                UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:[HKCButtonHelper shared] action:@selector(pan:)];
+                [btn addGestureRecognizer:pan];
+                [window addSubview:btn];
+                DLog(@"悬浮按钮已添加");
+            } @catch (NSException *e) {
+                DLog(@"添加按钮异常: %@", e.reason);
+            }
+        });
+    });
+}
+
+#pragma mark - Hook UIApplication（更安全的入口）
+
+static int (*orig_application)(id, SEL, id, id);
+
+static int hkc_application(id self, SEL _cmd, id application, id launchOptions) {
+    int result = orig_application(self, _cmd, application, launchOptions);
+    DLog(@"App 已启动，准备添加悬浮按钮");
+    addFloatingButton();
+    return result;
 }
 
 __attribute__((constructor)) static void init() {
-    DLog(@"巨魔版已加载 v3.5.0");
-    Class cls = objc_getClass("UIWindow");
-    Method m = class_getInstanceMethod(cls, @selector(layoutSubviews));
-    orig_layoutSubviews = (void (*)(id, SEL))method_setImplementation(m, (IMP)hkc_layoutSubviews);
+    DLog(@"巨魔版已加载 v3.5.0 (arm64)");
+    @try {
+        Class cls = objc_getClass("UIApplication");
+        if (!cls) {
+            DLog(@"找不到 UIApplication 类");
+            return;
+        }
+        Method m = class_getInstanceMethod(cls, @selector(application:didFinishLaunchingWithOptions:));
+        if (m) {
+            orig_application = (int (*)(id, SEL, id, id))method_setImplementation(m, (IMP)hkc_application);
+            DLog(@"Hook UIApplication 成功");
+        } else {
+            DLog(@"找不到 didFinishLaunchingWithOptions 方法");
+        }
+    } @catch (NSException *e) {
+        DLog(@"Hook 异常: %@", e.reason);
+    }
 }
