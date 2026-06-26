@@ -19,23 +19,25 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
       
-    - name: Setup Theos
-      uses: Randomblock1/theos-action@v1
-      with:
-        theos-dir: 'theos'
-        
+    - name: Install dependencies
+      run: |
+        brew install ldid make
+        brew install --cask homebrew/cask-versions/temurin8 || true
+      
+    - name: Clone Theos
+      run: |
+        git clone --recursive https://github.com/theos/theos.git $HOME/theos
+      
     - name: Download iOS SDK
       run: |
-        mkdir -p theos/sdks
-        curl -L -o theos/sdks/iPhoneOS16.5.sdk.zip https://github.com/theos/sdks/archive/refs/heads/master.zip
-        cd theos/sdks
-        unzip -q iPhoneOS16.5.sdk.zip
-        mv sdks-master/* . || true
-        rm -rf sdks-master iPhoneOS16.5.sdk.zip
-        
+        curl -L -o $HOME/theos/sdks.zip https://github.com/theos/sdks/archive/refs/heads/master.zip
+        unzip -q $HOME/theos/sdks.zip -d $HOME/theos/
+        mv $HOME/theos/sdks-master/* $HOME/theos/sdks/ || true
+        rm -rf $HOME/theos/sdks.zip $HOME/theos/sdks-master
+      
     - name: Build dylib
       run: |
-        export THEOS=$(pwd)/theos
+        export THEOS=$HOME/theos
         export PATH=$THEOS/bin:$PATH
         make clean
         make
@@ -53,9 +55,6 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-      
     - name: Download artifact
       uses: actions/download-artifact@v4
       with:
