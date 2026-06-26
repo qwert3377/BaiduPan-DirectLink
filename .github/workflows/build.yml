@@ -22,7 +22,6 @@ jobs:
     - name: Install dependencies
       run: |
         brew install ldid make
-        brew install --cask homebrew/cask-versions/temurin8 || true
       
     - name: Clone Theos
       run: |
