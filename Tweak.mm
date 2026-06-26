@@ -159,7 +159,7 @@ static void renameFile(NSString *fileId, NSString *path, NSString *newName, void
 
 static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentPath, NSInteger fileSize) {
     NSString *originalName = fileName;
-    NSString *currentName = originalName;
+    (void)originalName; // 避免 unused 警告
     void (^finish)(NSString *, NSError *) = ^(NSString *dlink, NSError *err) {
         if (dlink) {
             [[UIPasteboard generalPasteboard] setString:dlink];
