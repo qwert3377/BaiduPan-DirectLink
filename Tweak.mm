@@ -1,6 +1,6 @@
 //
-//  百度网盘 SVIP 直链助手 - 巨魔/TrollStore 版 (修改版 v4.2)
-//  修复错误码2：支持手动修正路径 & 文件选择器
+//  百度网盘 SVIP 直链助手 - 巨魔/TrollStore 版 (修改版 v4.3)
+//  修复错误码2：路径+Token 统一输入 & 文件选择器
 //  纯 Runtime Swizzling，不依赖 Substrate/ElleKit
 //  通过 TrollFools 注入百度网盘 IPA
 //
@@ -18,7 +18,7 @@ static const NSInteger kLargeFileExtraWait = 10000;
 static const NSInteger kDlinkRetryCount = 3;
 
 static NSString *gManualToken = nil;
-static NSString *gCurrentPath = nil;  // nil 表示未获取
+static NSString *gCurrentPath = nil;
 
 #pragma mark - 工具函数
 
@@ -108,7 +108,6 @@ static void showAlert(NSString *title, NSString *msg) {
 
 static NSString * extractPathFromViewController(UIViewController *vc) {
     if (!vc) return nil;
-    // 扩展更多可能的属性名
     NSArray *pathKeys = @[
         @"currentPath", @"path", @"dirPath", @"currentDir", 
         @"m_path", @"_currentPath", @"_path", @"directoryPath",
@@ -124,7 +123,6 @@ static NSString * extractPathFromViewController(UIViewController *vc) {
             }
         } @catch (NSException *e) { }
     }
-    // 递归检查子视图控制器
     for (UIViewController *child in vc.childViewControllers) {
         NSString *p = extractPathFromViewController(child);
         if (p) return p;
@@ -356,18 +354,14 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
 
 - (void)showTokenConfirmDialog:(UIViewController *)vc fileName:(NSString *)fileName fileId:(NSString *)fileId fileSize:(NSInteger)fileSize {
     UIAlertController *input = [UIAlertController alertControllerWithTitle:@"确认信息" message:[NSString stringWithFormat:@"文件: %@\n路径: %@\n\n如需修改路径，请在下方输入", fileName, getCurrentPath()] preferredStyle:UIAlertControllerStyleAlert];
-
     [input addTextFieldWithConfigurationHandler:^(UITextField *tf) {
         tf.placeholder = @"bdstoken (从网页版获取)";
         tf.text = gManualToken ?: @"";
     }];
-
-    // 【新增】允许用户修改路径
     [input addTextFieldWithConfigurationHandler:^(UITextField *tf) {
         tf.placeholder = @"当前路径（可修改）";
         tf.text = getCurrentPath();
     }];
-
     [input addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [input addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         NSString *token = input.textFields[0].text;
@@ -384,7 +378,7 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
     [vc presentViewController:input animated:YES completion:nil];
 }
 
-// ========== 【修改】按钮点击：如果路径获取失败，提示用户手动输入 ==========
+// ========== 【修改】统一输入路径和 Token ==========
 - (void)buttonTapped:(UIButton *)sender {
     @try {
         UIViewController *vc = topViewController();
@@ -396,47 +390,62 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
             gCurrentPath = autoPath;
             DLog(@"自动获取到路径: %@", autoPath);
         } else {
-            DLog(@"自动获取路径失败，将使用默认路径或提示用户");
-            // 如果之前没有设置过路径，默认用 "/"
+            DLog(@"自动获取路径失败");
             if (!gCurrentPath || gCurrentPath.length == 0) {
                 gCurrentPath = @"/";
             }
         }
 
-        NSString *currentPath = getCurrentPath();
-        DLog(@"使用路径: %@", currentPath);
-
-        // 2. 如果路径是默认根目录，先提示用户确认/修改路径
-        if ([currentPath isEqualToString:@"/"]) {
-            UIAlertController *pathConfirm = [UIAlertController alertControllerWithTitle:@"路径确认" message:@"未能自动获取当前文件夹路径。\n\n如果您在根目录，请直接点「继续」；\n如果在子文件夹，请先输入正确路径（如 /传奇传用）" preferredStyle:UIAlertControllerStyleAlert];
-
-            [pathConfirm addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-                tf.placeholder = @"当前路径，例如: /传奇传用";
-                tf.text = @"/";
-            }];
-
-            [pathConfirm addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-            [pathConfirm addAction:[UIAlertAction actionWithTitle:@"继续" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                NSString *userPath = pathConfirm.textFields[0].text;
-                if (userPath.length > 0) {
-                    gCurrentPath = userPath;
-                }
-                [self proceedWithFileList:vc];
-            }]];
-
-            [vc presentViewController:pathConfirm animated:YES completion:nil];
-            return;
-        }
-
-        // 3. 路径已获取，直接获取文件列表
-        [self proceedWithFileList:vc];
+        // 2. 统一弹窗：路径 + Token
+        [self showSetupDialog:vc];
 
     } @catch (NSException *e) {
         DLog(@"按钮点击异常: %@", e.reason);
     }
 }
 
-// 【新增】提取出的文件列表获取逻辑
+// 【新增】统一的设置弹窗：路径 + bdstoken
+- (void)showSetupDialog:(UIViewController *)vc {
+    NSString *detectedPath = getCurrentPath();
+    NSString *pathStatus = [detectedPath isEqualToString:@"/"] ? @"⚠️ 未能自动获取，请手动输入" : @"✅ 已自动获取";
+
+    UIAlertController *setup = [UIAlertController alertControllerWithTitle:@"直链助手设置" message:[NSString stringWithFormat:@"%@\n\n请确认路径和输入 bdstoken", pathStatus] preferredStyle:UIAlertControllerStyleAlert];
+
+    [setup addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"当前路径，例如: /传奇传用";
+        tf.text = detectedPath;
+    }];
+
+    [setup addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"bdstoken (从网页版 pan.baidu.com 获取)";
+        tf.text = gManualToken ?: @"";
+    }];
+
+    [setup addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [setup addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        NSString *userPath = setup.textFields[0].text;
+        NSString *token = setup.textFields[1].text;
+
+        if (userPath.length > 0) {
+            gCurrentPath = userPath;
+        }
+        if (token.length > 0) {
+            gManualToken = token;
+        }
+
+        // 验证 bdstoken 是否已输入
+        if (!getBdstoken()) {
+            showAlert(@"错误", @"请先输入 bdstoken");
+            return;
+        }
+
+        DLog(@"用户设置路径: %@, token长度: %lu", getCurrentPath(), (unsigned long)(gManualToken.length)];
+        [self proceedWithFileList:vc];
+    }]];
+
+    [vc presentViewController:setup animated:YES completion:nil];
+}
+
 - (void)proceedWithFileList:(UIViewController *)vc {
     UIAlertController *loading = [UIAlertController alertControllerWithTitle:@"加载中" message:@"正在获取文件列表..." preferredStyle:UIAlertControllerStyleAlert];
     [vc presentViewController:loading animated:YES completion:nil];
@@ -445,7 +454,6 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
         [loading dismissViewControllerAnimated:YES completion:^{
             if (err) {
                 showAlert(@"获取文件列表失败", err.localizedDescription);
-                [self showManualInputDialog:vc];
                 return;
             }
             if (files.count == 0) {
@@ -555,7 +563,7 @@ static void swizzleInstanceMethod(Class cls, SEL originalSelector, SEL swizzledS
 #pragma mark - 初始化
 
 __attribute__((constructor)) static void init() {
-    DLog(@"巨魔版已加载 v4.2 (arm64) - 修复错误码2");
+    DLog(@"巨魔版已加载 v4.3 (arm64) - 修复错误码2");
     static dispatch_once_t swizzleOnce;
     dispatch_once(&swizzleOnce, ^{
         swizzleInstanceMethod([UIViewController class], @selector(viewDidAppear:), @selector(hkc_viewDidAppear:));
