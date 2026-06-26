@@ -23,7 +23,15 @@ jobs:
       uses: Randomblock1/theos-action@v1
       with:
         theos-dir: 'theos'
-        theos-sdks: 'https://github.com/theos/sdks'
+        
+    - name: Download iOS SDK
+      run: |
+        mkdir -p theos/sdks
+        curl -L -o theos/sdks/iPhoneOS16.5.sdk.zip https://github.com/theos/sdks/archive/refs/heads/master.zip
+        cd theos/sdks
+        unzip -q iPhoneOS16.5.sdk.zip
+        mv sdks-master/* . || true
+        rm -rf sdks-master iPhoneOS16.5.sdk.zip
         
     - name: Build dylib
       run: |
