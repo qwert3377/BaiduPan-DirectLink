@@ -1,6 +1,6 @@
 //
-//  百度网盘 SVIP 直链助手 - 巨魔/TrollStore 版 (修改版 v4.1)
-//  修复错误码2：支持自动获取当前路径 & 文件选择器
+//  百度网盘 SVIP 直链助手 - 巨魔/TrollStore 版 (修改版 v4.2)
+//  修复错误码2：支持手动修正路径 & 文件选择器
 //  纯 Runtime Swizzling，不依赖 Substrate/ElleKit
 //  通过 TrollFools 注入百度网盘 IPA
 //
@@ -18,7 +18,7 @@ static const NSInteger kLargeFileExtraWait = 10000;
 static const NSInteger kDlinkRetryCount = 3;
 
 static NSString *gManualToken = nil;
-static NSString *gCurrentPath = @"/";
+static NSString *gCurrentPath = nil;  // nil 表示未获取
 
 #pragma mark - 工具函数
 
@@ -82,7 +82,7 @@ static NSString * getBdstoken(void) {
 }
 
 static NSString * getCurrentPath(void) {
-    if (gCurrentPath && gCurrentPath.length > 0 && ![gCurrentPath isEqualToString:@"/"]) {
+    if (gCurrentPath && gCurrentPath.length > 0) {
         return gCurrentPath;
     }
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
@@ -108,7 +108,13 @@ static void showAlert(NSString *title, NSString *msg) {
 
 static NSString * extractPathFromViewController(UIViewController *vc) {
     if (!vc) return nil;
-    NSArray *pathKeys = @[@"currentPath", @"path", @"dirPath", @"currentDir", @"m_path", @"_currentPath"];
+    // 扩展更多可能的属性名
+    NSArray *pathKeys = @[
+        @"currentPath", @"path", @"dirPath", @"currentDir", 
+        @"m_path", @"_currentPath", @"_path", @"directoryPath",
+        @"currentDirectoryPath", @"m_directoryPath", @"folderPath",
+        @"currentFolderPath", @"m_currentPath"
+    ];
     for (NSString *key in pathKeys) {
         @try {
             id val = [vc valueForKey:key];
@@ -118,6 +124,7 @@ static NSString * extractPathFromViewController(UIViewController *vc) {
             }
         } @catch (NSException *e) { }
     }
+    // 递归检查子视图控制器
     for (UIViewController *child in vc.childViewControllers) {
         NSString *p = extractPathFromViewController(child);
         if (p) return p;
@@ -247,6 +254,7 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
     } else {
         fullPath = [NSString stringWithFormat:@"%@/%@", currentPath, originalName];
     }
+    DLog(@"最终请求路径: %@", fullPath);
     if (![originalName hasSuffix:@".pdf"]) {
         NSString *renamedName = [originalName stringByAppendingString:@".pdf"];
         DLog(@"开始重命名: %@ -> %@", fullPath, renamedName);
@@ -347,61 +355,116 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
 }
 
 - (void)showTokenConfirmDialog:(UIViewController *)vc fileName:(NSString *)fileName fileId:(NSString *)fileId fileSize:(NSInteger)fileSize {
-    UIAlertController *input = [UIAlertController alertControllerWithTitle:@"确认信息" message:[NSString stringWithFormat:@"文件: %@\n路径: %@", fileName, getCurrentPath()] preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *input = [UIAlertController alertControllerWithTitle:@"确认信息" message:[NSString stringWithFormat:@"文件: %@\n路径: %@\n\n如需修改路径，请在下方输入", fileName, getCurrentPath()] preferredStyle:UIAlertControllerStyleAlert];
+
     [input addTextFieldWithConfigurationHandler:^(UITextField *tf) {
         tf.placeholder = @"bdstoken (从网页版获取)";
         tf.text = gManualToken ?: @"";
     }];
+
+    // 【新增】允许用户修改路径
+    [input addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"当前路径（可修改）";
+        tf.text = getCurrentPath();
+    }];
+
     [input addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     [input addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         NSString *token = input.textFields[0].text;
+        NSString *customPath = input.textFields[1].text;
         if (token.length > 0) {
             gManualToken = token;
         }
+        if (customPath.length > 0) {
+            gCurrentPath = customPath;
+        }
+        DLog(@"用户确认路径: %@, 文件: %@", getCurrentPath(), fileName);
         runPipeline(fileName, fileId, getCurrentPath(), fileSize);
     }]];
     [vc presentViewController:input animated:YES completion:nil];
 }
 
+// ========== 【修改】按钮点击：如果路径获取失败，提示用户手动输入 ==========
 - (void)buttonTapped:(UIButton *)sender {
     @try {
         UIViewController *vc = topViewController();
         if (!vc) return;
+
+        // 1. 尝试自动获取路径
         NSString *autoPath = getPathFromNavStack();
         if (autoPath) {
             gCurrentPath = autoPath;
             DLog(@"自动获取到路径: %@", autoPath);
+        } else {
+            DLog(@"自动获取路径失败，将使用默认路径或提示用户");
+            // 如果之前没有设置过路径，默认用 "/"
+            if (!gCurrentPath || gCurrentPath.length == 0) {
+                gCurrentPath = @"/";
+            }
         }
+
         NSString *currentPath = getCurrentPath();
         DLog(@"使用路径: %@", currentPath);
-        UIAlertController *loading = [UIAlertController alertControllerWithTitle:@"加载中" message:@"正在获取文件列表..." preferredStyle:UIAlertControllerStyleAlert];
-        [vc presentViewController:loading animated:YES completion:nil];
-        fetchFileList(currentPath, ^(NSArray *files, NSError *err) {
-            [loading dismissViewControllerAnimated:YES completion:^{
-                if (err) {
-                    [self showManualInputDialog:vc];
-                    return;
-                }
-                if (files.count == 0) {
-                    showAlert(@"提示", @"当前目录下没有文件");
-                    return;
-                }
-                NSMutableArray *fileItems = [NSMutableArray array];
-                for (NSDictionary *f in files) {
-                    if ([f[@"isdir"] integerValue] == 0) {
-                        [fileItems addObject:f];
-                    }
-                }
-                if (fileItems.count == 0) {
-                    showAlert(@"提示", @"当前目录下没有文件，只有文件夹");
-                    return;
-                }
-                [self showFilePicker:vc files:fileItems];
+
+        // 2. 如果路径是默认根目录，先提示用户确认/修改路径
+        if ([currentPath isEqualToString:@"/"]) {
+            UIAlertController *pathConfirm = [UIAlertController alertControllerWithTitle:@"路径确认" message:@"未能自动获取当前文件夹路径。\n\n如果您在根目录，请直接点「继续」；\n如果在子文件夹，请先输入正确路径（如 /传奇传用）" preferredStyle:UIAlertControllerStyleAlert];
+
+            [pathConfirm addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+                tf.placeholder = @"当前路径，例如: /传奇传用";
+                tf.text = @"/";
             }];
-        });
+
+            [pathConfirm addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+            [pathConfirm addAction:[UIAlertAction actionWithTitle:@"继续" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                NSString *userPath = pathConfirm.textFields[0].text;
+                if (userPath.length > 0) {
+                    gCurrentPath = userPath;
+                }
+                [self proceedWithFileList:vc];
+            }]];
+
+            [vc presentViewController:pathConfirm animated:YES completion:nil];
+            return;
+        }
+
+        // 3. 路径已获取，直接获取文件列表
+        [self proceedWithFileList:vc];
+
     } @catch (NSException *e) {
         DLog(@"按钮点击异常: %@", e.reason);
     }
+}
+
+// 【新增】提取出的文件列表获取逻辑
+- (void)proceedWithFileList:(UIViewController *)vc {
+    UIAlertController *loading = [UIAlertController alertControllerWithTitle:@"加载中" message:@"正在获取文件列表..." preferredStyle:UIAlertControllerStyleAlert];
+    [vc presentViewController:loading animated:YES completion:nil];
+
+    fetchFileList(getCurrentPath(), ^(NSArray *files, NSError *err) {
+        [loading dismissViewControllerAnimated:YES completion:^{
+            if (err) {
+                showAlert(@"获取文件列表失败", err.localizedDescription);
+                [self showManualInputDialog:vc];
+                return;
+            }
+            if (files.count == 0) {
+                showAlert(@"提示", @"当前目录下没有文件");
+                return;
+            }
+            NSMutableArray *fileItems = [NSMutableArray array];
+            for (NSDictionary *f in files) {
+                if ([f[@"isdir"] integerValue] == 0) {
+                    [fileItems addObject:f];
+                }
+            }
+            if (fileItems.count == 0) {
+                showAlert(@"提示", @"当前目录下没有文件，只有文件夹");
+                return;
+            }
+            [self showFilePicker:vc files:fileItems];
+        }];
+    });
 }
 
 - (void)pan:(UIPanGestureRecognizer *)pan {
@@ -492,7 +555,7 @@ static void swizzleInstanceMethod(Class cls, SEL originalSelector, SEL swizzledS
 #pragma mark - 初始化
 
 __attribute__((constructor)) static void init() {
-    DLog(@"巨魔版已加载 v4.1 (arm64) - 修复错误码2");
+    DLog(@"巨魔版已加载 v4.2 (arm64) - 修复错误码2");
     static dispatch_once_t swizzleOnce;
     dispatch_once(&swizzleOnce, ^{
         swizzleInstanceMethod([UIViewController class], @selector(viewDidAppear:), @selector(hkc_viewDidAppear:));
