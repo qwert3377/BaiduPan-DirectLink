@@ -1,0 +1,77 @@
+name: Build BaiduPanTroll
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Tweak.mm'
+      - 'Makefile'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      
+    - name: Setup Theos
+      uses: Randomblock1/theos-action@v1
+      with:
+        theos-dir: 'theos'
+        theos-sdks: 'https://github.com/theos/sdks'
+        
+    - name: Build dylib
+      run: |
+        export THEOS=$(pwd)/theos
+        export PATH=$THEOS/bin:$PATH
+        make clean
+        make
+        
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: BaiduPanTroll.dylib
+        path: obj/BaiduPanTroll.dylib
+        if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: macos-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      
+    - name: Download artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: BaiduPanTroll.dylib
+        path: ./
+        
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: BaiduPanTroll.dylib
+        tag_name: v${{ github.run_number }}
+        name: Release v${{ github.run_number }}
+        body: |
+          自动编译生成的 BaiduPanTroll.dylib
+          
+          ## 使用方法
+          1. 下载 `BaiduPanTroll.dylib`
+          2. 使用 TrollFools 注入百度网盘 IPA
+          3. 打开 App，点击悬浮「直链」按钮
+          
+          ## 注意事项
+          - 需要登录百度账号
+          - 大文件（>150MB）需 SVIP
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
