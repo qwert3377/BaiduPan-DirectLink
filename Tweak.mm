@@ -1,5 +1,6 @@
 //
-//  百度网盘 SVIP 直链助手 - 巨魔/TrollStore 版
+//  百度网盘 SVIP 直链助手 - 巨魔/TrollStore 版 (修改版 v4.0)
+//  修复错误码2：支持自动获取当前路径 & 文件选择器
 //  纯 Runtime Swizzling，不依赖 Substrate/ElleKit
 //  通过 TrollFools 注入百度网盘 IPA
 //
@@ -17,6 +18,7 @@ static const NSInteger kLargeFileExtraWait = 10000;
 static const NSInteger kDlinkRetryCount = 3;
 
 static NSString *gManualToken = nil;
+static NSString *gCurrentPath = @"/";  // 全局缓存当前路径
 
 #pragma mark - 工具函数
 
@@ -70,18 +72,22 @@ static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *header
 }
 
 static NSString * getBdstoken(void) {
-    // 优先使用手动输入的 token
     if (gManualToken && gManualToken.length > 0) {
         return gManualToken;
     }
-    // 尝试从 NSUserDefaults 读取
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSString *token = [defaults stringForKey:@"bdstoken"];
     if (token.length > 0) return token;
     return nil;
 }
 
+// ========== 【修改1】改进 getCurrentPath，优先使用全局缓存 ==========
 static NSString * getCurrentPath(void) {
+    // 优先使用运行时捕获的路径
+    if (gCurrentPath && gCurrentPath.length > 0 && ![gCurrentPath isEqualToString:@"/"]) {
+        return gCurrentPath;
+    }
+    // 尝试从 NSUserDefaults 读取（兼容旧版）
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSString *path = [defaults stringForKey:@"currentPath"];
     if (path.length > 0) return path;
@@ -101,6 +107,81 @@ static void showAlert(NSString *title, NSString *msg) {
     [vc presentViewController:alert animated:YES completion:nil];
 }
 
+#pragma mark - 【新增】通过百度网盘内部类获取当前路径
+
+// 尝试从百度网盘的 ViewController 中读取当前路径
+static NSString * extractPathFromViewController(UIViewController *vc) {
+    if (!vc) return nil;
+
+    // 百度网盘常见路径属性名（通过 class-dump 常见）
+    NSArray *pathKeys = @[@"currentPath", @"path", @"dirPath", @"currentDir", @"m_path", @"_currentPath"];
+
+    for (NSString *key in pathKeys) {
+        @try {
+            id val = [vc valueForKey:key];
+            if (val && [val isKindOfClass:[NSString class]] && [(NSString *)val length] > 0) {
+                DLog(@"从 VC(%@) 读取到路径 [%@]: %@", NSStringFromClass([vc class]), key, val);
+                return val;
+            }
+        } @catch (NSException *e) { /* ignore */ }
+    }
+
+    // 递归检查子视图控制器
+    for (UIViewController *child in vc.childViewControllers) {
+        NSString *p = extractPathFromViewController(child);
+        if (p) return p;
+    }
+
+    return nil;
+}
+
+// 从导航栈顶部获取路径
+static NSString * getPathFromNavStack(void) {
+    UIViewController *vc = topViewController();
+    if (!vc) return nil;
+
+    NSString *path = extractPathFromViewController(vc);
+    if (path) return path;
+
+    // 如果是导航控制器，尝试从栈中每个 VC 获取
+    if ([vc.navigationController isKindOfClass:[UINavigationController class]]) {
+        NSArray *vcs = vc.navigationController.viewControllers;
+        for (NSInteger i = vcs.count - 1; i >= 0; i--) {
+            path = extractPathFromViewController(vcs[i]);
+            if (path) return path;
+        }
+    }
+
+    return nil;
+}
+
+#pragma mark - 【新增】获取当前目录下的文件列表
+
+static void fetchFileList(NSString *path, void (^completion)(NSArray *files, NSError *err)) {
+    NSString *token = getBdstoken();
+    if (!token) {
+        completion(nil, [NSError errorWithDomain:@"BaiduPan" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"未获取到 bdstoken"}]);
+        return;
+    }
+
+    NSString *encPath = [path stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+    NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/list?bdstoken=%@&channel=chunlei&clienttype=0&web=1&app_id=250528&dir=%@&order=time&desc=1&showempty=0&page=1&num=100&t=%ld",
+                     token, encPath, (long)([[NSDate date] timeIntervalSince1970] * 1000)];
+
+    DLog(@"请求文件列表: %@", url);
+    bdAsyncRequest(url, @"GET", nil, nil, ^(id json, NSError *err) {
+        if (err) { completion(nil, err); return; }
+        NSInteger errnoVal = [json[@"errno"] integerValue];
+        if (errnoVal == 0) {
+            NSArray *list = json[@"list"] ?: @[];
+            completion(list, nil);
+        } else {
+            NSString *msg = json[@"errmsg"] ?: [NSString stringWithFormat:@"错误码: %ld", (long)errnoVal];
+            completion(nil, [NSError errorWithDomain:@"BaiduPan" code:errnoVal userInfo:@{NSLocalizedDescriptionKey: msg}]);
+        }
+    });
+}
+
 #pragma mark - 核心 API
 
 static void fetchDlink(NSString *filePath, NSInteger retry, void (^completion)(NSString *dlink, NSError *err)) {
@@ -109,7 +190,14 @@ static void fetchDlink(NSString *filePath, NSInteger retry, void (^completion)(N
         completion(nil, [NSError errorWithDomain:@"BaiduPan" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"未获取到 bdstoken，请确保已登录或手动输入 token"}]);
         return;
     }
-    NSString *encPath = [filePath stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+
+    // 确保路径以 / 开头
+    NSString *normalizedPath = filePath;
+    if (![normalizedPath hasPrefix:@"/"]) {
+        normalizedPath = [@"/" stringByAppendingString:normalizedPath];
+    }
+
+    NSString *encPath = [normalizedPath stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
     NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/filemetas?bdstoken=%@&channel=chunlei&clienttype=0&web=1&app_id=250528&dlink=1&path=%@&t=%ld",
                      token, encPath, (long)([[NSDate date] timeIntervalSince1970] * 1000)];
     DLog(@"请求 filemetas: %@", url);
@@ -176,11 +264,19 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
             showAlert(@"获取失败", err.localizedDescription);
         }
     };
+
+    // 构建完整路径
+    NSString *fullPath;
+    if ([currentPath isEqualToString:@"/"]) {
+        fullPath = [NSString stringWithFormat:@"/%@", originalName];
+    } else {
+        fullPath = [NSString stringWithFormat:@"%@/%@", currentPath, originalName];
+    }
+
     if (![originalName hasSuffix:@".pdf"]) {
         NSString *renamedName = [originalName stringByAppendingString:@".pdf"];
-        NSString *originalPath = [currentPath isEqualToString:@"/"] ? [NSString stringWithFormat:@"/%@", originalName] : [NSString stringWithFormat:@"%@/%@", currentPath, originalName];
-        DLog(@"开始重命名: %@ -> %@", originalName, renamedName);
-        renameFile(fileId, originalPath, renamedName, ^(BOOL success, NSError *err) {
+        DLog(@"开始重命名: %@ -> %@", fullPath, renamedName);
+        renameFile(fileId, fullPath, renamedName, ^(BOOL success, NSError *err) {
             if (!success) {
                 showAlert(@"重命名失败", err.localizedDescription);
                 return;
@@ -204,10 +300,48 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
             });
         });
     } else {
-        NSString *filePath = [currentPath isEqualToString:@"/"] ? [NSString stringWithFormat:@"/%@", originalName] : [NSString stringWithFormat:@"%@/%@", currentPath, originalName];
-        fetchDlink(filePath, 0, finish);
+        fetchDlink(fullPath, 0, finish);
     }
 }
+
+#pragma mark - 【新增】文件选择器
+
+@interface HKCFilePickerHelper : NSObject <UITableViewDataSource, UITableViewDelegate>
+@property (nonatomic, strong) NSArray *fileList;
+@property (nonatomic, strong) UIAlertController *alertController;
+@property (nonatomic, copy) void (^selectedCallback)(NSDictionary *fileInfo);
+@end
+
+@implementation HKCFilePickerHelper
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    return self.fileList.count;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    static NSString *cellId = @"HKCFileCell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:cellId];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:cellId];
+    }
+    NSDictionary *file = self.fileList[indexPath.row];
+    NSString *name = file[@"server_filename"] ?: file[@"path"];
+    NSInteger isDir = [file[@"isdir"] integerValue];
+    cell.textLabel.text = name;
+    cell.detailTextLabel.text = isDir ? @"📁 文件夹" : [NSString stringWithFormat:@"📄 %@", file[@"size"]];
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    NSDictionary *file = self.fileList[indexPath.row];
+    if (self.selectedCallback) {
+        self.selectedCallback(file);
+    }
+    [self.alertController dismissViewControllerAnimated:YES completion:nil];
+}
+
+@end
 
 #pragma mark - 悬浮按钮 Helper
 
@@ -226,32 +360,144 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
     return instance;
 }
 
+// ========== 【修改2】按钮点击后先尝试自动获取路径，再显示文件选择器 ==========
 - (void)buttonTapped:(UIButton *)sender {
     @try {
         UIViewController *vc = topViewController();
         if (!vc) return;
-        UIAlertController *input = [UIAlertController alertControllerWithTitle:@"复制直链" message:@"输入文件名和 bdstoken" preferredStyle:UIAlertControllerStyleAlert];
-        [input addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-            tf.placeholder = @"文件名，例如: example.zip";
+
+        // 1. 先尝试自动获取当前路径
+        NSString *autoPath = getPathFromNavStack();
+        if (autoPath) {
+            gCurrentPath = autoPath;
+            DLog(@"自动获取到路径: %@", autoPath);
+        }
+
+        // 2. 获取当前路径（可能来自自动检测或缓存）
+        NSString *currentPath = getCurrentPath();
+        DLog(@"使用路径: %@", currentPath);
+
+        // 3. 获取该路径下的文件列表，让用户选择
+        UIAlertController *loading = [UIAlertController alertControllerWithTitle:@"加载中" message:@"正在获取文件列表..." preferredStyle:UIAlertControllerStyleAlert];
+        [vc presentViewController:loading animated:YES completion:nil];
+
+        fetchFileList(currentPath, ^(NSArray *files, NSError *err) {
+            [loading dismissViewControllerAnimated:YES completion:^{
+                if (err) {
+                    // 文件列表获取失败，回退到手动输入模式
+                    [self showManualInputDialog:vc];
+                    return;
+                }
+
+                if (files.count == 0) {
+                    showAlert(@"提示", @"当前目录下没有文件");
+                    return;
+                }
+
+                // 过滤出文件（排除文件夹）
+                NSMutableArray *fileItems = [NSMutableArray array];
+                for (NSDictionary *f in files) {
+                    if ([f[@"isdir"] integerValue] == 0) {
+                        [fileItems addObject:f];
+                    }
+                }
+
+                if (fileItems.count == 0) {
+                    showAlert(@"提示", @"当前目录下没有文件，只有文件夹");
+                    return;
+                }
+
+                // 显示文件选择器
+                [self showFilePicker:vc files:fileItems];
+            }];
         }];
-        [input addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-            tf.placeholder = @"bdstoken (从网页版获取)";
-            tf.text = gManualToken ?: @"";
-        }];
-        [input addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-        [input addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            NSString *fileName = input.textFields[0].text;
-            NSString *token = input.textFields[1].text;
-            if (fileName.length == 0) return;
-            if (token.length > 0) {
-                gManualToken = token;
-            }
-            runPipeline(fileName, @"0", getCurrentPath(), 0);
-        }]];
-        [vc presentViewController:input animated:YES completion:nil];
+
     } @catch (NSException *e) {
         DLog(@"按钮点击异常: %@", e.reason);
     }
+}
+
+// 显示文件选择弹窗
+- (void)showFilePicker:(UIViewController *)vc files:(NSArray *)files {
+    UIAlertController *picker = [UIAlertController alertControllerWithTitle:@"选择文件" message:[NSString stringWithFormat:@"当前路径: %@\n共 %lu 个文件", getCurrentPath(), (unsigned long)files.count] preferredStyle:UIAlertControllerStyleActionSheet];
+
+    for (NSDictionary *file in files) {
+        NSString *name = file[@"server_filename"] ?: file[@"path"];
+        NSInteger size = [file[@"size"] integerValue];
+        NSString *sizeStr = size > 1024*1024 ? [NSString stringWithFormat:@"%.1fMB", size/1024.0/1024.0] : [NSString stringWithFormat:@"%.1fKB", size/1024.0];
+        NSString *title = [NSString stringWithFormat:@"%@ (%@)", name, sizeStr];
+
+        [picker addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            NSString *fileName = file[@"server_filename"];
+            NSString *fileId = [NSString stringWithFormat:@"%@", file[@"fs_id"]];
+            NSInteger fileSize = [file[@"size"] integerValue];
+
+            // 先让用户输入/确认 bdstoken
+            [self showTokenConfirmDialog:vc fileName:fileName fileId:fileId fileSize:fileSize];
+        }]];
+    }
+
+    [picker addAction:[UIAlertAction actionWithTitle:@"手动输入文件名" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        [self showManualInputDialog:vc];
+    }]];
+
+    [picker addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+
+    // iPad 适配
+    if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
+        UIPopoverPresentationController *pop = picker.popoverPresentationController;
+        if (pop) {
+            pop.sourceView = vc.view;
+            pop.sourceRect = CGRectMake(vc.view.bounds.size.width/2, vc.view.bounds.size.height/2, 1, 1);
+            pop.permittedArrowDirections = 0;
+        }
+    }
+
+    [vc presentViewController:picker animated:YES completion:nil];
+}
+
+// 确认/输入 bdstoken
+- (void)showTokenConfirmDialog:(UIViewController *)vc fileName:(NSString *)fileName fileId:(NSString *)fileId fileSize:(NSInteger)fileSize {
+    UIAlertController *input = [UIAlertController alertControllerWithTitle:@"确认信息" message:[NSString stringWithFormat:@"文件: %@\n路径: %@", fileName, getCurrentPath()] preferredStyle:UIAlertControllerStyleAlert];
+
+    [input addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"bdstoken (从网页版获取)";
+        tf.text = gManualToken ?: @"";
+    }];
+
+    [input addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [input addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        NSString *token = input.textFields[0].text;
+        if (token.length > 0) {
+            gManualToken = token;
+        }
+        runPipeline(fileName, fileId, getCurrentPath(), fileSize);
+    }]];
+
+    [vc presentViewController:input animated:YES completion:nil];
+}
+
+// 手动输入模式（兼容旧版）
+- (void)showManualInputDialog:(UIViewController *)vc {
+    UIAlertController *input = [UIAlertController alertControllerWithTitle:@"复制直链" message:@"输入文件名和 bdstoken" preferredStyle:UIAlertControllerStyleAlert];
+    [input addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"文件名，例如: example.zip";
+    }];
+    [input addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"bdstoken (从网页版获取)";
+        tf.text = gManualToken ?: @"";
+    }];
+    [input addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [input addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        NSString *fileName = input.textFields[0].text;
+        NSString *token = input.textFields[1].text;
+        if (fileName.length == 0) return;
+        if (token.length > 0) {
+            gManualToken = token;
+        }
+        runPipeline(fileName, @"0", getCurrentPath(), 0);
+    }]];
+    [vc presentViewController:input animated:YES completion:nil];
 }
 
 - (void)pan:(UIPanGestureRecognizer *)pan {
@@ -306,10 +552,57 @@ static void addFloatingButton(void) {
     });
 }
 
-#pragma mark - 使用 NSNotification 监听（最安全）
+#pragma mark - 【新增】Method Swizzling 拦截百度网盘路径变化
+
+// 通用 Swizzling 工具
+static void swizzleInstanceMethod(Class cls, SEL originalSelector, SEL swizzledSelector) {
+    Method originalMethod = class_getInstanceMethod(cls, originalSelector);
+    Method swizzledMethod = class_getInstanceMethod(cls, swizzledSelector);
+    if (!originalMethod || !swizzledMethod) return;
+
+    BOOL didAddMethod = class_addMethod(cls, originalSelector,
+                                        method_getImplementation(swizzledMethod),
+                                        method_getTypeEncoding(swizzledMethod));
+    if (didAddMethod) {
+        class_replaceMethod(cls, swizzledSelector,
+                           method_getImplementation(originalMethod),
+                           method_getTypeEncoding(originalMethod));
+    } else {
+        method_exchangeImplementations(originalMethod, swizzledMethod);
+    }
+}
+
+// 拦截 viewDidAppear 来捕获路径（通用方案）
+@interface UIViewController (HKCPathHook)
+@end
+
+@implementation UIViewController (HKCPathHook)
+
+- (void)hkc_viewDidAppear:(BOOL)animated {
+    [self hkc_viewDidAppear:animated];
+
+    // 尝试从当前 VC 提取路径
+    NSString *path = extractPathFromViewController(self);
+    if (path && path.length > 0) {
+        gCurrentPath = path;
+        DLog(@"[Swizzle] 捕获路径: %@ from %@", path, NSStringFromClass([self class]));
+    }
+}
+
+@end
+
+#pragma mark - 初始化
 
 __attribute__((constructor)) static void init() {
-    DLog(@"巨魔版已加载 v3.5.0 (arm64)");
+    DLog(@"巨魔版已加载 v4.0 (arm64) - 修复错误码2");
+
+    // 注册 Swizzle：拦截所有 UIViewController 的 viewDidAppear
+    static dispatch_once_t swizzleOnce;
+    dispatch_once(&swizzleOnce, ^{
+        swizzleInstanceMethod([UIViewController class], @selector(viewDidAppear:), @selector(hkc_viewDidAppear:));
+        DLog(@"UIViewController swizzle 已注册");
+    });
+
     @try {
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
                                                             object:nil
