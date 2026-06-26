@@ -1,7 +1,7 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v4.5
-//  Fix error code 2: fallback to locatedownload API + refresh cache after rename
-//  Reference: Tampermonkey script v3.5.0
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v4.6
+//  Fix: add Cookie from NSHTTPCookieStorage + strict path encoding
+//  Reference: working Tampermonkey script v3.5.0
 //
 
 #import <UIKit/UIKit.h>
@@ -39,12 +39,34 @@ static UIViewController * topViewController(void) {
     return vc;
 }
 
+// ========== 【修改】bdAsyncRequest: 添加 Cookie 和 User-Agent ==========
 static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *headers, NSString *body, void (^handler)(id json, NSError *err)) {
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
     req.HTTPMethod = method ?: @"GET";
     req.timeoutInterval = 20;
-    [req setValue:@"https://pan.baidu.com/" forHTTPHeaderField:@"Referer"];
+
+    // 模拟浏览器请求头
+    [req setValue:@"https://pan.baidu.com/disk/main" forHTTPHeaderField:@"Referer"];
     [req setValue:@"XMLHttpRequest" forHTTPHeaderField:@"X-Requested-With"];
+    [req setValue:@"application/json, text/javascript, */*; q=0.01" forHTTPHeaderField:@"Accept"];
+    [req setValue:@"zh-CN,zh;q=0.9" forHTTPHeaderField:@"Accept-Language"];
+    [req setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1" forHTTPHeaderField:@"User-Agent"];
+
+    // 尝试从 CookieStorage 获取百度网盘的 Cookie
+    NSHTTPCookieStorage *cookieStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
+    NSArray *cookies = [cookieStorage cookiesForURL:[NSURL URLWithString:@"https://pan.baidu.com"]];
+    if (cookies.count > 0) {
+        NSMutableArray *cookieStrings = [NSMutableArray array];
+        for (NSHTTPCookie *cookie in cookies) {
+            [cookieStrings addObject:[NSString stringWithFormat:@"%@=%@", cookie.name, cookie.value]];
+        }
+        NSString *cookieHeader = [cookieStrings componentsJoinedByString:@"; "];
+        [req setValue:cookieHeader forHTTPHeaderField:@"Cookie"];
+        DLog(@"Cookie added: %lu cookies", (unsigned long)cookies.count);
+    } else {
+        DLog(@"No cookies found for pan.baidu.com");
+    }
+
     if (headers) {
         [headers enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
             [req setValue:obj forHTTPHeaderField:key];
@@ -54,6 +76,7 @@ static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *header
         req.HTTPBody = [body dataUsingEncoding:NSUTF8StringEncoding];
         [req setValue:@"application/x-www-form-urlencoded; charset=UTF-8" forHTTPHeaderField:@"Content-Type"];
     }
+
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (error) { handler(nil, error); return; }
@@ -138,13 +161,20 @@ static NSString * getPathFromNavStack(void) {
     return nil;
 }
 
+// ========== 【修改】严格编码 path 参数，模拟 JS encodeURIComponent ==========
+static NSString * strictEncodeURIComponent(NSString *str) {
+    NSMutableCharacterSet *allowed = [NSMutableCharacterSet alphanumericCharacterSet];
+    [allowed addCharactersInString:@"-_.!~*'()"];
+    return [str stringByAddingPercentEncodingWithAllowedCharacters:allowed];
+}
+
 static void fetchFileList(NSString *path, void (^completion)(NSArray *files, NSError *err)) {
     NSString *token = getBdstoken();
     if (!token) {
         completion(nil, [NSError errorWithDomain:@"BaiduPan" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"No bdstoken"}]);
         return;
     }
-    NSString *encPath = [path stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+    NSString *encPath = strictEncodeURIComponent(path);
     NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/list?bdstoken=%@&channel=chunlei&clienttype=0&web=1&app_id=250528&dir=%@&order=time&desc=1&showempty=0&page=1&num=100&t=%ld",
                      token, encPath, (long)([[NSDate date] timeIntervalSince1970] * 1000)];
     DLog(@"Fetch list: %@", url);
@@ -161,7 +191,6 @@ static void fetchFileList(NSString *path, void (^completion)(NSArray *files, NSE
     });
 }
 
-// ========== 【新增】从 JSON 中递归提取 dlink ==========
 static NSString * digOutDlink(id obj) {
     if (!obj || ![obj isKindOfClass:[NSDictionary class]]) return nil;
     NSDictionary *dict = obj;
@@ -181,7 +210,6 @@ static NSString * digOutDlink(id obj) {
     return nil;
 }
 
-// ========== 【新增】filemetas API ==========
 static void fetchDlinkViaFilemetas(NSString *filePath, NSInteger retry, void (^completion)(NSString *dlink, NSError *err)) {
     NSString *token = getBdstoken();
     if (!token) {
@@ -192,7 +220,11 @@ static void fetchDlinkViaFilemetas(NSString *filePath, NSInteger retry, void (^c
     if (![normalizedPath hasPrefix:@"/"]) {
         normalizedPath = [@"/" stringByAppendingString:normalizedPath];
     }
-    NSString *encPath = [normalizedPath stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+    // 确保路径末尾没有 /
+    if ([normalizedPath length] > 1 && [normalizedPath hasSuffix:@"/"]) {
+        normalizedPath = [normalizedPath substringToIndex:[normalizedPath length] - 1];
+    }
+    NSString *encPath = strictEncodeURIComponent(normalizedPath);
     NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/filemetas?bdstoken=%@&channel=chunlei&clienttype=0&web=1&app_id=250528&dlink=1&path=%@&t=%ld",
                      token, encPath, (long)([[NSDate date] timeIntervalSince1970] * 1000)];
     DLog(@"Fetch filemetas: %@", url);
@@ -208,6 +240,7 @@ static void fetchDlinkViaFilemetas(NSString *filePath, NSInteger retry, void (^c
             return;
         }
         NSInteger errnoVal = [json[@"errno"] integerValue];
+        DLog(@"filemetas response: errno=%ld, json=%@", (long)errnoVal, json);
         if (errnoVal == 0) {
             NSArray *info = json[@"info"] ?: json[@"list"];
             if ([info count] > 0) {
@@ -228,7 +261,6 @@ static void fetchDlinkViaFilemetas(NSString *filePath, NSInteger retry, void (^c
     });
 }
 
-// ========== 【新增】locatedownload API (备用方案) ==========
 static void fetchDlinkViaLocateDownload(NSString *filePath, NSInteger retry, void (^completion)(NSString *dlink, NSError *err)) {
     NSString *token = getBdstoken();
     if (!token) {
@@ -239,7 +271,10 @@ static void fetchDlinkViaLocateDownload(NSString *filePath, NSInteger retry, voi
     if (![normalizedPath hasPrefix:@"/"]) {
         normalizedPath = [@"/" stringByAppendingString:normalizedPath];
     }
-    NSString *encPath = [normalizedPath stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+    if ([normalizedPath length] > 1 && [normalizedPath hasSuffix:@"/"]) {
+        normalizedPath = [normalizedPath substringToIndex:[normalizedPath length] - 1];
+    }
+    NSString *encPath = strictEncodeURIComponent(normalizedPath);
     NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/locatedownload?clienttype=0&app_id=250528&web=1&channel=chunlei&path=%@&origin=pdf&use=1&bdstoken=%@",
                      encPath, token];
     DLog(@"Fetch locatedownload: %@", url);
@@ -255,6 +290,7 @@ static void fetchDlinkViaLocateDownload(NSString *filePath, NSInteger retry, voi
             return;
         }
         NSInteger errnoVal = [json[@"errno"] integerValue];
+        DLog(@"locatedownload response: errno=%ld", (long)errnoVal);
         if (errnoVal == 0 || errnoVal == 1) {
             NSString *dlink = digOutDlink(json);
             if (dlink) { completion(dlink, nil); return; }
@@ -270,7 +306,6 @@ static void fetchDlinkViaLocateDownload(NSString *filePath, NSInteger retry, voi
     });
 }
 
-// ========== 【新增】Portal: 先 filemetas，失败后 locatedownload ==========
 static void fetchDlinkPortal(NSString *filePath, void (^completion)(NSString *dlink, NSError *err)) {
     fetchDlinkViaFilemetas(filePath, 0, ^(NSString *dlink, NSError *err) {
         if (dlink) {
@@ -289,7 +324,6 @@ static void fetchDlinkPortal(NSString *filePath, void (^completion)(NSString *dl
     });
 }
 
-// ========== 【新增】刷新文件元数据缓存 ==========
 static void refreshFileMeta(NSString *filePath, void (^completion)(void)) {
     NSString *token = getBdstoken();
     if (!token) {
@@ -300,7 +334,10 @@ static void refreshFileMeta(NSString *filePath, void (^completion)(void)) {
     if (![normalizedPath hasPrefix:@"/"]) {
         normalizedPath = [@"/" stringByAppendingString:normalizedPath];
     }
-    NSString *encPath = [normalizedPath stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+    if ([normalizedPath length] > 1 && [normalizedPath hasSuffix:@"/"]) {
+        normalizedPath = [normalizedPath substringToIndex:[normalizedPath length] - 1];
+    }
+    NSString *encPath = strictEncodeURIComponent(normalizedPath);
     NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/filemetas?bdstoken=%@&channel=chunlei&clienttype=0&web=1&app_id=250528&dlink=1&path=%@&t=%ld",
                      token, encPath, (long)([[NSDate date] timeIntervalSince1970] * 1000)];
     DLog(@"Refresh meta: %@", url);
@@ -310,14 +347,13 @@ static void refreshFileMeta(NSString *filePath, void (^completion)(void)) {
     });
 }
 
-// ========== 【新增】刷新文件列表缓存 ==========
 static void refreshFileListCache(NSString *path, void (^completion)(void)) {
     NSString *token = getBdstoken();
     if (!token) {
         if (completion) completion();
         return;
     }
-    NSString *encPath = [path stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+    NSString *encPath = strictEncodeURIComponent(path);
     NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/list?dir=%@&bdstoken=%@&clienttype=0&app_id=250528&web=1&channel=chunlei&desc=1&showempty=0&page=1&num=10&order=time&t=%ld",
                      encPath, token, (long)([[NSDate date] timeIntervalSince1970] * 1000)];
     DLog(@"Refresh list: %@", url);
@@ -337,7 +373,7 @@ static void renameFile(NSString *fileId, NSString *path, NSString *newName, void
     NSArray *list = @[@{@"id": @([fileId integerValue]), @"path": path, @"newname": newName}];
     NSData *jsonData = [NSJSONSerialization dataWithJSONObject:list options:0 error:nil];
     NSString *listStr = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
-    NSString *body = [NSString stringWithFormat:@"filelist=%@", [listStr stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]]];
+    NSString *body = [NSString stringWithFormat:@"filelist=%@", strictEncodeURIComponent(listStr)];
     bdAsyncRequest(url, @"POST", nil, body, ^(id json, NSError *err) {
         if (err) { completion(NO, err); return; }
         NSInteger errnoVal = [json[@"errno"] integerValue];
@@ -377,7 +413,6 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
             }
             NSString *renamedPath = [currentPath isEqualToString:@"/"] ? [NSString stringWithFormat:@"/%@", renamedName] : [NSString stringWithFormat:@"%@/%@", currentPath, renamedName];
 
-            // ========== 【修改】重命名后增加缓存刷新 ==========
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kWaitTimeAfterRename * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
 
                 void (^doFetch)(void) = ^{
@@ -674,7 +709,7 @@ static void swizzleInstanceMethod(Class cls, SEL originalSelector, SEL swizzledS
 @end
 
 __attribute__((constructor)) static void init() {
-    DLog(@"Loaded v4.5 (arm64)");
+    DLog(@"Loaded v4.6 (arm64)");
     static dispatch_once_t swizzleOnce;
     dispatch_once(&swizzleOnce, ^{
         swizzleInstanceMethod([UIViewController class], @selector(viewDidAppear:), @selector(hkc_viewDidAppear:));
