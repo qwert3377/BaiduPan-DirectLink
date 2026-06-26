@@ -1,6 +1,7 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v4.4
-//  Fix error code 2: manual path + token input & file picker
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v4.5
+//  Fix error code 2: fallback to locatedownload API + refresh cache after rename
+//  Reference: Tampermonkey script v3.5.0
 //
 
 #import <UIKit/UIKit.h>
@@ -160,7 +161,28 @@ static void fetchFileList(NSString *path, void (^completion)(NSArray *files, NSE
     });
 }
 
-static void fetchDlink(NSString *filePath, NSInteger retry, void (^completion)(NSString *dlink, NSError *err)) {
+// ========== 【新增】从 JSON 中递归提取 dlink ==========
+static NSString * digOutDlink(id obj) {
+    if (!obj || ![obj isKindOfClass:[NSDictionary class]]) return nil;
+    NSDictionary *dict = obj;
+    NSString *dlink = dict[@"dlink"];
+    if ([dlink isKindOfClass:[NSString class]] && dlink.length > 0) return dlink;
+    id data = dict[@"data"];
+    if ([data isKindOfClass:[NSDictionary class]]) {
+        dlink = data[@"dlink"];
+        if ([dlink isKindOfClass:[NSString class]] && dlink.length > 0) return dlink;
+    }
+    for (id value in dict.allValues) {
+        if ([value isKindOfClass:[NSDictionary class]]) {
+            NSString *found = digOutDlink(value);
+            if (found) return found;
+        }
+    }
+    return nil;
+}
+
+// ========== 【新增】filemetas API ==========
+static void fetchDlinkViaFilemetas(NSString *filePath, NSInteger retry, void (^completion)(NSString *dlink, NSError *err)) {
     NSString *token = getBdstoken();
     if (!token) {
         completion(nil, [NSError errorWithDomain:@"BaiduPan" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"No bdstoken"}]);
@@ -173,12 +195,12 @@ static void fetchDlink(NSString *filePath, NSInteger retry, void (^completion)(N
     NSString *encPath = [normalizedPath stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
     NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/filemetas?bdstoken=%@&channel=chunlei&clienttype=0&web=1&app_id=250528&dlink=1&path=%@&t=%ld",
                      token, encPath, (long)([[NSDate date] timeIntervalSince1970] * 1000)];
-    DLog(@"Fetch dlink: %@", url);
+    DLog(@"Fetch filemetas: %@", url);
     bdAsyncRequest(url, @"GET", nil, nil, ^(id json, NSError *err) {
         if (err) {
             if (retry < kDlinkRetryCount) {
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    fetchDlink(filePath, retry + 1, completion);
+                    fetchDlinkViaFilemetas(filePath, retry + 1, completion);
                 });
                 return;
             }
@@ -192,14 +214,116 @@ static void fetchDlink(NSString *filePath, NSInteger retry, void (^completion)(N
                 NSString *dlink = info[0][@"dlink"];
                 if (dlink.length > 0) { completion(dlink, nil); return; }
             }
+            NSString *dlink = digOutDlink(json);
+            if (dlink) { completion(dlink, nil); return; }
+            completion(nil, [NSError errorWithDomain:@"BaiduPan" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"No dlink in response"}]);
         } else if (errnoVal == -9 && retry < kDlinkRetryCount) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                fetchDlink(filePath, retry + 1, completion);
+                fetchDlinkViaFilemetas(filePath, retry + 1, completion);
             });
             return;
         }
-        NSString *msg = json[@"errmsg"] ?: [NSString stringWithFormat:@"Error: %ld", (long)errnoVal];
+        NSString *msg = json[@"errmsg"] ?: [NSString stringWithFormat:@"filemetas Error: %ld", (long)errnoVal];
         completion(nil, [NSError errorWithDomain:@"BaiduPan" code:errnoVal userInfo:@{NSLocalizedDescriptionKey: msg}]);
+    });
+}
+
+// ========== 【新增】locatedownload API (备用方案) ==========
+static void fetchDlinkViaLocateDownload(NSString *filePath, NSInteger retry, void (^completion)(NSString *dlink, NSError *err)) {
+    NSString *token = getBdstoken();
+    if (!token) {
+        completion(nil, [NSError errorWithDomain:@"BaiduPan" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"No bdstoken"}]);
+        return;
+    }
+    NSString *normalizedPath = filePath;
+    if (![normalizedPath hasPrefix:@"/"]) {
+        normalizedPath = [@"/" stringByAppendingString:normalizedPath];
+    }
+    NSString *encPath = [normalizedPath stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+    NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/locatedownload?clienttype=0&app_id=250528&web=1&channel=chunlei&path=%@&origin=pdf&use=1&bdstoken=%@",
+                     encPath, token];
+    DLog(@"Fetch locatedownload: %@", url);
+    bdAsyncRequest(url, @"GET", nil, nil, ^(id json, NSError *err) {
+        if (err) {
+            if (retry < kDlinkRetryCount) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    fetchDlinkViaLocateDownload(filePath, retry + 1, completion);
+                });
+                return;
+            }
+            completion(nil, err);
+            return;
+        }
+        NSInteger errnoVal = [json[@"errno"] integerValue];
+        if (errnoVal == 0 || errnoVal == 1) {
+            NSString *dlink = digOutDlink(json);
+            if (dlink) { completion(dlink, nil); return; }
+        }
+        if (errnoVal == -9 && retry < kDlinkRetryCount) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                fetchDlinkViaLocateDownload(filePath, retry + 1, completion);
+            });
+            return;
+        }
+        NSString *msg = json[@"errmsg"] ?: [NSString stringWithFormat:@"locatedownload Error: %ld", (long)errnoVal];
+        completion(nil, [NSError errorWithDomain:@"BaiduPan" code:errnoVal userInfo:@{NSLocalizedDescriptionKey: msg}]);
+    });
+}
+
+// ========== 【新增】Portal: 先 filemetas，失败后 locatedownload ==========
+static void fetchDlinkPortal(NSString *filePath, void (^completion)(NSString *dlink, NSError *err)) {
+    fetchDlinkViaFilemetas(filePath, 0, ^(NSString *dlink, NSError *err) {
+        if (dlink) {
+            completion(dlink, nil);
+            return;
+        }
+        DLog(@"filemetas failed: %@, trying locatedownload...", err.localizedDescription);
+        fetchDlinkViaLocateDownload(filePath, 0, ^(NSString *dlink2, NSError *err2) {
+            if (dlink2) {
+                completion(dlink2, nil);
+                return;
+            }
+            NSString *combinedMsg = [NSString stringWithFormat:@"filemetas: %@\nlocatedownload: %@", err.localizedDescription, err2.localizedDescription];
+            completion(nil, [NSError errorWithDomain:@"BaiduPan" code:-1 userInfo:@{NSLocalizedDescriptionKey: combinedMsg}]);
+        });
+    });
+}
+
+// ========== 【新增】刷新文件元数据缓存 ==========
+static void refreshFileMeta(NSString *filePath, void (^completion)(void)) {
+    NSString *token = getBdstoken();
+    if (!token) {
+        if (completion) completion();
+        return;
+    }
+    NSString *normalizedPath = filePath;
+    if (![normalizedPath hasPrefix:@"/"]) {
+        normalizedPath = [@"/" stringByAppendingString:normalizedPath];
+    }
+    NSString *encPath = [normalizedPath stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+    NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/filemetas?bdstoken=%@&channel=chunlei&clienttype=0&web=1&app_id=250528&dlink=1&path=%@&t=%ld",
+                     token, encPath, (long)([[NSDate date] timeIntervalSince1970] * 1000)];
+    DLog(@"Refresh meta: %@", url);
+    bdAsyncRequest(url, @"GET", nil, nil, ^(id json, NSError *err) {
+        DLog(@"Refresh meta result: errno=%@, err=%@", json[@"errno"], err);
+        if (completion) completion();
+    });
+}
+
+// ========== 【新增】刷新文件列表缓存 ==========
+static void refreshFileListCache(NSString *path, void (^completion)(void)) {
+    NSString *token = getBdstoken();
+    if (!token) {
+        if (completion) completion();
+        return;
+    }
+    NSString *encPath = [path stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+    NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/list?dir=%@&bdstoken=%@&clienttype=0&app_id=250528&web=1&channel=chunlei&desc=1&showempty=0&page=1&num=10&order=time&t=%ld",
+                     encPath, token, (long)([[NSDate date] timeIntervalSince1970] * 1000)];
+    DLog(@"Refresh list: %@", url);
+    bdAsyncRequest(url, @"GET", nil, nil, ^(id json, NSError *err) {
+        DLog(@"Refresh list result: errno=%@, err=%@", json[@"errno"], err);
+        if (completion) completion();
     });
 }
 
@@ -252,25 +376,35 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
                 return;
             }
             NSString *renamedPath = [currentPath isEqualToString:@"/"] ? [NSString stringWithFormat:@"/%@", renamedName] : [NSString stringWithFormat:@"%@/%@", currentPath, renamedName];
+
+            // ========== 【修改】重命名后增加缓存刷新 ==========
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kWaitTimeAfterRename * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
-                void (^fetchAndRestore)(void) = ^{
-                    fetchDlink(renamedPath, 0, ^(NSString *dlink, NSError *err) {
+
+                void (^doFetch)(void) = ^{
+                    fetchDlinkPortal(renamedPath, ^(NSString *dlink, NSError *err) {
                         renameFile(fileId, renamedPath, originalName, ^(BOOL s, NSError *e) {
                             if (!s) DLog(@"Restore name failed: %@", e.localizedDescription);
                             finish(dlink, err);
                         });
                     });
                 };
+
                 if (fileSize > kLargeFileThreshold) {
-                    DLog(@"Large file (%ld MB), extra wait %ld ms", (long)(fileSize/1024/1024), (long)kLargeFileExtraWait);
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kLargeFileExtraWait * NSEC_PER_MSEC)), dispatch_get_main_queue(), fetchAndRestore);
+                    DLog(@"Large file (%ld MB), refresh cache + extra wait", (long)(fileSize/1024/1024));
+                    refreshFileListCache(currentPath, ^{
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                            refreshFileMeta(renamedPath, ^{
+                                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kLargeFileExtraWait * NSEC_PER_MSEC)), dispatch_get_main_queue(), doFetch);
+                            });
+                        });
+                    });
                 } else {
-                    fetchAndRestore();
+                    doFetch();
                 }
             });
         });
     } else {
-        fetchDlink(fullPath, 0, finish);
+        fetchDlinkPortal(fullPath, finish);
     }
 }
 
@@ -540,7 +674,7 @@ static void swizzleInstanceMethod(Class cls, SEL originalSelector, SEL swizzledS
 @end
 
 __attribute__((constructor)) static void init() {
-    DLog(@"Loaded v4.4 (arm64)");
+    DLog(@"Loaded v4.5 (arm64)");
     static dispatch_once_t swizzleOnce;
     dispatch_once(&swizzleOnce, ^{
         swizzleInstanceMethod([UIViewController class], @selector(viewDidAppear:), @selector(hkc_viewDidAppear:));
