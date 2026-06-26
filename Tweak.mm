@@ -253,7 +253,7 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
 static void addFloatingButton(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             @try {
                 UIWindow *window = nil;
                 if (@available(iOS 13.0, *)) {
@@ -291,33 +291,20 @@ static void addFloatingButton(void) {
     });
 }
 
-#pragma mark - Hook UIApplication（更安全的入口）
-
-static int (*orig_application)(id, SEL, id, id);
-
-static int hkc_application(id self, SEL _cmd, id application, id launchOptions) {
-    int result = orig_application(self, _cmd, application, launchOptions);
-    DLog(@"App 已启动，准备添加悬浮按钮");
-    addFloatingButton();
-    return result;
-}
+#pragma mark - 使用 NSNotification 监听（最安全）
 
 __attribute__((constructor)) static void init() {
     DLog(@"巨魔版已加载 v3.5.0 (arm64)");
     @try {
-        Class cls = objc_getClass("UIApplication");
-        if (!cls) {
-            DLog(@"找不到 UIApplication 类");
-            return;
-        }
-        Method m = class_getInstanceMethod(cls, @selector(application:didFinishLaunchingWithOptions:));
-        if (m) {
-            orig_application = (int (*)(id, SEL, id, id))method_setImplementation(m, (IMP)hkc_application);
-            DLog(@"Hook UIApplication 成功");
-        } else {
-            DLog(@"找不到 didFinishLaunchingWithOptions 方法");
-        }
+        [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
+                                                            object:nil
+                                                             queue:[NSOperationQueue mainQueue]
+                                                        usingBlock:^(NSNotification *note) {
+            DLog(@"App 已激活，准备添加悬浮按钮");
+            addFloatingButton();
+        }];
+        DLog(@"NSNotification 监听已设置");
     } @catch (NSException *e) {
-        DLog(@"Hook 异常: %@", e.reason);
+        DLog(@"初始化异常: %@", e.reason);
     }
 }
