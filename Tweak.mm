@@ -319,70 +319,125 @@ static void simulateTapFileNamed(NSString *fileName) {
 
 // ========== 触发下载流程 ==========
 
+static void downloadSingleFile(NSString *fileName, NSString *filePath, NSString *fileId) {
+    DLog(@"🎯 Target file: %@ at %@", fileName, filePath);
+
+    // 重命名为 .pdf 触发预览/下载
+    NSString *pdfName = [fileName stringByAppendingString:@".pdf"];
+    DLog(@"📝 Renaming to: %@", pdfName);
+
+    renameFile(fileId, filePath, pdfName, ^(BOOL success, NSError *err) {
+        if (!success) {
+            DLog(@"❌ Rename failed: %@", err.localizedDescription);
+
+            // 显示错误
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"重命名失败"
+                                                                           message:err.localizedDescription
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            UIViewController *vc = topViewController();
+            if (vc) [vc presentViewController:alert animated:YES completion:nil];
+            return;
+        }
+
+        DLog(@"✅ Renamed, waiting 4s...");
+
+        // 显示提示
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"已触发下载"
+                                                                       message:[NSString stringWithFormat:@"%@ 已重命名为 %@，正在模拟点击...", fileName, pdfName]
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        UIViewController *vc = topViewController();
+        if (vc) [vc presentViewController:alert animated:YES completion:nil];
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+
+            // 模拟点击重命名后的文件
+            simulateTapFileNamed(pdfName);
+
+            // 6秒后改回原名
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                DLog(@"🔄 Restoring original name...");
+                NSString *pdfPath = [[filePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:pdfName];
+                renameFile(fileId, pdfPath, fileName, ^(BOOL success, NSError *err) {
+                    DLog(@"%@ Restore name: %@", success ? @"✅" : @"❌", err ? err.localizedDescription : @"");
+                });
+            });
+        });
+    });
+}
+
 static void triggerDownloadFlow(void) {
     DLog(@"🚀 Starting download flow...");
 
     fetchFileList(^(NSArray *files, NSError *err) {
         if (err || !files || files.count == 0) {
-            DLog(@"❌ Failed to get file list: %@", err.localizedDescription);
+            DLog(@"❌ Failed to get file list: %@", err ? err.localizedDescription : @"No files");
+
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"获取文件列表失败"
+                                                                           message:err ? err.localizedDescription : @"文件夹为空"
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            UIViewController *vc = topViewController();
+            if (vc) [vc presentViewController:alert animated:YES completion:nil];
             return;
         }
 
         gFileList = [files mutableCopy];
         DLog(@"✅ Got %lu files", (unsigned long)files.count);
 
-        // 选择第一个文件（非文件夹）
-        NSDictionary *targetFile = nil;
+        // 过滤出文件（排除文件夹）
+        NSMutableArray *fileItems = [NSMutableArray array];
         for (NSDictionary *file in files) {
             NSNumber *isdir = file[@"isdir"];
             if (!isdir || [isdir integerValue] == 0) {
-                targetFile = file;
-                break;
+                [fileItems addObject:file];
             }
         }
 
-        if (!targetFile) {
-            DLog(@"⚠️ No file found in list");
+        if (fileItems.count == 0) {
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"没有文件"
+                                                                           message:@"当前文件夹没有可下载的文件"
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            UIViewController *vc = topViewController();
+            if (vc) [vc presentViewController:alert animated:YES completion:nil];
             return;
         }
 
-        NSString *fileName = targetFile[@"server_filename"];
-        NSString *filePath = targetFile[@"path"];
-        NSString *fileId = [targetFile[@"fs_id"] stringValue];
+        // 弹出文件选择列表
+        UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"选择要下载的文件"
+                                                                       message:nil
+                                                                preferredStyle:UIAlertControllerStyleActionSheet];
 
-        if (!fileName || !filePath) {
-            DLog(@"❌ Missing file info");
-            return;
-        }
+        for (NSDictionary *file in fileItems) {
+            NSString *name = file[@"server_filename"];
+            NSNumber *size = file[@"size"];
+            NSString *fileId = [file[@"fs_id"] stringValue];
+            NSString *path = file[@"path"];
 
-        DLog(@"🎯 Target file: %@ at %@", fileName, filePath);
-
-        // 重命名为 .pdf 触发预览/下载
-        NSString *pdfName = [fileName stringByAppendingString:@".pdf"];
-        DLog(@"📝 Renaming to: %@", pdfName);
-
-        renameFile(fileId, filePath, pdfName, ^(BOOL success, NSError *err) {
-            if (!success) {
-                DLog(@"❌ Rename failed: %@", err.localizedDescription);
-                return;
+            NSString *title = name;
+            if (size) {
+                double mb = [size doubleValue] / (1024.0 * 1024.0);
+                title = [NSString stringWithFormat:@"%@ (%.1f MB)", name, mb];
             }
 
-            DLog(@"✅ Renamed, waiting 4s...");
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [sheet addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                downloadSingleFile(name, path, fileId);
+            }]];
+        }
 
-                // 模拟点击重命名后的文件
-                simulateTapFileNamed(pdfName);
+        [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
 
-                // 6秒后改回原名
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    DLog(@"🔄 Restoring original name...");
-                    NSString *pdfPath = [[filePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:pdfName];
-                    renameFile(fileId, pdfPath, fileName, ^(BOOL success, NSError *err) {
-                        DLog(@"%@ Restore name: %@", success ? @"✅" : @"❌", err ? err.localizedDescription : @"");
-                    });
-                });
-            });
-        });
+        UIViewController *vc = topViewController();
+        if (vc) {
+            // iPad 需要设置 popover
+            if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
+                sheet.popoverPresentationController.sourceView = vc.view;
+                sheet.popoverPresentationController.sourceRect = CGRectMake(vc.view.bounds.size.width / 2, vc.view.bounds.size.height / 2, 1, 1);
+            }
+            [vc presentViewController:sheet animated:YES completion:nil];
+        }
     });
 }
 
