@@ -1,6 +1,6 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v7.2
-//  Improved: Better path & token detection
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v7.3
+//  Fixed: Path detection via view hierarchy analysis
 //
 
 #import <UIKit/UIKit.h>
@@ -18,6 +18,7 @@ static UIButton *gFloatButton = nil;
 static UIViewController * topViewController(void);
 static void showFloatButton(void);
 static void autoDetectPathAndToken(void);
+static NSString * findPathInViewHierarchy(UIView *view);
 
 // ========== 工具函数 ==========
 
@@ -56,7 +57,6 @@ static UIViewController * topViewController(void) {
 // ========== 扫描内存中的 bdstoken ==========
 
 static NSString * scanMemoryForBdstoken(void) {
-    // 尝试从 NSUserDefaults 的所有键值中扫描
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSDictionary *allDefaults = [defaults dictionaryRepresentation];
 
@@ -64,11 +64,10 @@ static NSString * scanMemoryForBdstoken(void) {
         id value = allDefaults[key];
         if ([value isKindOfClass:[NSString class]]) {
             NSString *str = value;
-            // bdstoken 通常是 32 位十六进制字符串
-            if (str.length == 32 && [str rangeOfString:@"bdstoken"].location == NSNotFound) {
-                NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"^[a-f0-9]{32}$" options:0 error:nil];
+            if (str.length >= 16 && str.length <= 64) {
+                NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"^[a-f0-9]{16,64}$" options:0 error:nil];
                 if ([regex numberOfMatchesInString:str options:0 range:NSMakeRange(0, str.length)] == 1) {
-                    DLog(@"🔍 Found potential bdstoken in key: %@", key);
+                    DLog(@"🔍 Found potential token in key: %@ = %@...", key, [str substringToIndex:MIN(16, str.length)]);
                     return str;
                 }
             }
@@ -77,16 +76,44 @@ static NSString * scanMemoryForBdstoken(void) {
     return nil;
 }
 
-// ========== 从 ViewController 层级获取路径 ==========
+// ========== 从视图层级递归查找路径信息 ==========
+
+static NSString * findPathInViewHierarchy(UIView *view) {
+    if (!view) return nil;
+
+    // 检查当前 view 的 accessibilityLabel/hint
+    if (view.accessibilityLabel && [view.accessibilityLabel hasPrefix:@"/"]) {
+        return view.accessibilityLabel;
+    }
+
+    // 检查 UILabel 的文本是否像路径
+    if ([view isKindOfClass:[UILabel class]]) {
+        UILabel *label = (UILabel *)view;
+        if (label.text && [label.text hasPrefix:@"/"]) {
+            return label.text;
+        }
+    }
+
+    // 递归检查子视图
+    for (UIView *subview in view.subviews) {
+        NSString *path = findPathInViewHierarchy(subview);
+        if (path) return path;
+    }
+
+    return nil;
+}
+
+// ========== 从 ViewController 获取路径 ==========
 
 static NSString * extractPathFromVC(UIViewController *vc) {
     if (!vc) return nil;
 
-    // 尝试各种可能的属性名
+    // 1. 尝试各种属性名
     NSArray *pathKeys = @[
         @"path", @"currentPath", @"filePath", @"dirPath", 
         @"currentDir", @"_path", @"_currentPath",
-        @"directory", @"folderPath", @"currentFolder"
+        @"directory", @"folderPath", @"currentFolder",
+        @"mPath", @"_mPath", @"fileListPath"
     ];
 
     for (NSString *key in pathKeys) {
@@ -99,13 +126,27 @@ static NSString * extractPathFromVC(UIViewController *vc) {
         } @catch (NSException *e) {}
     }
 
-    // 尝试从 title 重建路径（百度网盘通常用文件夹名做 title）
-    if (vc.title && vc.title.length > 0 && ![vc.title isEqualToString:@"百度网盘"]) {
-        DLog(@"ℹ️ VC title: %@", vc.title);
+    // 2. 尝试从 view 层级查找
+    if (vc.view) {
+        NSString *path = findPathInViewHierarchy(vc.view);
+        if (path) {
+            DLog(@"✅ Found path from view hierarchy: %@", path);
+            return path;
+        }
+    }
+
+    // 3. 尝试从 navigationItem.title
+    if (vc.navigationItem.title && vc.navigationItem.title.length > 0 
+        && ![vc.navigationItem.title isEqualToString:@"百度网盘"]
+        && ![vc.navigationItem.title isEqualToString:@"文件"]) {
+        DLog(@"ℹ️ Using navigation title: %@", vc.navigationItem.title);
+        return vc.navigationItem.title;
     }
 
     return nil;
 }
+
+// ========== 从导航栈构建完整路径 ==========
 
 static NSString * buildPathFromNavStack(void) {
     UIViewController *vc = topViewController();
@@ -129,9 +170,12 @@ static NSString * buildPathFromNavStack(void) {
             [components addObject:path];
         } else if (controller.title && controller.title.length > 0 
                    && ![controller.title isEqualToString:@"百度网盘"]
-                   && ![controller.title isEqualToString:@"文件"]) {
-            // 用 title 作为路径组件
+                   && ![controller.title isEqualToString:@"文件"]
+                   && ![controller.title isEqualToString:@"首页"]) {
             [components addObject:controller.title];
+        } else if (controller.navigationItem.title && controller.navigationItem.title.length > 0
+                   && ![controller.navigationItem.title isEqualToString:@"百度网盘"]) {
+            [components addObject:controller.navigationItem.title];
         }
     }
 
@@ -144,12 +188,12 @@ static NSString * buildPathFromNavStack(void) {
     return fullPath;
 }
 
-// ========== 自动获取 Token ==========
+// ========== 自动获取 Token & Path ==========
 
 static void autoDetectPathAndToken(void) {
     DLog(@"🔍 Starting auto-detection...");
 
-    // 1. 获取 bdstoken - 多种方式
+    // 1. 获取 bdstoken
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     gBdstoken = [defaults objectForKey:@"bdstoken"];
     if (!gBdstoken) gBdstoken = [defaults objectForKey:@"BDSTOKEN"];
@@ -157,7 +201,7 @@ static void autoDetectPathAndToken(void) {
     if (!gBdstoken) gBdstoken = scanMemoryForBdstoken();
 
     if (gBdstoken) {
-        DLog(@"✅ Got bdstoken: %@...", [gBdstoken substringToIndex:MIN(8, gBdstoken.length)]);
+        DLog(@"✅ Got bdstoken: %@...", [gBdstoken substringToIndex:MIN(16, gBdstoken.length)]);
     } else {
         DLog(@"❌ bdstoken not found");
     }
@@ -176,10 +220,9 @@ static void autoDetectPathAndToken(void) {
         if (gBDUSS) DLog(@"✅ Got BDUSS from NSUserDefaults");
     }
 
-    // 3. 获取路径
+    // 3. 获取路径 - 多种方式
     gCurrentPath = buildPathFromNavStack();
     if (!gCurrentPath) {
-        // 尝试从当前 VC 直接获取
         UIViewController *vc = topViewController();
         gCurrentPath = extractPathFromVC(vc);
     }
@@ -271,7 +314,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"🚀 BaiduPan Troll v7.2 loaded");
+    DLog(@"🚀 BaiduPan Troll v7.3 loaded");
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
