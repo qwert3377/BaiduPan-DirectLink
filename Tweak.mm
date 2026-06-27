@@ -1,10 +1,11 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v6.1
-//  Flow: Rename -> Fetch -> Simulate Tap -> Restore
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v6.2
+//  Feature: Auto-detect path & token, no manual input needed
 //
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <WebKit/WebKit.h>
 
 #define DLog(fmt, ...) NSLog((@"[BaiduPanTroll] " fmt), ##__VA_ARGS__)
 
@@ -16,6 +17,7 @@ static const NSInteger kDlinkRetryCount = 3;
 static NSString *gManualToken = nil;
 static NSString *gCurrentPath = nil;
 static BOOL gPathAutoDetected = NO;
+static BOOL gTokenAutoDetected = NO;
 
 // ========== 前向声明 ==========
 static UIViewController * topViewController(void);
@@ -35,6 +37,8 @@ static NSString * strictEncodeURIComponent(NSString *str);
 static NSString * extractPathFromViewController(UIViewController *vc);
 static NSString * getPathFromNavStack(void);
 static NSString * extractPathFromURL(NSString *urlString);
+static NSString * autoDetectBdstoken(void);
+static void autoDetectPathAndToken(void);
 
 // ========== 工具函数 ==========
 
@@ -108,13 +112,121 @@ static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *header
     [task resume];
 }
 
+// ========== 自动检测 Token ==========
+
+static NSString * autoDetectBdstoken(void) {
+    // 1. 从 Cookie 中提取
+    NSHTTPCookieStorage *storage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
+    NSArray *cookies = [storage cookiesForURL:[NSURL URLWithString:@"https://pan.baidu.com"]];
+    for (NSHTTPCookie *cookie in cookies) {
+        if ([cookie.name isEqualToString:@"BDUSS"] || [cookie.name isEqualToString:@"STOKEN"]) {
+            // 有登录态 Cookie，尝试从 NSUserDefaults 或网页中提取 bdstoken
+        }
+    }
+    
+    // 2. 从 NSUserDefaults 中提取（百度网盘 App 可能存储在这里）
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSString *token = [defaults stringForKey:@"bdstoken"];
+    if (token && token.length > 0) {
+        DLog(@"Auto-detected bdstoken from NSUserDefaults");
+        gTokenAutoDetected = YES;
+        return token;
+    }
+    
+    // 3. 从百度网盘的 WKWebView / UIWebView 中提取
+    // 遍历所有 window 查找 webview
+    for (UIWindow *window in [UIApplication sharedApplication].windows) {
+        NSString *tokenFromWebView = [self extractTokenFromWebView:window];
+        if (tokenFromWebView) return tokenFromWebView;
+    }
+    
+    // 4. 从全局变量或类属性中提取（通过 runtime）
+    // 百度网盘可能有类似 [BaiduPanManager shared].bdstoken 的属性
+    Class panManagerClass = NSClassFromString(@"BaiduPanManager") ?: NSClassFromString(@"PanManager") ?: NSClassFromString(@"FileManager");
+    if (panManagerClass) {
+        @try {
+            id sharedInstance = [panManagerClass performSelector:@selector(sharedInstance)];
+            if (sharedInstance) {
+                NSString *token = [sharedInstance valueForKey:@"bdstoken"];
+                if (token && token.length > 0) {
+                    DLog(@"Auto-detected bdstoken from %@ sharedInstance", NSStringFromClass(panManagerClass));
+                    gTokenAutoDetected = YES;
+                    return token;
+                }
+            }
+        } @catch (NSException *e) { }
+    }
+    
+    // 5. 尝试从常见类名中提取
+    NSArray *possibleClasses = @[
+        @"BaiduPanFileManager", @"PanFileManager", @"BDFileService",
+        @"BaiduPanUserManager", @"PanUserManager", @"BDUserService",
+        @"BaiduPanConfig", @"PanConfig", @"BDConfig"
+    ];
+    for (NSString *className in possibleClasses) {
+        Class cls = NSClassFromString(className);
+        if (!cls) continue;
+        @try {
+            id shared = [cls performSelector:@selector(sharedInstance)];
+            if (!shared) shared = [cls performSelector:@selector(shared)];
+            if (shared) {
+                NSString *token = [shared valueForKey:@"bdstoken"] ?: [shared valueForKey:@"token"] ?: [shared valueForKey:@"_bdstoken"];
+                if (token && token.length > 0) {
+                    DLog(@"Auto-detected bdstoken from %@", className);
+                    gTokenAutoDetected = YES;
+                    return token;
+                }
+            }
+        } @catch (NSException *e) { }
+    }
+    
+    return nil;
+}
+
+// 辅助：从 WebView 提取 token
+static NSString * extractTokenFromWebView(UIView *view) {
+    if (!view) return nil;
+    
+    if ([view isKindOfClass:[WKWebView class]]) {
+        WKWebView *webView = (WKWebView *)view;
+        // 通过 JavaScript 获取
+        __block NSString *result = nil;
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+        [webView evaluateJavaScript:@"localStorage.getItem('bdstoken') || document.cookie.match(/bdstoken=([^;]+)/)?.[1]" completionHandler:^(id _Nullable value, NSError * _Nullable error) {
+            if ([value isKindOfClass:[NSString class]]) result = value;
+            dispatch_semaphore_signal(semaphore);
+        }];
+        dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC));
+        if (result && result.length > 0) {
+            DLog(@"Auto-detected bdstoken from WKWebView");
+            gTokenAutoDetected = YES;
+            return result;
+        }
+    }
+    
+    // 递归查找子视图
+    for (UIView *subview in view.subviews) {
+        NSString *token = extractTokenFromWebView(subview);
+        if (token) return token;
+    }
+    return nil;
+}
+
 static NSString * getBdstoken(void) {
     if (gManualToken && gManualToken.length > 0) return gManualToken;
+    
+    // 尝试自动检测
+    NSString *autoToken = autoDetectBdstoken();
+    if (autoToken) return autoToken;
+    
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSString *token = [defaults stringForKey:@"bdstoken"];
     if (token.length > 0) return token;
+    
     return nil;
 }
+
+// ========== 自动检测路径 ==========
 
 static NSString * getCurrentPath(void) {
     if (gCurrentPath && gCurrentPath.length > 0) return gCurrentPath;
@@ -199,7 +311,31 @@ static NSString * getPathFromNavStack(void) {
     return nil;
 }
 
-// ========== 模拟点击辅助 ==========
+static void autoDetectPathAndToken(void) {
+    // 自动检测路径
+    NSString *autoPath = getPathFromNavStack();
+    if (autoPath) {
+        gCurrentPath = autoPath;
+        gPathAutoDetected = YES;
+        DLog(@"Auto path (VC): %@", autoPath);
+    } else if (gPathAutoDetected && gCurrentPath) {
+        DLog(@"Auto path (Hook): %@", gCurrentPath);
+    } else {
+        DLog(@"Auto path failed, will use default /");
+        if (!gCurrentPath || gCurrentPath.length == 0) gCurrentPath = @"/";
+    }
+    
+    // 自动检测 token
+    NSString *autoToken = autoDetectBdstoken();
+    if (autoToken) {
+        gManualToken = autoToken;
+        DLog(@"Auto token: OK (length=%lu)", (unsigned long)autoToken.length);
+    } else {
+        DLog(@"Auto token failed, need manual input");
+    }
+}
+
+// ========== UI 模拟点击辅助 ==========
 
 static UIView *findSubviewWithText(UIView *view, NSString *text) {
     if (!view || !text) return nil;
@@ -216,6 +352,9 @@ static UIView *findSubviewWithText(UIView *view, NSString *text) {
         NSString *btnTitle = [btn titleForState:UIControlStateNormal];
         if (btnTitle && [btnTitle containsString:text]) return btn;
     }
+    // 检查 accessibilityLabel
+    if (view.accessibilityLabel && [view.accessibilityLabel containsString:text]) return view;
+    
     for (UIView *subview in view.subviews) {
         UIView *found = findSubviewWithText(subview, text);
         if (found) return found;
@@ -225,6 +364,7 @@ static UIView *findSubviewWithText(UIView *view, NSString *text) {
 
 static void performTapOnView(UIView *view) {
     if (!view) return;
+    
     UIView *target = view;
     while (target) {
         if ([target isKindOfClass:[UIControl class]] && target.gestureRecognizers.count > 0) break;
@@ -232,7 +372,7 @@ static void performTapOnView(UIView *view) {
         target = target.superview;
     }
     if (!target) target = view;
-
+    
     if ([target isKindOfClass:[UIControl class]]) {
         [(UIControl *)target sendActionsForControlEvents:UIControlEventTouchUpInside];
         DLog(@"Simulated UIControl tap");
@@ -283,16 +423,20 @@ static void performTapOnView(UIView *view) {
 static void simulateTapFileNamed(NSString *fileName) {
     UIViewController *vc = topViewController();
     if (!vc) return;
-    UIView *targetView = findSubviewWithText(vc.view, fileName);
-    if (targetView) {
-        DLog(@"Found view for '%@', performing tap", fileName);
-        performTapOnView(targetView);
-    } else {
-        DLog(@"Could not find view for '%@', user manual tap needed", fileName);
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"请手动点击" message:[NSString stringWithFormat:@"未能在当前界面自动定位到 '%@'，请在文件列表中手动点击该文件以触发下载", fileName] preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-        [vc presentViewController:alert animated:YES completion:nil];
-    }
+    
+    // 先等待一小段时间让 UI 刷新
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIView *targetView = findSubviewWithText(vc.view, fileName);
+        if (targetView) {
+            DLog(@"Found view for '%@', performing tap", fileName);
+            performTapOnView(targetView);
+        } else {
+            DLog(@"Could not find view for '%@', user manual tap needed", fileName);
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"请手动点击" message:[NSString stringWithFormat:@"未能在当前界面自动定位到 '%@'，请在文件列表中手动点击该文件以触发下载", fileName] preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            [vc presentViewController:alert animated:YES completion:nil];
+        }
+    });
 }
 
 // ========== 核心 API ==========
@@ -480,7 +624,7 @@ static void renameFile(NSString *fileId, NSString *path, NSString *newName, void
     });
 }
 
-// ========== 弹窗 UI（必须在 runPipeline 之前定义） ==========
+// ========== 弹窗 UI（在 runPipeline 之前定义） ==========
 
 static void showErrorPopup(NSString *message) {
     UIViewController *vc = topViewController();
@@ -494,7 +638,6 @@ static void showRestorePopup(NSString *originalName, NSString *renamedName, NSSt
     UIViewController *vc = topViewController();
     if (!vc) return;
 
-    // 复制直链到剪贴板（备用）
     if (dlink && dlink.length > 0) {
         [[UIPasteboard generalPasteboard] setString:dlink];
     }
@@ -522,7 +665,7 @@ static void showRestorePopup(NSString *originalName, NSString *renamedName, NSSt
     [vc presentViewController:alert animated:YES completion:nil];
 }
 
-// ========== 主流程：完全匹配备忘录 4 步 ==========
+// ========== 主流程 ==========
 
 static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentPath, NSInteger fileSize) {
     NSString *originalName = fileName;
@@ -535,7 +678,7 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
     }
     DLog(@"Final path: %@", fullPath);
 
-    // 如果已经是 .pdf，直接获取直链并结束
+    // 如果已经是 .pdf，直接获取直链并触发
     if ([originalName hasSuffix:@".pdf"]) {
         fetchDlinkPortal(fullPath, ^(NSString *dlink, NSError *err) {
             if (dlink) {
@@ -566,7 +709,6 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
                 // Step 3: 获取直链 + 模拟点击
                 fetchDlinkPortal(renamedPath, ^(NSString *dlink, NSError *err) {
                     if (!dlink) {
-                        // 失败则恢复原名
                         renameFile(fileId, renamedPath, originalName, ^(BOOL s, NSError *e) {
                             if (!s) DLog(@"Restore failed: %@", e.localizedDescription);
                             showErrorPopup(err.localizedDescription);
@@ -580,7 +722,7 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
                             // 模拟点击改名后的文件，触发百度网盘预览/下载
                             simulateTapFileNamed(renamedName);
 
-                            // Step 4: 弹出恢复提示（用户手动确认后改回）
+                            // Step 4: 弹出恢复提示
                             showRestorePopup(originalName, renamedName, renamedPath, fileId, dlink);
                         });
                     });
@@ -603,7 +745,7 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
     });
 }
 
-// ========== NSURLSession Hook ==========
+// ========== NSURLSession Hook（增强版，自动捕获路径和 token） ==========
 
 @interface NSURLSession (HKCHook)
 @end
@@ -613,10 +755,24 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
 - (NSURLSessionDataTask *)hkc_dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
     NSString *urlString = request.URL.absoluteString;
     if ([urlString containsString:@"pan.baidu.com"]) {
+        // 自动提取路径
         NSString *path = extractPathFromURL(urlString);
         if (path && path.length > 0) {
             gCurrentPath = path;
             gPathAutoDetected = YES;
+        }
+        // 自动提取 token
+        if ([urlString containsString:@"bdstoken="]) {
+            NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"bdstoken=([^&]+)" options:0 error:nil];
+            NSTextCheckingResult *match = [regex firstMatchInString:urlString options:0 range:NSMakeRange(0, urlString.length)];
+            if (match && match.numberOfRanges > 1) {
+                NSString *token = [urlString substringWithRange:[match rangeAtIndex:1]];
+                if (token && token.length > 0) {
+                    gManualToken = token;
+                    gTokenAutoDetected = YES;
+                    DLog(@"Auto-captured bdstoken from URL");
+                }
+            }
         }
     }
     return [self hkc_dataTaskWithRequest:request completionHandler:completionHandler];
@@ -629,6 +785,17 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
         if (path && path.length > 0) {
             gCurrentPath = path;
             gPathAutoDetected = YES;
+        }
+        if ([urlString containsString:@"bdstoken="]) {
+            NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"bdstoken=([^&]+)" options:0 error:nil];
+            NSTextCheckingResult *match = [regex firstMatchInString:urlString options:0 range:NSMakeRange(0, urlString.length)];
+            if (match && match.numberOfRanges > 1) {
+                NSString *token = [urlString substringWithRange:[match rangeAtIndex:1]];
+                if (token && token.length > 0) {
+                    gManualToken = token;
+                    gTokenAutoDetected = YES;
+                }
+            }
         }
     }
     return [self hkc_dataTaskWithURL:url completionHandler:completionHandler];
@@ -654,22 +821,25 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
 }
 
 - (void)showManualInputDialog:(UIViewController *)vc {
-    UIAlertController *input = [UIAlertController alertControllerWithTitle:@"Direct Link" message:@"Enter filename and bdstoken" preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *input = [UIAlertController alertControllerWithTitle:@"手动输入" message:@"自动检测失败，请手动输入" preferredStyle:UIAlertControllerStyleAlert];
     [input addTextFieldWithConfigurationHandler:^(UITextField *tf) { tf.placeholder = @"Filename"; }];
     [input addTextFieldWithConfigurationHandler:^(UITextField *tf) { tf.placeholder = @"bdstoken"; tf.text = gManualToken ?: @""; }];
+    [input addTextFieldWithConfigurationHandler:^(UITextField *tf) { tf.placeholder = @"Path"; tf.text = getCurrentPath(); }];
     [input addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [input addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         NSString *fileName = input.textFields[0].text;
         NSString *token = input.textFields[1].text;
+        NSString *path = input.textFields[2].text;
         if (fileName.length == 0) return;
         if (token.length > 0) gManualToken = token;
+        if (path.length > 0) gCurrentPath = path;
         runPipeline(fileName, @"0", getCurrentPath(), 0);
     }]];
     [vc presentViewController:input animated:YES completion:nil];
 }
 
 - (void)showFilePicker:(UIViewController *)vc files:(NSArray *)files {
-    UIAlertController *picker = [UIAlertController alertControllerWithTitle:@"Select File" message:[NSString stringWithFormat:@"Path: %@\nFiles: %lu", getCurrentPath(), (unsigned long)files.count] preferredStyle:UIAlertControllerStyleActionSheet];
+    UIAlertController *picker = [UIAlertController alertControllerWithTitle:@"选择文件" message:[NSString stringWithFormat:@"路径: %@\n文件数: %lu", getCurrentPath(), (unsigned long)files.count] preferredStyle:UIAlertControllerStyleActionSheet];
     for (NSDictionary *file in files) {
         NSString *name = file[@"server_filename"] ?: file[@"path"];
         NSInteger size = [file[@"size"] integerValue];
@@ -679,11 +849,11 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
             NSString *fileName = file[@"server_filename"];
             NSString *fileId = [NSString stringWithFormat:@"%@", file[@"fs_id"]];
             NSInteger fileSize = [file[@"size"] integerValue];
-            [self showTokenConfirmDialog:vc fileName:fileName fileId:fileId fileSize:fileSize];
+            runPipeline(fileName, fileId, getCurrentPath(), fileSize);
         }]];
     }
-    [picker addAction:[UIAlertAction actionWithTitle:@"Manual Input" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) { [self showManualInputDialog:vc]; }]];
-    [picker addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [picker addAction:[UIAlertAction actionWithTitle:@"手动输入" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) { [self showManualInputDialog:vc]; }]];
+    [picker addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
         UIPopoverPresentationController *pop = picker.popoverPresentationController;
         if (pop) { pop.sourceView = vc.view; pop.sourceRect = CGRectMake(vc.view.bounds.size.width/2, vc.view.bounds.size.height/2, 1, 1); pop.permittedArrowDirections = 0; }
@@ -691,39 +861,26 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
     [vc presentViewController:picker animated:YES completion:nil];
 }
 
-- (void)showTokenConfirmDialog:(UIViewController *)vc fileName:(NSString *)fileName fileId:(NSString *)fileId fileSize:(NSInteger)fileSize {
-    UIAlertController *input = [UIAlertController alertControllerWithTitle:@"Confirm" message:[NSString stringWithFormat:@"File: %@\nPath: %@", fileName, getCurrentPath()] preferredStyle:UIAlertControllerStyleAlert];
-    [input addTextFieldWithConfigurationHandler:^(UITextField *tf) { tf.placeholder = @"bdstoken"; tf.text = gManualToken ?: @""; }];
-    [input addTextFieldWithConfigurationHandler:^(UITextField *tf) { tf.placeholder = @"Path"; tf.text = getCurrentPath(); }];
-    [input addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [input addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        NSString *token = input.textFields[0].text;
-        NSString *customPath = input.textFields[1].text;
-        if (token.length > 0) gManualToken = token;
-        if (customPath.length > 0) gCurrentPath = customPath;
-        runPipeline(fileName, fileId, getCurrentPath(), fileSize);
-    }]];
-    [vc presentViewController:input animated:YES completion:nil];
-}
-
 - (void)buttonTapped:(UIButton *)sender {
     @try {
         UIViewController *vc = topViewController();
         if (!vc) return;
 
-        NSString *autoPath = getPathFromNavStack();
-        if (autoPath) {
-            gCurrentPath = autoPath;
-            gPathAutoDetected = YES;
-            DLog(@"Auto path (VC): %@", autoPath);
-        } else if (gPathAutoDetected && gCurrentPath) {
-            DLog(@"Auto path (Hook): %@", gCurrentPath);
-        } else {
-            DLog(@"Auto path failed");
-            if (!gCurrentPath || gCurrentPath.length == 0) gCurrentPath = @"/";
-        }
+        // 先执行自动检测
+        autoDetectPathAndToken();
 
-        [self showSetupDialog:vc];
+        // 检查是否还需要手动输入
+        BOOL needToken = !getBdstoken();
+        BOOL needPath = !gCurrentPath || gCurrentPath.length == 0;
+
+        if (needToken || needPath) {
+            // 自动检测失败，显示手动输入对话框
+            [self showSetupDialog:vc];
+        } else {
+            // 自动检测成功，直接获取文件列表
+            DLog(@"Auto-detect success, path=%@, token=%@", getCurrentPath(), getBdstoken() ? @"OK" : @"FAIL");
+            [self proceedWithFileList:vc];
+        }
     } @catch (NSException *e) {
         DLog(@"Button tap error: %@", e.reason);
     }
@@ -731,27 +888,28 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
 
 - (void)showSetupDialog:(UIViewController *)vc {
     NSString *detectedPath = getCurrentPath();
-    NSString *pathStatus = gPathAutoDetected ? @"Auto-detected OK" : @"Auto-detect failed, please enter path";
+    NSString *pathStatus = gPathAutoDetected ? @"✅ 路径自动检测成功" : @"❌ 路径自动检测失败";
+    NSString *tokenStatus = gTokenAutoDetected ? @"✅ Token 自动检测成功" : @"❌ Token 自动检测失败";
 
-    UIAlertController *setup = [UIAlertController alertControllerWithTitle:@"Setup" message:[NSString stringWithFormat:@"%@\n\nEnter path and bdstoken", pathStatus] preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *setup = [UIAlertController alertControllerWithTitle:@"设置" message:[NSString stringWithFormat:@"%@\n%@\n\n请补充或修改", pathStatus, tokenStatus] preferredStyle:UIAlertControllerStyleAlert];
 
     [setup addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"Path, e.g. /foldername";
+        tf.placeholder = @"路径, e.g. /foldername";
         tf.text = detectedPath;
     }];
     [setup addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"bdstoken (from pan.baidu.com)";
+        tf.placeholder = @"bdstoken";
         tf.text = gManualToken ?: @"";
     }];
 
-    [setup addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [setup addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+    [setup addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [setup addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         NSString *userPath = setup.textFields[0].text;
         NSString *token = setup.textFields[1].text;
         if (userPath.length > 0) gCurrentPath = userPath;
         if (token.length > 0) gManualToken = token;
         if (!getBdstoken()) {
-            showErrorPopup(@"Please enter bdstoken first");
+            showErrorPopup(@"请输入 bdstoken");
             return;
         }
         DLog(@"Setup path: %@, token len: %lu", getCurrentPath(), (unsigned long)gManualToken.length);
@@ -762,16 +920,16 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
 }
 
 - (void)proceedWithFileList:(UIViewController *)vc {
-    UIAlertController *loading = [UIAlertController alertControllerWithTitle:@"Loading" message:@"Fetching file list..." preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *loading = [UIAlertController alertControllerWithTitle:@"加载中" message:@"正在获取文件列表..." preferredStyle:UIAlertControllerStyleAlert];
     [vc presentViewController:loading animated:YES completion:nil];
 
     fetchFileList(getCurrentPath(), ^(NSArray *files, NSError *err) {
         [loading dismissViewControllerAnimated:YES completion:^{
             if (err) { showErrorPopup(err.localizedDescription); return; }
-            if (files.count == 0) { showErrorPopup(@"No files in this directory"); return; }
+            if (files.count == 0) { showErrorPopup(@"该目录没有文件"); return; }
             NSMutableArray *fileItems = [NSMutableArray array];
             for (NSDictionary *f in files) { if ([f[@"isdir"] integerValue] == 0) [fileItems addObject:f]; }
-            if (fileItems.count == 0) { showErrorPopup(@"No files, only folders"); return; }
+            if (fileItems.count == 0) { showErrorPopup(@"该目录只有文件夹"); return; }
             [self showFilePicker:vc files:fileItems];
         }];
     });
@@ -856,7 +1014,7 @@ static void swizzleInstanceMethod(Class cls, SEL originalSelector, SEL swizzledS
 @end
 
 __attribute__((constructor)) static void init() {
-    DLog(@"Loaded v6.1 (arm64) - Auto Tap Edition");
+    DLog(@"Loaded v6.2 (arm64) - Auto Detect Edition");
 
     static dispatch_once_t sessionOnce;
     dispatch_once(&sessionOnce, ^{
