@@ -1,8 +1,8 @@
 //
 //  BaiduPan SVIP Direct Link Helper - TrollStore Edition v8.3
-//  Fix: objc_setAssociatedObject key type (const void*), removed hardcoded fallback token
+//  Fix: block recursion retain cycles, missing __block specifiers
 //  Token source: auto-detected from app only (NSUserDefaults + memory scan)
-//  UI: Injected "直链" buttons into file list cells
+//  UI: Injected "直链" buttons + "直链已复制" dialog
 //
 
 #import <UIKit/UIKit.h>
@@ -348,7 +348,7 @@ static void forceRefreshFileList(void) {
     }
 }
 
-// ========== v8.3 UI Dialog ==========
+// ========== v8.3 UI Dialog (弹窗) ==========
 
 static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId, NSString *pdfPath) {
     UIViewController *vc = topViewController();
@@ -579,7 +579,7 @@ static void triggerDownloadFlow(void) {
 
         if (fileItems.count == 0) {
             UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"没有文件" message:@"当前文件夹没有可下载的文件" preferredStyle:UIAlertControllerStyleAlert];
-            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIActionStyleDefault handler:nil]];
             UIViewController *vc = topViewController(); if (vc) [vc presentViewController:alert animated:YES completion:nil];
             return;
         }
@@ -611,7 +611,7 @@ static void triggerDownloadFlow(void) {
     });
 }
 
-// ========== UI Injection (File List Buttons) ==========
+// ========== UI Injection (File List "直链" Buttons) ==========
 
 static BOOL isBaiduPanFileListPage(void) {
     UIViewController *vc = topViewController();
@@ -629,6 +629,8 @@ static BOOL isBaiduPanFileCell(UIView *view) {
     __block BOOL hasSizeLabel = NO;
     __block BOOL hasNameLabel = NO;
 
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-retain-cycles"
     void (^__block search)(UIView *) = ^(UIView *v) {
         for (UIView *sub in v.subviews) {
             if ([sub isKindOfClass:[UILabel class]]) {
@@ -647,14 +649,17 @@ static BOOL isBaiduPanFileCell(UIView *view) {
             search(sub);
         }
     };
+    #pragma clang diagnostic pop
     search(view);
     return hasSizeLabel && hasNameLabel;
 }
 
 static NSString * extractFileNameFromCell(UIView *cell) {
-    UILabel *bestLabel = nil;
-    CGFloat maxWidth = 0;
+    __block UILabel *bestLabel = nil;
+    __block CGFloat maxWidth = 0;
 
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-retain-cycles"
     void (^__block search)(UIView *) = ^(UIView *v) {
         for (UIView *sub in v.subviews) {
             if ([sub isKindOfClass:[UILabel class]]) {
@@ -678,6 +683,7 @@ static NSString * extractFileNameFromCell(UIView *cell) {
             search(sub);
         }
     };
+    #pragma clang diagnostic pop
     search(cell);
     return bestLabel.text;
 }
@@ -689,6 +695,9 @@ static void injectDirectLinkButtons(void) {
     if (!vc) return;
 
     NSMutableArray *scrollViews = [NSMutableArray array];
+
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-retain-cycles"
     void (^__block findScrollViews)(UIView *) = ^(UIView *v) {
         if ([v isKindOfClass:[UITableView class]] || [v isKindOfClass:[UICollectionView class]]) {
             [scrollViews addObject:v];
@@ -697,6 +706,7 @@ static void injectDirectLinkButtons(void) {
             findScrollViews(sub);
         }
     };
+    #pragma clang diagnostic pop
     findScrollViews(vc.view);
 
     for (UIScrollView *scrollView in scrollViews) {
