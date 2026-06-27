@@ -1,6 +1,6 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v7.6
-//  Fixed: Force refresh file list after rename
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v7.7
+//  Fixed: Auto navigate back after tap to refresh file state
 //
 
 #import <UIKit/UIKit.h>
@@ -280,7 +280,6 @@ static void forceRefreshFileList(void) {
     UIViewController *vc = topViewController();
     if (!vc) return;
 
-    // 方法1: 尝试调用百度网盘内部的刷新方法
     NSArray *refreshSelectors = @[@"refreshData", @"reloadData", @"refreshFileList", @"loadData", @"requestData", @"fetchFileList", @"reloadFileList"];
 
     for (NSString *selName in refreshSelectors) {
@@ -295,7 +294,6 @@ static void forceRefreshFileList(void) {
         }
     }
 
-    // 方法2: 查找 UIScrollView 并触发下拉刷新
     void (^findAndTriggerRefresh)(UIView *) = ^(UIView *view) {
         if ([view isKindOfClass:[UIScrollView class]]) {
             UIScrollView *scrollView = (UIScrollView *)view;
@@ -314,15 +312,6 @@ static void forceRefreshFileList(void) {
         }
     };
     findAndTriggerRefresh(vc.view);
-
-    // 方法3: 尝试从导航栏查找刷新按钮并点击
-    if (vc.navigationItem.rightBarButtonItems) {
-        for (UIBarButtonItem *item in vc.navigationItem.rightBarButtonItems) {
-            if (item.action) {
-                DLog(@"ℹ️ Found right bar button action: %@", NSStringFromSelector(item.action));
-            }
-        }
-    }
 }
 
 // ========== 模拟点击 ==========
@@ -373,11 +362,8 @@ static void simulateTapFileNamed(NSString *fileName) {
 
     if ([targetScrollView isKindOfClass:[UITableView class]]) {
         UITableView *tableView = (UITableView *)targetScrollView;
-
-        // 强制刷新
         forceRefreshFileList();
 
-        // 等待刷新完成
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             DLog(@"🔍 Searching for cell with name: %@", fileName);
 
@@ -385,7 +371,6 @@ static void simulateTapFileNamed(NSString *fileName) {
                 UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
                 if (!cell) continue;
 
-                // 检查 cell 的所有子视图
                 BOOL found = NO;
                 for (UIView *subview in cell.contentView.subviews) {
                     if ([subview isKindOfClass:[UILabel class]]) {
@@ -414,7 +399,6 @@ static void simulateTapFileNamed(NSString *fileName) {
             }
             DLog(@"⚠️ Cell not found for: %@", fileName);
 
-            // 如果没找到，尝试点击第一个可见 cell（可能是界面还没更新）
             NSArray *visibleRows = [tableView indexPathsForVisibleRows];
             if (visibleRows.count > 0) {
                 NSIndexPath *firstPath = visibleRows[0];
@@ -463,7 +447,29 @@ static void simulateTapFileNamed(NSString *fileName) {
     }
 }
 
-// ========== 触发下载流程 ==========
+// ========== 自动返回上一页 ==========
+
+static void autoNavigateBack(void) {
+    DLog(@"🔙 Auto navigating back...");
+
+    UIViewController *vc = topViewController();
+    if (!vc) return;
+
+    if (vc.navigationController && vc.navigationController.viewControllers.count > 1) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [vc.navigationController popViewControllerAnimated:YES];
+            DLog(@"✅ Popped view controller");
+        });
+    } else {
+        // 尝试关闭模态视图
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [vc dismissViewControllerAnimated:YES completion:nil];
+            DLog(@"✅ Dismissed modal");
+        });
+    }
+}
+
+// ========== 触发下载流程（改进版） ==========
 
 static void downloadSingleFile(NSString *fileName, NSString *filePath, NSString *fileId) {
     DLog(@"🎯 Target file: %@ at %@", fileName, filePath);
@@ -481,23 +487,38 @@ static void downloadSingleFile(NSString *fileName, NSString *filePath, NSString 
             return;
         }
 
-        DLog(@"✅ Renamed, waiting 4s then simulating tap...");
+        DLog(@"✅ Renamed successfully!");
 
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"已触发下载"
-                                                                       message:[NSString stringWithFormat:@"%@ 已重命名为 %@，正在模拟点击...", fileName, pdfName]
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"已重命名"
+                                                                       message:[NSString stringWithFormat:@"%@ -> %@\n\n正在打开文件刷新状态...", fileName, pdfName]
                                                                 preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
         UIViewController *vc = topViewController();
         if (vc) [vc presentViewController:alert animated:YES completion:nil];
 
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        // 等待 Alert 消失后模拟点击
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+
+            // 第一次点击：进入预览界面刷新文件状态
             simulateTapFileNamed(pdfName);
 
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                DLog(@"🔄 Restoring original name...");
-                NSString *pdfPath = [[filePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:pdfName];
-                renameFile(fileId, pdfPath, fileName, ^(BOOL success, NSError *err) {
-                    DLog(@"%@ Restore name: %@", success ? @"✅" : @"❌", err ? err.localizedDescription : @"");
+            // 等待2秒后自动返回
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                autoNavigateBack();
+
+                // 返回后再等待2秒，再次点击触发下载
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    DLog(@"🎯 Second tap to trigger download...");
+                    simulateTapFileNamed(pdfName);
+
+                    // 10秒后改回原名
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        DLog(@"🔄 Restoring original name...");
+                        NSString *pdfPath = [[filePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:pdfName];
+                        renameFile(fileId, pdfPath, fileName, ^(BOOL success, NSError *err) {
+                            DLog(@"%@ Restore name: %@", success ? @"✅" : @"❌", err ? err.localizedDescription : @"");
+                        });
+                    });
                 });
             });
         });
@@ -654,7 +675,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"🚀 BaiduPan Troll v7.6 loaded");
+    DLog(@"🚀 BaiduPan Troll v7.7 loaded");
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
