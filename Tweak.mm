@@ -1,12 +1,9 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v9.0
-//  Feature: Added internal app download trigger for large files (>50MB)
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v8.3
 //  Fix: objc_setAssociatedObject key type (const void*), removed hardcoded fallback token
-//  Fix v8.3: Replaced private API KVC with standard addTextFieldWithConfigurationHandler
+//  Fix v8.3: Replaced private API KVC (setValue:forKey:@"contentViewController") with standard addTextFieldWithConfigurationHandler
 //            Removed LinkCopyButton subclass to avoid UIButton class-cluster crash
 //            Added __weak reference for progressAlert to prevent use-after-free
-//  Fix v8.4: "再次复制" now also restores original filename in one step
-//            Skip rename if file is already .pdf
 //  Token source: auto-detected from app only (NSUserDefaults + memory scan)
 //
 
@@ -19,9 +16,6 @@ static NSString *gCurrentPath = nil;
 static NSString *gBdstoken = nil;
 static NSString *gBDUSS = nil;
 static UIButton *gFloatButton = nil;
-
-// ========== 文件大小阈值 ==========
-static const long long kDirectLinkSizeLimit = 50 * 1024 * 1024; // 50MB
 
 static UIViewController * topViewController(void) {
     UIWindow *window = nil;
@@ -356,159 +350,14 @@ static void forceRefreshFileList(void) {
     }
 }
 
-// ========== v9.0 新增：调用客户端内部下载 ==========
+// ========== v8.3 UI Dialog (Fixed Crash) ==========
 
-// 格式化文件大小
-static NSString * formatFileSize(long long bytes) {
-    if (bytes < 1024) return [NSString stringWithFormat:@"%lld B", bytes];
-    if (bytes < 1024 * 1024) return [NSString stringWithFormat:@"%.1f KB", bytes / 1024.0];
-    if (bytes < 1024 * 1024 * 1024) return [NSString stringWithFormat:@"%.1f MB", bytes / (1024.0 * 1024.0)];
-    return [NSString stringWithFormat:@"%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0)];
-}
-
-
-// ========== v9.1 改进：更可靠的客户端下载触发 ==========
-
-static void restoreNameAndTriggerDownload(NSString *fileId, NSString *pdfPath, NSString *originalName) {
-    renameFile(fileId, pdfPath, originalName, ^(BOOL ok, NSError *e) {
-        if (ok) {
-            DLog(@"Restored name to %@", originalName);
-            showToast(@"已恢复文件名");
-            forceRefreshFileList();
-
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                UIAlertController *hint = [UIAlertController alertControllerWithTitle:@"请手动下载" 
-                                                                               message:[NSString stringWithFormat:@"文件名已恢复。请长按『%@』文件，在弹出菜单中选择「下载」。\n\n提示：也可以点击文件右侧的「更多」按钮选择下载。", originalName]
-                                                                        preferredStyle:UIAlertControllerStyleAlert];
-                [hint addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleDefault handler:nil]];
-                UIViewController *vc = topViewController();
-                if (vc) [vc presentViewController:hint animated:YES completion:nil];
-            });
-        } else {
-            DLog(@"Restore failed: %@", e.localizedDescription);
-            showToast(@"恢复文件名失败");
-        }
-    });
-}
-
-// 触发客户端内部下载（综合方案）
-static void triggerInternalDownload(NSString *filePath, NSString *fileName, NSString *fileId, long long fileSize) {
-    DLog(@"Triggering internal download for: %@ (%@)", fileName, formatFileSize(fileSize));
-
-    // 方案1: 发送通知
-    @try {
-        NSArray *notifs = @[
-            @"BDPanFileDownloadStartNotification",
-            @"BDPanDownloadTaskAddNotification",
-            @"netdisk.download.start",
-            @"com.baidu.netdisk.download.start",
-            @"BDPanDownloadAddTask",
-            @"BDFileDownloadStart",
-            @"kBaiduNetdiskDownloadStartNotification",
-            @"BDNDownloadTaskAdd",
-        ];
-        NSMutableDictionary *info = [@{
-            @"path": filePath ?: @"",
-            @"fileName": fileName ?: @"",
-            @"fs_id": fileId ?: @"",
-            @"size": @(fileSize),
-        } mutableCopy];
-        if (gBdstoken) info[@"bdstoken"] = gBdstoken;
-        if (gBDUSS) info[@"BDUSS"] = gBDUSS;
-
-        for (NSString *name in notifs) {
-            [[NSNotificationCenter defaultCenter] postNotificationName:name object:nil userInfo:info];
-        }
-        DLog(@"Posted %lu download notifications", (unsigned long)notifs.count);
-    } @catch (NSException *e) {}
-
-    // 方案2: 尝试 AppDelegate
-    @try {
-        id delegate = [[UIApplication sharedApplication] delegate];
-        NSArray *selNames = @[
-            @"startDownloadFile:",
-            @"addDownloadTask:",
-            @"downloadFileWithPath:",
-            @"startDownloadWithInfo:",
-            @"handleDownloadRequest:",
-            @"downloadFile:",
-        ];
-        for (NSString *selName in selNames) {
-            SEL sel = NSSelectorFromString(selName);
-            if ([delegate respondsToSelector:sel]) {
-                DLog(@"Found AppDelegate selector: %@", selName);
-                NSDictionary *info = @{@"path": filePath, @"fileName": fileName};
-                #pragma clang diagnostic push
-                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                [delegate performSelector:sel withObject:info];
-                #pragma clang diagnostic pop
-                return;
-            }
-        }
-    } @catch (NSException *e) {}
-
-    // 方案3: 尝试下载管理器
-    @try {
-        NSArray *classNames = @[
-            @"BDPanDownloadManager", @"BDPanDownloadTaskManager",
-            @"NetdiskDownloadManager", @"BDFileDownloadManager",
-            @"BaiduNetdiskDownloadManager", @"PanDownloadManager",
-            @"BDNDownloadManager", @"BNDownloadManager",
-            @"FileDownloadManager", @"DownloadManager",
-        ];
-
-        NSArray *methodNames = @[
-            @"addDownloadTask:", @"startDownload:",
-            @"downloadFile:", @"addTaskWithPath:",
-            @"addDownloadItem:", @"createDownloadTask:",
-        ];
-
-        for (NSString *className in classNames) {
-            Class cls = NSClassFromString(className);
-            if (!cls) continue;
-
-            id shared = nil;
-            if ([cls respondsToSelector:@selector(sharedManager)]) {
-                shared = [cls performSelector:@selector(sharedManager)];
-            } else if ([cls respondsToSelector:@selector(sharedInstance)]) {
-                shared = [cls performSelector:@selector(sharedInstance)];
-            } else if ([cls respondsToSelector:@selector(defaultManager)]) {
-                shared = [cls performSelector:@selector(defaultManager)];
-            }
-
-            if (!shared) continue;
-
-            for (NSString *methodName in methodNames) {
-                SEL sel = NSSelectorFromString(methodName);
-                if ([shared respondsToSelector:sel]) {
-                    DLog(@"Calling %@.%@", className, methodName);
-                    NSDictionary *info = @{@"path": filePath, @"fileName": fileName};
-                    #pragma clang diagnostic push
-                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                    [shared performSelector:sel withObject:info];
-                    #pragma clang diagnostic pop
-                    return;
-                }
-            }
-        }
-    } @catch (NSException *e) {}
-
-    showToast(@"已尝试触发客户端下载");
-}
-// ========== v9.0 UI Dialog ==========
-
-static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId, NSString *pdfPath, BOOL needsRestore, long long fileSize) {
-    NSString *sizeStr = formatFileSize(fileSize);
-    BOOL isLargeFile = fileSize > kDirectLinkSizeLimit;
-
-    NSString *title = isLargeFile ? @"文件较大，建议使用客户端下载" : @"直链已复制";
-    NSString *message = [NSString stringWithFormat:@"%@ (%@)\n\n%@", fileName, sizeStr,
-                         isLargeFile ? @"该文件超过50MB，直链可能无法下载。建议：\n1. 使用客户端下载（支持大文件、断点续传）\n2. 或复制直链到支持大文件的下载工具" : @"直链已复制到剪贴板。\n可使用 IDM、Aria2、Motrix 等工具粘贴下载。"];
-
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
-                                                                   message:message
+static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId, NSString *pdfPath) {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"直链已复制"
+                                                                   message:[NSString stringWithFormat:@"%@ 的直链已成功复制到剪贴板。\n\n可使用 IDM、Aria2、Motrix 等工具粘贴下载。", fileName]
                                                             preferredStyle:UIAlertControllerStyleAlert];
 
+    // 使用标准 API 添加文本框显示直链
     [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
         textField.text = link;
         textField.font = [UIFont fontWithName:@"Menlo" size:11] ?: [UIFont systemFontOfSize:11];
@@ -523,73 +372,27 @@ static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId,
         textField.userInteractionEnabled = YES;
     }];
 
-    if (needsRestore) {
-        if (isLargeFile) {
-            [alert addAction:[UIAlertAction actionWithTitle:@"📥 客户端下载" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-                showToast(@"正在恢复文件名并触发下载...");
-                restoreNameAndTriggerDownload(fileId, pdfPath, fileName);
-            }]];
-            [alert addAction:[UIAlertAction actionWithTitle:@"📋 复制直链" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-                copyToClipboard(link);
-                showToast(@"直链已复制！");
-            }]];
-            [alert addAction:[UIAlertAction actionWithTitle:@"保持pdf后缀" style:UIAlertActionStyleCancel handler:nil]];
-        } else {
-            [alert addAction:[UIAlertAction actionWithTitle:@"📋 再次复制并恢复原名" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-                copyToClipboard(link);
-                showToast(@"直链已再次复制！");
-                renameFile(fileId, pdfPath, fileName, ^(BOOL ok, NSError *e) {
-                    DLog(@"Restore: %@", ok ? @"OK" : e.localizedDescription);
-                });
-            }]];
-            [alert addAction:[UIAlertAction actionWithTitle:@"保持pdf后缀" style:UIAlertActionStyleCancel handler:nil]];
-        }
-    } else {
-        if (isLargeFile) {
-            [alert addAction:[UIAlertAction actionWithTitle:@"📥 客户端下载" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-                triggerInternalDownload(pdfPath, fileName, fileId, fileSize);
-            }]];
-        }
-        [alert addAction:[UIAlertAction actionWithTitle:@"📋 再次复制" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-            copyToClipboard(link);
-            showToast(@"直链已再次复制！");
-        }]];
-        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
-    }
+    // 再次复制
+    [alert addAction:[UIAlertAction actionWithTitle:@"📋 再次复制" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        copyToClipboard(link);
+        showToast(@"直链已再次复制！");
+    }]];
+
+    // 恢复原名
+    [alert addAction:[UIAlertAction actionWithTitle:@"↩️ 已复制，恢复原名" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        renameFile(fileId, pdfPath, fileName, ^(BOOL ok, NSError *e) {
+            DLog(@"Restore: %@", ok ? @"OK" : e.localizedDescription);
+        });
+    }]];
+
+    // 保持后缀
+    [alert addAction:[UIAlertAction actionWithTitle:@"保持pdf后缀" style:UIAlertActionStyleCancel handler:nil]];
 
     UIViewController *vc = topViewController();
     if (vc) [vc presentViewController:alert animated:YES completion:nil];
 }
 
-static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString *fileId, long long fileSize) {
-    NSString *ext = fileName.pathExtension.lowercaseString;
-    BOOL isAlreadyPDF = [ext isEqualToString:@"pdf"];
-    NSString *sizeStr = formatFileSize(fileSize);
-
-    if (isAlreadyPDF) {
-        DLog(@"File is already PDF (%@), skipping rename...", sizeStr);
-        UIAlertController *progressAlert = [UIAlertController alertControllerWithTitle:@"处理中..." message:@"获取直链..." preferredStyle:UIAlertControllerStyleAlert];
-        UIViewController *presentVC = topViewController();
-        if (presentVC) [presentVC presentViewController:progressAlert animated:YES completion:nil];
-
-        __weak UIAlertController *weakProgress = progressAlert;
-
-        fetchDirectLink(filePath, ^(NSString *link, NSError *err) {
-            [weakProgress dismissViewControllerAnimated:YES completion:^{
-                if (err || !link) {
-                    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"获取直链失败" message:err.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
-                    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-                    UIViewController *vc = topViewController(); if (vc) [vc presentViewController:alert animated:YES completion:nil];
-                    return;
-                }
-                copyToClipboard(link);
-                showToast(@"直链已复制到剪贴板！");
-                showLinkDialog(link, fileName, fileId, filePath, NO, fileSize);
-            }];
-        });
-        return;
-    }
-
+static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString *fileId) {
     NSString *pdfName = [fileName stringByAppendingString:@".pdf"];
     NSString *pdfPath = [[filePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:pdfName];
 
@@ -630,7 +433,7 @@ static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString
 
                     copyToClipboard(link);
                     showToast(@"直链已复制到剪贴板！");
-                    showLinkDialog(link, fileName, fileId, pdfPath, YES, fileSize);
+                    showLinkDialog(link, fileName, fileId, pdfPath);
                 }];
             });
         });
@@ -661,33 +464,19 @@ static void triggerDownloadFlow(void) {
             return;
         }
 
-        UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"选择文件获取直链/下载" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+        UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"选择文件获取直链" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
         for (NSDictionary *file in fileItems) {
             NSString *name = file[@"server_filename"];
             NSNumber *size = file[@"size"];
             NSString *fileId = [file[@"fs_id"] stringValue];
             NSString *path = file[@"path"];
-            long long fileSize = [size longLongValue];
-            NSString *sizeStr = formatFileSize(fileSize);
-            NSString *title = [NSString stringWithFormat:@"%@ (%@)", name, sizeStr];
-
+            NSString *title = name;
+            if (size) {
+                double mb = [size doubleValue] / (1024.0 * 1024.0);
+                title = [NSString stringWithFormat:@"%@ (%.1f MB)", name, mb];
+            }
             [sheet addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                if (fileSize > kDirectLinkSizeLimit) {
-                    UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"大文件提示" 
-                                                                                     message:[NSString stringWithFormat:@"%@ (%@) 超过50MB，直链可能无法下载。是否直接调用客户端下载？", name, sizeStr]
-                                                                              preferredStyle:UIAlertControllerStyleAlert];
-                    [confirm addAction:[UIAlertAction actionWithTitle:@"📥 客户端下载" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-                        runRenameAndGetLink(name, path, fileId, fileSize);
-                    }]];
-                    [confirm addAction:[UIAlertAction actionWithTitle:@"📋 仍然获取直链" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-                        runRenameAndGetLink(name, path, fileId, fileSize);
-                    }]];
-                    [confirm addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-                    UIViewController *vc = topViewController();
-                    if (vc) [vc presentViewController:confirm animated:YES completion:nil];
-                } else {
-                    runRenameAndGetLink(name, path, fileId, fileSize);
-                }
+                runRenameAndGetLink(name, path, fileId);
             }]];
         }
         [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
@@ -712,10 +501,10 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 16 ? 16 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v9.0"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v8.3"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"📥 获取直链/下载" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+    [alert addAction:[UIAlertAction actionWithTitle:@"📥 获取直链" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         triggerDownloadFlow();
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
@@ -768,7 +557,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v9.0 loaded");
+    DLog(@"BaiduPan Troll v8.3 loaded");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
