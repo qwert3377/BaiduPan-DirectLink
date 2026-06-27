@@ -349,6 +349,88 @@ static void forceRefreshFileList(void) {
 
 // ========== v8.2 UI Dialog (Fixed) ==========
 
+
+// ========== PDF Open Test Methods ==========
+
+static void openPDFWithDocumentInteraction(NSString *filePath) {
+    NSURL *fileURL = [NSURL fileURLWithPath:filePath];
+    if (!fileURL) {
+        showToast(@"文件路径无效");
+        return;
+    }
+
+    UIViewController *vc = topViewController();
+    if (!vc) return;
+
+    UIDocumentInteractionController *docController = [UIDocumentInteractionController interactionControllerWithURL:fileURL];
+    docController.delegate = (id<UIDocumentInteractionControllerDelegate>)vc;
+
+    // Try to present preview
+    BOOL previewOpened = [docController presentPreviewAnimated:YES];
+    if (!previewOpened) {
+        // Fallback to open in menu
+        CGRect rect = CGRectMake(vc.view.bounds.size.width/2 - 150, vc.view.bounds.size.height/2 - 150, 300, 300);
+        [docController presentOpenInMenuFromRect:rect inView:vc.view animated:YES];
+    }
+}
+
+static void openPDFWithQuickLook(NSString *filePath) {
+    // This requires importing QuickLook framework
+    // For now, just show a toast indicating we need to test this
+    showToast(@"QLPreviewController 需要 QuickLook.framework");
+}
+
+static void triggerBaiduPanInternalOpen(NSString *filePath, NSString *fileName, NSString *fileId) {
+    // Method 1: Try to find and call BaiduPan's internal file open method
+    // This is a guess based on common Baidu naming conventions
+
+    // Try to get the current file list VC
+    UIViewController *vc = topViewController();
+    if (!vc) return;
+
+    // Look for BaiduPan's file list view controller in the hierarchy
+    UIViewController *targetVC = nil;
+    for (UIViewController *child in vc.childViewControllers) {
+        NSString *className = NSStringFromClass([child class]);
+        if ([className containsString:@"File"] || [className containsString:@"List"] || 
+            [className containsString:@"Pan"] || [className containsString:@"Disk"]) {
+            targetVC = child;
+            break;
+        }
+    }
+
+    if (targetVC) {
+        DLog(@"Found potential file VC: %@", NSStringFromClass([targetVC class]));
+
+        // Try to call a method that might open the file
+        // Common patterns: openFile:, previewFile:, didSelectFile:, etc.
+        SEL selectors[] = {
+            NSSelectorFromString(@"openFile:"),
+            NSSelectorFromString(@"previewFile:"),
+            NSSelectorFromString(@"didSelectFile:"),
+            NSSelectorFromString(@"showFilePreview:"),
+            NSSelectorFromString(@"openDocument:"),
+            NSSelectorFromString(@"previewDocumentWithPath:"),
+            NSSelectorFromString(@"handleFileTap:"),
+            NSSelectorFromString(@"onFileSelected:"),
+            NSSelectorFromString(@"openFileWithId:path:name:"),
+            NSSelectorFromString(@"downloadAndOpenFile:"),
+        };
+
+        for (int i = 0; i < sizeof(selectors)/sizeof(SEL); i++) {
+            if ([targetVC respondsToSelector:selectors[i]]) {
+                DLog(@"Found selector: %@", NSStringFromSelector(selectors[i]));
+                // Don't actually call it yet, just log it
+                showToast([NSString stringWithFormat:@"找到方法: %@", NSStringFromSelector(selectors[i])]);
+                return;
+            }
+        }
+    }
+
+    // Fallback: Use UIDocumentInteractionController
+    openPDFWithDocumentInteraction(filePath);
+}
+
 static void bdtRestoreName(NSString *fileId, NSString *pdfPath, NSString *fileName, UIViewController *overlayVC);
 
 static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId, NSString *pdfPath) {
