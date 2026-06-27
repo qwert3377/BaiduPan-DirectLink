@@ -60,24 +60,39 @@ static NSString * scanMemoryForBdstoken(void) {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSDictionary *allDefaults = [defaults dictionaryRepresentation];
 
+    NSString *bestToken = nil;
+    NSString *bestKey = nil;
+
     for (NSString *key in allDefaults) {
         id value = allDefaults[key];
         if ([value isKindOfClass:[NSString class]]) {
             NSString *str = value;
-            // bdstoken: 32位十六进制，必须同时包含数字和字母
-            if (str.length == 32) {
-                NSRegularExpression *hexRegex = [NSRegularExpression regularExpressionWithPattern:@"^[a-f0-9]{32}$" options:NSRegularExpressionCaseInsensitive error:nil];
-                if ([hexRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, str.length)] == 1) {
-                    // 必须包含至少一个字母（排除纯数字）
-                    NSRegularExpression *letterRegex = [NSRegularExpression regularExpressionWithPattern:@"[a-fA-F]" options:0 error:nil];
-                    if ([letterRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, str.length)] > 0) {
-                        DLog(@"🔍 Found bdstoken in key: %@ = %@...", key, [str substringToIndex:MIN(16, str.length)]);
-                        return str;
+            // 检查是否是十六进制字符串
+            NSRegularExpression *hexRegex = [NSRegularExpression regularExpressionWithPattern:@"^[a-fA-F0-9]+$" options:0 error:nil];
+            if ([hexRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, str.length)] == 1) {
+                // 必须包含至少一个字母（排除纯数字）
+                NSRegularExpression *letterRegex = [NSRegularExpression regularExpressionWithPattern:@"[a-fA-F]" options:0 error:nil];
+                if ([letterRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, str.length)] > 0) {
+                    // 优先找32位的（网页版标准长度）
+                    if (str.length == 32) {
+                        DLog(@"🔍 Found 32-bit token in key '%@': %@...", key, [str substringToIndex:MIN(16, str.length)]);
+                        return str;  // 找到32位直接返回
+                    }
+                    // 记录16位的作为备选
+                    if (str.length == 16 && !bestToken) {
+                        bestToken = str;
+                        bestKey = key;
                     }
                 }
             }
         }
     }
+
+    if (bestToken) {
+        DLog(@"⚠️ Only found 16-bit token in key '%@': %@... (expected 32-bit)", bestKey, [bestToken substringToIndex:MIN(16, bestToken.length)]);
+        return bestToken;
+    }
+
     return nil;
 }
 
