@@ -1,6 +1,6 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v7.5
-//  Fixed: Better simulate tap with real touch events, support UICollectionView
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v7.6
+//  Fixed: Force refresh file list after rename
 //
 
 #import <UIKit/UIKit.h>
@@ -23,6 +23,7 @@ static NSString * strictEncodeURIComponent(NSString *str);
 static void fetchFileList(void (^completion)(NSArray *files, NSError *err));
 static void renameFile(NSString *fileId, NSString *path, NSString *newName, void (^completion)(BOOL success, NSError *err));
 static void simulateTapFileNamed(NSString *fileName);
+static void forceRefreshFileList(void);
 static void triggerDownloadFlow(void);
 
 // ========== 工具函数 ==========
@@ -271,7 +272,60 @@ static void renameFile(NSString *fileId, NSString *path, NSString *newName, void
     });
 }
 
-// ========== 模拟点击 - 使用真实触摸事件 ==========
+// ========== 强制刷新文件列表 ==========
+
+static void forceRefreshFileList(void) {
+    DLog(@"🔄 Force refreshing file list...");
+
+    UIViewController *vc = topViewController();
+    if (!vc) return;
+
+    // 方法1: 尝试调用百度网盘内部的刷新方法
+    NSArray *refreshSelectors = @[@"refreshData", @"reloadData", @"refreshFileList", @"loadData", @"requestData", @"fetchFileList", @"reloadFileList"];
+
+    for (NSString *selName in refreshSelectors) {
+        SEL sel = NSSelectorFromString(selName);
+        if ([vc respondsToSelector:sel]) {
+            DLog(@"✅ Calling VC refresh method: %@", selName);
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [vc performSelector:sel];
+            #pragma clang diagnostic pop
+            return;
+        }
+    }
+
+    // 方法2: 查找 UIScrollView 并触发下拉刷新
+    void (^findAndTriggerRefresh)(UIView *) = ^(UIView *view) {
+        if ([view isKindOfClass:[UIScrollView class]]) {
+            UIScrollView *scrollView = (UIScrollView *)view;
+            if (scrollView.refreshControl) {
+                DLog(@"✅ Triggering UIRefreshControl");
+                [scrollView.refreshControl beginRefreshing];
+                scrollView.contentOffset = CGPointMake(0, -scrollView.refreshControl.frame.size.height);
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    [scrollView.refreshControl endRefreshing];
+                });
+                return;
+            }
+        }
+        for (UIView *subview in view.subviews) {
+            findAndTriggerRefresh(subview);
+        }
+    };
+    findAndTriggerRefresh(vc.view);
+
+    // 方法3: 尝试从导航栏查找刷新按钮并点击
+    if (vc.navigationItem.rightBarButtonItems) {
+        for (UIBarButtonItem *item in vc.navigationItem.rightBarButtonItems) {
+            if (item.action) {
+                DLog(@"ℹ️ Found right bar button action: %@", NSStringFromSelector(item.action));
+            }
+        }
+    }
+}
+
+// ========== 模拟点击 ==========
 
 static UIScrollView * findScrollViewInView(UIView *view) {
     if ([view isKindOfClass:[UITableView class]] || [view isKindOfClass:[UICollectionView class]]) {
@@ -286,12 +340,9 @@ static UIScrollView * findScrollViewInView(UIView *view) {
 
 static void simulateRealTapOnView(UIView *targetView) {
     if (!targetView) return;
-
     CGPoint center = CGPointMake(targetView.bounds.size.width / 2, targetView.bounds.size.height / 2);
 
-    // 创建触摸事件
     UITouch *touch = [[UITouch alloc] init];
-    // 使用私有 API 设置触摸属性
     @try {
         [touch setValue:targetView forKey:@"view"];
         [touch setValue:[NSNumber numberWithInteger:1] forKey:@"phase"];
@@ -300,8 +351,6 @@ static void simulateRealTapOnView(UIView *targetView) {
     } @catch (NSException *e) {}
 
     UIEvent *event = [[UIApplication sharedApplication] performSelector:@selector(_touchesEvent)];
-
-    // 发送触摸事件
     [targetView touchesBegan:[NSSet setWithObject:touch] withEvent:event];
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -325,66 +374,88 @@ static void simulateTapFileNamed(NSString *fileName) {
     if ([targetScrollView isKindOfClass:[UITableView class]]) {
         UITableView *tableView = (UITableView *)targetScrollView;
 
-        // 先刷新数据
-        [tableView reloadData];
+        // 强制刷新
+        forceRefreshFileList();
 
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        // 等待刷新完成
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            DLog(@"🔍 Searching for cell with name: %@", fileName);
+
             for (NSIndexPath *indexPath in [tableView indexPathsForVisibleRows]) {
                 UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
                 if (!cell) continue;
 
+                // 检查 cell 的所有子视图
+                BOOL found = NO;
                 for (UIView *subview in cell.contentView.subviews) {
                     if ([subview isKindOfClass:[UILabel class]]) {
                         UILabel *label = (UILabel *)subview;
-                        if (label.text && [label.text containsString:fileName]) {
-                            DLog(@"✅ Found cell at indexPath: %@", indexPath);
-
-                            // 方法1: 调用 delegate
-                            dispatch_async(dispatch_get_main_queue(), ^{
-                                [tableView.delegate tableView:tableView didSelectRowAtIndexPath:indexPath];
-                                [tableView selectRowAtIndexPath:indexPath animated:NO scrollPosition:UITableViewScrollPositionNone];
-                            });
-
-                            // 方法2: 真实触摸事件
-                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                                simulateRealTapOnView(cell);
-                            });
-
-                            return;
+                        if (label.text && ([label.text isEqualToString:fileName] || [label.text containsString:fileName])) {
+                            found = YES;
+                            break;
                         }
                     }
                 }
+
+                if (found) {
+                    DLog(@"✅ Found cell at indexPath: %@", indexPath);
+
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [tableView.delegate tableView:tableView didSelectRowAtIndexPath:indexPath];
+                        [tableView selectRowAtIndexPath:indexPath animated:NO scrollPosition:UITableViewScrollPositionNone];
+                    });
+
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        simulateRealTapOnView(cell);
+                    });
+
+                    return;
+                }
             }
             DLog(@"⚠️ Cell not found for: %@", fileName);
+
+            // 如果没找到，尝试点击第一个可见 cell（可能是界面还没更新）
+            NSArray *visibleRows = [tableView indexPathsForVisibleRows];
+            if (visibleRows.count > 0) {
+                NSIndexPath *firstPath = visibleRows[0];
+                UITableViewCell *firstCell = [tableView cellForRowAtIndexPath:firstPath];
+                DLog(@"⚠️ Trying first visible cell as fallback");
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [tableView.delegate tableView:tableView didSelectRowAtIndexPath:firstPath];
+                    simulateRealTapOnView(firstCell);
+                });
+            }
         });
 
     } else if ([targetScrollView isKindOfClass:[UICollectionView class]]) {
         UICollectionView *collectionView = (UICollectionView *)targetScrollView;
+        forceRefreshFileList();
 
-        [collectionView reloadData];
-
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             for (NSIndexPath *indexPath in [collectionView indexPathsForVisibleItems]) {
                 UICollectionViewCell *cell = [collectionView cellForItemAtIndexPath:indexPath];
                 if (!cell) continue;
 
+                BOOL found = NO;
                 for (UIView *subview in cell.contentView.subviews) {
                     if ([subview isKindOfClass:[UILabel class]]) {
                         UILabel *label = (UILabel *)subview;
-                        if (label.text && [label.text containsString:fileName]) {
-                            DLog(@"✅ Found collection cell at indexPath: %@", indexPath);
-
-                            dispatch_async(dispatch_get_main_queue(), ^{
-                                [collectionView.delegate collectionView:collectionView didSelectItemAtIndexPath:indexPath];
-                            });
-
-                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                                simulateRealTapOnView(cell);
-                            });
-
-                            return;
+                        if (label.text && ([label.text isEqualToString:fileName] || [label.text containsString:fileName])) {
+                            found = YES;
+                            break;
                         }
                     }
+                }
+
+                if (found) {
+                    DLog(@"✅ Found collection cell at indexPath: %@", indexPath);
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [collectionView.delegate collectionView:collectionView didSelectItemAtIndexPath:indexPath];
+                    });
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        simulateRealTapOnView(cell);
+                    });
+                    return;
                 }
             }
             DLog(@"⚠️ Collection cell not found for: %@", fileName);
@@ -420,10 +491,8 @@ static void downloadSingleFile(NSString *fileName, NSString *filePath, NSString 
         if (vc) [vc presentViewController:alert animated:YES completion:nil];
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-
             simulateTapFileNamed(pdfName);
 
-            // 8秒后改回原名（给下载足够时间）
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 DLog(@"🔄 Restoring original name...");
                 NSString *pdfPath = [[filePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:pdfName];
@@ -585,7 +654,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"🚀 BaiduPan Troll v7.5 loaded");
+    DLog(@"🚀 BaiduPan Troll v7.6 loaded");
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
