@@ -274,6 +274,24 @@ static void renameFile(NSString *fileId, NSString *path, NSString *newName, void
 
 // ========== 强制刷新文件列表 ==========
 
+static void triggerRefreshControlInView(UIView *view) {
+    if ([view isKindOfClass:[UIScrollView class]]) {
+        UIScrollView *scrollView = (UIScrollView *)view;
+        if (scrollView.refreshControl) {
+            DLog(@"✅ Triggering UIRefreshControl");
+            [scrollView.refreshControl beginRefreshing];
+            scrollView.contentOffset = CGPointMake(0, -scrollView.refreshControl.frame.size.height);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [scrollView.refreshControl endRefreshing];
+            });
+            return;
+        }
+    }
+    for (UIView *subview in view.subviews) {
+        triggerRefreshControlInView(subview);
+    }
+}
+
 static void forceRefreshFileList(void) {
     DLog(@"🔄 Force refreshing file list...");
 
@@ -294,24 +312,7 @@ static void forceRefreshFileList(void) {
         }
     }
 
-    void (^findAndTriggerRefresh)(UIView *) = ^(UIView *view) {
-        if ([view isKindOfClass:[UIScrollView class]]) {
-            UIScrollView *scrollView = (UIScrollView *)view;
-            if (scrollView.refreshControl) {
-                DLog(@"✅ Triggering UIRefreshControl");
-                [scrollView.refreshControl beginRefreshing];
-                scrollView.contentOffset = CGPointMake(0, -scrollView.refreshControl.frame.size.height);
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    [scrollView.refreshControl endRefreshing];
-                });
-                return;
-            }
-        }
-        for (UIView *subview in view.subviews) {
-            findAndTriggerRefresh(subview);
-        }
-    };
-    findAndTriggerRefresh(vc.view);
+    triggerRefreshControlInView(vc.view);
 }
 
 // ========== 模拟点击 ==========
