@@ -1,9 +1,11 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v8.3
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v8.4
 //  Fix: objc_setAssociatedObject key type (const void*), removed hardcoded fallback token
 //  Fix v8.3: Replaced private API KVC (setValue:forKey:@"contentViewController") with standard addTextFieldWithConfigurationHandler
 //            Removed LinkCopyButton subclass to avoid UIButton class-cluster crash
 //            Added __weak reference for progressAlert to prevent use-after-free
+//  Fix v8.4: "再次复制" now also restores original filename in one step
+//            Skip rename if file is already .pdf
 //  Token source: auto-detected from app only (NSUserDefaults + memory scan)
 //
 
@@ -350,14 +352,13 @@ static void forceRefreshFileList(void) {
     }
 }
 
-// ========== v8.3 UI Dialog (Fixed Crash) ==========
+// ========== v8.4 UI Dialog ==========
 
-static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId, NSString *pdfPath) {
+static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId, NSString *pdfPath, BOOL needsRestore) {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"直链已复制"
                                                                    message:[NSString stringWithFormat:@"%@ 的直链已成功复制到剪贴板。\n\n可使用 IDM、Aria2、Motrix 等工具粘贴下载。", fileName]
                                                             preferredStyle:UIAlertControllerStyleAlert];
 
-    // 使用标准 API 添加文本框显示直链
     [alert addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull textField) {
         textField.text = link;
         textField.font = [UIFont fontWithName:@"Menlo" size:11] ?: [UIFont systemFontOfSize:11];
@@ -372,27 +373,59 @@ static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId,
         textField.userInteractionEnabled = YES;
     }];
 
-    // 再次复制
-    [alert addAction:[UIAlertAction actionWithTitle:@"📋 再次复制" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        copyToClipboard(link);
-        showToast(@"直链已再次复制！");
-    }]];
-
-    // 恢复原名
-    [alert addAction:[UIAlertAction actionWithTitle:@"↩️ 已复制，恢复原名" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        renameFile(fileId, pdfPath, fileName, ^(BOOL ok, NSError *e) {
-            DLog(@"Restore: %@", ok ? @"OK" : e.localizedDescription);
-        });
-    }]];
-
-    // 保持后缀
-    [alert addAction:[UIAlertAction actionWithTitle:@"保持pdf后缀" style:UIAlertActionStyleCancel handler:nil]];
+    if (needsRestore) {
+        // 文件被重命名过：再次复制同时恢复原名，一步完成
+        [alert addAction:[UIAlertAction actionWithTitle:@"📋 再次复制并恢复原名" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            copyToClipboard(link);
+            showToast(@"直链已再次复制！");
+            renameFile(fileId, pdfPath, fileName, ^(BOOL ok, NSError *e) {
+                DLog(@"Restore: %@", ok ? @"OK" : e.localizedDescription);
+            });
+        }]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"保持pdf后缀" style:UIAlertActionStyleCancel handler:nil]];
+    } else {
+        // 文件本来就是pdf，无需恢复
+        [alert addAction:[UIAlertAction actionWithTitle:@"📋 再次复制" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            copyToClipboard(link);
+            showToast(@"直链已再次复制！");
+        }]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+    }
 
     UIViewController *vc = topViewController();
     if (vc) [vc presentViewController:alert animated:YES completion:nil];
 }
 
 static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString *fileId) {
+    // 检查文件是否已经是 PDF，如果是则跳过重命名
+    NSString *ext = fileName.pathExtension.lowercaseString;
+    BOOL isAlreadyPDF = [ext isEqualToString:@"pdf"];
+
+    if (isAlreadyPDF) {
+        DLog(@"File is already PDF, skipping rename...");
+        UIAlertController *progressAlert = [UIAlertController alertControllerWithTitle:@"处理中..." message:@"获取直链..." preferredStyle:UIAlertControllerStyleAlert];
+        UIViewController *presentVC = topViewController();
+        if (presentVC) [presentVC presentViewController:progressAlert animated:YES completion:nil];
+
+        __weak UIAlertController *weakProgress = progressAlert;
+
+        fetchDirectLink(filePath, ^(NSString *link, NSError *err) {
+            [weakProgress dismissViewControllerAnimated:YES completion:^{
+                if (err || !link) {
+                    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"获取直链失败" message:err.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
+                    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                    UIViewController *vc = topViewController(); if (vc) [vc presentViewController:alert animated:YES completion:nil];
+                    return;
+                }
+                copyToClipboard(link);
+                showToast(@"直链已复制到剪贴板！");
+                showLinkDialog(link, fileName, fileId, filePath, NO);
+            }];
+        }];
+        return;
+    }
+
+    // 非 PDF 文件，走重命名流程
     NSString *pdfName = [fileName stringByAppendingString:@".pdf"];
     NSString *pdfPath = [[filePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:pdfName];
 
@@ -433,7 +466,7 @@ static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString
 
                     copyToClipboard(link);
                     showToast(@"直链已复制到剪贴板！");
-                    showLinkDialog(link, fileName, fileId, pdfPath);
+                    showLinkDialog(link, fileName, fileId, pdfPath, YES);
                 }];
             });
         });
@@ -501,7 +534,7 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 16 ? 16 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v8.3"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v8.4"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"📥 获取直链" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
@@ -557,7 +590,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v8.3 loaded");
+    DLog(@"BaiduPan Troll v8.4 loaded");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
