@@ -34,22 +34,22 @@ static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *header
 static NSString * getBdstoken(void);
 static NSString * getBDUSS(void);
 static NSString * getCuid(void);
-static NSString * getAppUID(void);
-static NSString * getCurrentPath(void);
+static NSString * __attribute__((unused)) getAppUID(void);
+static NSString * __attribute__((unused)) getCurrentPath(void);
 static void autoDetectPathAndToken(void);
 static void fetchFileList(NSString *path, void (^completion)(NSArray *files, NSError *err));
 static NSString * digOutDlink(id obj);
 static void fetchDlinkViaFilemetas(NSString *filePath, NSInteger retry, void (^completion)(NSString *dlink, NSError *err));
 static void fetchDlinkViaLocateDownload(NSString *filePath, NSInteger retry, void (^completion)(NSString *dlink, NSError *err));
 static void fetchDlinkPortal(NSString *filePath, void (^completion)(NSString *dlink, NSError *err));
-static void refreshFileMeta(NSString *filePath, void (^completion)(void));
+static void __attribute__((unused)) refreshFileMeta(NSString *filePath, void (^completion)(void));
 static void refreshFileListCache(NSString *path, void (^completion)(void));
 static void renameFile(NSString *fileId, NSString *path, NSString *newName, void (^completion)(BOOL success, NSError *err));
 static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentPath, NSInteger fileSize);
 static NSString * strictEncodeURIComponent(NSString *str);
 static NSString * extractPathFromViewController(UIViewController *vc);
 static NSString * getPathFromNavStack(void);
-static NSString * extractPathFromURL(NSString *urlString);
+static NSString * __attribute__((unused)) extractPathFromURL(NSString *urlString);
 static void simulateTapFileNamed(NSString *fileName);
 static void triggerClientDownload(NSString *fileId, NSString *path, NSString *fileName);
 static void hookNetworkRequests(void);
@@ -183,7 +183,7 @@ static NSString * getCuid(void) {
     return gCuid;
 }
 
-static NSString * getAppUID(void) {
+static NSString * __attribute__((unused)) getAppUID(void) {
     if (gAppUID) return gAppUID;
 
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
@@ -249,7 +249,7 @@ static NSString * getPathFromNavStack(void) {
     return extractPathFromViewController(vc);
 }
 
-static NSString * extractPathFromURL(NSString *urlString) {
+static NSString * __attribute__((unused)) extractPathFromURL(NSString *urlString) {
     if (!urlString) return nil;
 
     NSURL *url = [NSURL URLWithString:urlString];
@@ -301,7 +301,7 @@ static void autoDetectPathAndToken(void) {
     }
 }
 
-static NSString * getCurrentPath(void) {
+static NSString * __attribute__((unused)) getCurrentPath(void) {
     if (!gCurrentPath) {
         autoDetectPathAndToken();
     }
@@ -568,7 +568,7 @@ static void renameFile(NSString *fileId, NSString *path, NSString *newName, void
     });
 }
 
-static void refreshFileMeta(NSString *filePath, void (^completion)(void)) {
+static void __attribute__((unused)) refreshFileMeta(NSString *filePath, void (^completion)(void)) {
     DLog(@"🔄 Refreshing file meta...");
     completion();
 }
