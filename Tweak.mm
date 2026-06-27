@@ -602,7 +602,7 @@ static void restoreNameAndTriggerDownload(NSString *fileId, NSString *pdfPath, N
                 // 无论自动触发是否成功，都提示用户手动操作
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     UIAlertController *hint = [UIAlertController alertControllerWithTitle:@"请手动下载" 
-                                                                                   message:[NSString stringWithFormat:@"如果自动下载未触发，请手动长按 "%@" 文件，选择下载。", originalName]
+                                                                                   message:[NSString stringWithFormat:@"如果自动下载未触发，请手动长按『%@』文件，选择下载。", originalName]
                                                                             preferredStyle:UIAlertControllerStyleAlert];
                     [hint addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleDefault handler:nil]];
                     UIViewController *vc = topViewController();
@@ -691,7 +691,7 @@ static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId,
         if (isLargeFile) {
             [alert addAction:[UIAlertAction actionWithTitle:@"📥 客户端下载" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
                 showToast(@"正在恢复文件名并触发下载...");
-                restoreNameAndTriggerDownload(fileId, pdfPath, fileName);
+                restoreNameAndPromptDownload(fileId, pdfPath, fileName);
             }]];
             [alert addAction:[UIAlertAction actionWithTitle:@"📋 复制直链" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
                 copyToClipboard(link);
