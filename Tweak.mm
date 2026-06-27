@@ -1,11 +1,10 @@
 //
-//  BaiduPan Final Probe - 针对 C++ 下载内核
-//  Hook ObjC + C++ 双层调用
+//  BaiduPan Final Probe - 修复版
+//  所有普通函数放在 %hook 块外面
 //
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
-#import <substrate.h>
 
 static NSMutableString *gLog = nil;
 static NSMutableArray *gKeyFindings = nil;
@@ -53,6 +52,33 @@ static void showResults(void) {
     [vc presentViewController:alert animated:YES completion:nil];
 }
 
+static void hookDownloadClasses(void) {
+    int count = objc_getClassList(NULL, 0);
+    Class *classes = (__unsafe_unretained Class *)malloc(sizeof(Class) * count);
+    objc_getClassList(classes, count);
+    for (int i = 0; i < count; i++) {
+        NSString *name = NSStringFromClass(classes[i]);
+        NSString *lower = name.lowercaseString;
+        if ([lower containsString:@"download"] || [lower containsString:@"transfer"] ||
+            [lower containsString:@"bdpan"] || [lower containsString:@"netdisk"]) {
+            KEY(@"类: %@", name);
+            unsigned int mc = 0;
+            Method *methods = class_copyMethodList(classes[i], &mc);
+            for (unsigned int j = 0; j < mc; j++) {
+                NSString *sel = NSStringFromSelector(method_getName(methods[j]));
+                NSString *sl = sel.lowercaseString;
+                if ([sl containsString:@"download"] || [sl containsString:@"transfer"] ||
+                    [sl containsString:@"start"] || [sl containsString:@"add"] ||
+                    [sl containsString:@"task"]) {
+                    KEY(@"  方法: %@.%@", name, sel);
+                }
+            }
+            free(methods);
+        }
+    }
+    free(classes);
+}
+
 %hook NSNotificationCenter
 - (void)postNotificationName:(NSString *)name object:(id)object userInfo:(NSDictionary *)userInfo {
     NSString *lower = name.lowercaseString;
@@ -94,33 +120,6 @@ static void showResults(void) {
     return %orig;
 }
 %end
-
-static void hookDownloadClasses(void) {
-    int count = objc_getClassList(NULL, 0);
-    Class *classes = (__unsafe_unretained Class *)malloc(sizeof(Class) * count);
-    objc_getClassList(classes, count);
-    for (int i = 0; i < count; i++) {
-        NSString *name = NSStringFromClass(classes[i]);
-        NSString *lower = name.lowercaseString;
-        if ([lower containsString:@"download"] || [lower containsString:@"transfer"] ||
-            [lower containsString:@"bdpan"] || [lower containsString:@"netdisk"]) {
-            KEY(@"类: %@", name);
-            unsigned int mc = 0;
-            Method *methods = class_copyMethodList(classes[i], &mc);
-            for (unsigned int j = 0; j < mc; j++) {
-                NSString *sel = NSStringFromSelector(method_getName(methods[j]));
-                NSString *sl = sel.lowercaseString;
-                if ([sl containsString:@"download"] || [sl containsString:@"transfer"] ||
-                    [sl containsString:@"start"] || [sl containsString:@"add"] ||
-                    [sl containsString:@"task"]) {
-                    KEY(@"  方法: %@.%@", name, sel);
-                }
-            }
-            free(methods);
-        }
-    }
-    free(classes);
-}
 
 %ctor {
     gLog = [NSMutableString string];
