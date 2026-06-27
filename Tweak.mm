@@ -592,20 +592,21 @@ static void simulateTapFileNamed(NSString *fileName) {
 
     __block UIScrollView *targetScrollView = nil;
 
-    __block void (^findScrollView)(UIView *) = ^(UIView *view) {
-        if (targetScrollView) return;
+    // 使用普通函数递归避免 block retain cycle
+    void findScrollViewRecursive(UIView *view, UIScrollView **outScrollView) {
+        if (*outScrollView) return;
 
         if ([view isKindOfClass:[UITableView class]] || [view isKindOfClass:[UICollectionView class]]) {
-            targetScrollView = (UIScrollView *)view;
+            *outScrollView = (UIScrollView *)view;
             return;
         }
 
         for (UIView *subview in view.subviews) {
-            findScrollView(subview);
+            findScrollViewRecursive(subview, outScrollView);
         }
-    };
+    }
 
-    findScrollView(vc.view);
+    findScrollViewRecursive(vc.view, &targetScrollView);
 
     if (!targetScrollView) {
         DLog(@"❌ No UITableView/UICollectionView found");
