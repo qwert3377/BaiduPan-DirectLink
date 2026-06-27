@@ -1,6 +1,6 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v7.0
-//  Minimal: Auto-detect path & token only
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v7.1
+//  With floating button + auto-detect path & token
 //
 
 #import <UIKit/UIKit.h>
@@ -12,15 +12,11 @@
 static NSString *gCurrentPath = nil;
 static NSString *gBdstoken = nil;
 static NSString *gBDUSS = nil;
-static NSString *gCuid = nil;
+static UIButton *gFloatButton = nil;
 
 // ========== 前向声明 ==========
 static UIViewController * topViewController(void);
-static NSString * getBdstoken(void);
-static NSString * getBDUSS(void);
-static NSString * getCuid(void);
-static NSString * extractPathFromViewController(UIViewController *vc);
-static NSString * getPathFromNavStack(void);
+static void showFloatButton(void);
 static void autoDetectPathAndToken(void);
 
 // ========== 工具函数 ==========
@@ -59,187 +55,148 @@ static UIViewController * topViewController(void) {
 
 // ========== 自动获取 Token ==========
 
-static NSString * getBdstoken(void) {
-    if (gBdstoken) return gBdstoken;
+static void autoDetectPathAndToken(void) {
+    DLog(@"🔍 Starting auto-detection...");
 
+    // 获取 bdstoken
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     gBdstoken = [defaults objectForKey:@"bdstoken"];
     if (gBdstoken) {
         DLog(@"✅ Got bdstoken from NSUserDefaults");
-        return gBdstoken;
     }
 
-    NSArray *keychainKeys = @[@"com.baidu.netdisk.bdstoken", @"bdstoken", @"token"];
-    for (NSString *key in keychainKeys) {
-        NSDictionary *query = @{
-            (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
-            (__bridge id)kSecAttrAccount: key,
-            (__bridge id)kSecReturnData: @YES,
-            (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne
-        };
-        CFDataRef dataRef = NULL;
-        OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, (CFTypeRef *)&dataRef);
-        if (status == errSecSuccess && dataRef) {
-            NSData *data = (__bridge_transfer NSData *)dataRef;
-            NSString *value = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-            if (value && value.length > 0) {
-                gBdstoken = value;
-                DLog(@"✅ Got bdstoken from Keychain");
-                return gBdstoken;
-            }
-        }
-    }
-
-    return nil;
-}
-
-static NSString * getBDUSS(void) {
-    if (gBDUSS) return gBDUSS;
-
+    // 获取 BDUSS
     NSHTTPCookieStorage *cookieStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
     for (NSHTTPCookie *cookie in [cookieStorage cookies]) {
         if ([cookie.name isEqualToString:@"BDUSS"]) {
             gBDUSS = cookie.value;
             DLog(@"✅ Got BDUSS from cookie");
-            return gBDUSS;
+            break;
         }
     }
-
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    gBDUSS = [defaults objectForKey:@"BDUSS"];
-    if (gBDUSS) {
-        DLog(@"✅ Got BDUSS from NSUserDefaults");
+    if (!gBDUSS) {
+        gBDUSS = [defaults objectForKey:@"BDUSS"];
+        if (gBDUSS) DLog(@"✅ Got BDUSS from NSUserDefaults");
     }
-    return gBDUSS;
-}
 
-static NSString * getCuid(void) {
-    if (gCuid) return gCuid;
-
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    gCuid = [defaults objectForKey:@"cuid"];
-    if (!gCuid) {
-        gCuid = [[[UIDevice currentDevice] identifierForVendor] UUIDString];
-    }
-    return gCuid;
-}
-
-// ========== 自动获取当前路径 ==========
-
-static NSString * extractPathFromViewController(UIViewController *vc) {
-    if (!vc) return nil;
-
-    NSString *path = nil;
-    NSArray *pathKeys = @[@"path", @"currentPath", @"filePath", @"dirPath", @"currentDir"];
-    for (NSString *key in pathKeys) {
-        @try {
-            id value = [vc valueForKey:key];
-            if ([value isKindOfClass:[NSString class]]) {
-                path = value;
-                DLog(@"✅ Found path from VC.%@ = %@", key, path);
-                break;
-            }
-        } @catch (NSException *e) {}
-    }
-    return path;
-}
-
-static NSString * getPathFromNavStack(void) {
+    // 获取路径
     UIViewController *vc = topViewController();
-    if (!vc) return nil;
-
-    UINavigationController *nav = nil;
-    if ([vc isKindOfClass:[UINavigationController class]]) {
-        nav = (UINavigationController *)vc;
-    } else if (vc.navigationController) {
-        nav = vc.navigationController;
-    }
-
-    if (nav) {
-        NSArray *vcs = nav.viewControllers;
-        NSMutableArray *pathComponents = [NSMutableArray array];
-
-        for (UIViewController *controller in vcs) {
-            NSString *component = extractPathFromViewController(controller);
-            if (component && component.length > 0 && ![component isEqualToString:@"/"]) {
-                [pathComponents addObject:component];
-            }
-        }
-
-        if (pathComponents.count > 0) {
-            NSString *fullPath = [pathComponents componentsJoinedByString:@"/"];
-            if (![fullPath hasPrefix:@"/"]) {
-                fullPath = [@"/" stringByAppendingString:fullPath];
-            }
-            return fullPath;
+    if (vc) {
+        NSArray *pathKeys = @[@"path", @"currentPath", @"dirPath"];
+        for (NSString *key in pathKeys) {
+            @try {
+                id value = [vc valueForKey:key];
+                if ([value isKindOfClass:[NSString class]]) {
+                    gCurrentPath = value;
+                    DLog(@"✅ Found path: %@", gCurrentPath);
+                    break;
+                }
+            } @catch (NSException *e) {}
         }
     }
 
-    return extractPathFromViewController(vc);
+    if (!gCurrentPath) gCurrentPath = @"/";
+
+    DLog(@"📊 Path: %@, Token: %@, BDUSS: %@", gCurrentPath, gBdstoken ? @"✅" : @"❌", gBDUSS ? @"✅" : @"❌");
 }
 
-static void autoDetectPathAndToken(void) {
-    DLog(@"🔍 Starting auto-detection...");
+// ========== 浮游按钮 ==========
 
-    NSString *bdstoken = getBdstoken();
-    NSString *bduss = getBDUSS();
-    NSString *cuid = getCuid();
+static void onFloatButtonTap(void) {
+    DLog(@"👆 Float button tapped!");
 
-    DLog(@"bdstoken: %@", bdstoken ? @"✅ Found" : @"❌ Not found");
-    DLog(@"BDUSS: %@", bduss ? @"✅ Found" : @"❌ Not found");
-    DLog(@"cuid: %@", cuid ? @"✅ Found" : @"❌ Not found");
-
-    if (bdstoken) DLog(@"bdstoken value: %@", bdstoken);
-    if (bduss) DLog(@"BDUSS value: %@", bduss);
-
-    NSString *path = getPathFromNavStack();
-    if (!path) {
-        UIViewController *vc = topViewController();
-        path = extractPathFromViewController(vc);
-    }
-
-    if (path) {
-        gCurrentPath = path;
-        DLog(@"✅ Auto-detected path: %@", path);
-    } else {
-        gCurrentPath = @"/";
-        DLog(@"⚠️ Could not auto-detect path, using default: /");
-    }
-}
-
-// ========== 对外接口 ==========
-
-NSString * BDTGetCurrentPath(void) {
-    return gCurrentPath ?: @"/";
-}
-
-NSString * BDTGetBdstoken(void) {
-    return gBdstoken;
-}
-
-NSString * BDTGetBDUSS(void) {
-    return gBDUSS;
-}
-
-NSString * BDTGetCuid(void) {
-    return gCuid;
-}
-
-void BDTRefreshPathAndToken(void) {
+    // 刷新路径和 token
     gCurrentPath = nil;
     gBdstoken = nil;
     gBDUSS = nil;
-    gCuid = nil;
     autoDetectPathAndToken();
+
+    // 显示信息
+    NSString *msg = [NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@",
+                       gCurrentPath,
+                       gBdstoken ? @"✅" : @"❌",
+                       gBDUSS ? @"✅" : @"❌"];
+
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll"
+                                                                   message:msg
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+
+    UIViewController *vc = topViewController();
+    if (vc) {
+        [vc presentViewController:alert animated:YES completion:nil];
+    }
 }
+
+static void showFloatButton(void) {
+    if (gFloatButton) return;
+
+    UIWindow *window = nil;
+    if (@available(iOS 13.0, *)) {
+        for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
+            if (scene.activationState == UISceneActivationStateForegroundActive) {
+                window = scene.windows.firstObject;
+                break;
+            }
+        }
+    }
+    if (!window) window = [[UIApplication sharedApplication] keyWindow];
+    if (!window) return;
+
+    CGFloat size = 50;
+    CGFloat x = [UIScreen mainScreen].bounds.size.width - size - 20;
+    CGFloat y = [UIScreen mainScreen].bounds.size.height / 2;
+
+    gFloatButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    gFloatButton.frame = CGRectMake(x, y, size, size);
+    gFloatButton.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:0.8];
+    gFloatButton.layer.cornerRadius = size / 2;
+    gFloatButton.layer.masksToBounds = YES;
+    [gFloatButton setTitle:@"🚀" forState:UIControlStateNormal];
+    [gFloatButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    gFloatButton.titleLabel.font = [UIFont systemFontOfSize:24];
+
+    [gFloatButton addTarget:nil action:@selector(bdt_floatButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
+
+    // 拖拽手势
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:nil action:@selector(bdt_floatButtonPanned:)];
+    [gFloatButton addGestureRecognizer:pan];
+
+    [window addSubview:gFloatButton];
+    DLog(@"✅ Float button shown");
+}
+
+// ========== 手势处理 ==========
+
+@interface NSObject (BaiduPanTroll)
+- (void)bdt_floatButtonTapped:(id)sender;
+- (void)bdt_floatButtonPanned:(UIPanGestureRecognizer *)gesture;
+@end
+
+@implementation NSObject (BaiduPanTroll)
+
+- (void)bdt_floatButtonTapped:(id)sender {
+    onFloatButtonTap();
+}
+
+- (void)bdt_floatButtonPanned:(UIPanGestureRecognizer *)gesture {
+    UIView *button = gesture.view;
+    CGPoint translation = [gesture translationInView:button.superview];
+    button.center = CGPointMake(button.center.x + translation.x, button.center.y + translation.y);
+    [gesture setTranslation:CGPointZero inView:button.superview];
+}
+
+@end
 
 // ========== 初始化 ==========
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"🚀 BaiduPan SVIP Direct Link Helper v7.0 (Minimal) loaded");
+    DLog(@"🚀 BaiduPan Troll v7.1 loaded");
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    // 延迟显示浮游按钮，等待 APP 界面加载完成
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        showFloatButton();
         autoDetectPathAndToken();
     });
 }
