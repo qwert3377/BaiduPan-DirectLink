@@ -1,6 +1,6 @@
 //
 //  BaiduPan SVIP Direct Link Helper - TrollStore Edition v6.0
-//  Feature: App-internal download via simulated tap + .pdf rename trick
+//  Fix: Reordered function definitions to resolve forward-declaration block capture issues
 //
 
 #import <UIKit/UIKit.h>
@@ -22,13 +22,6 @@ static UIViewController * topViewController(void);
 static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *headers, NSString *body, void (^handler)(id json, NSError *err));
 static NSString * getBdstoken(void);
 static NSString * getCurrentPath(void);
-static void showSuccessPopup(NSString *fileName, NSString *link);
-static void showErrorPopup(NSString *message);
-static void showActionPopup(NSString *fileName, NSString *dlink, NSString *renamedPath, NSString *fileId, NSString *currentPath, void (^appDownloadAction)(void), void (^copyLinkAction)(void));
-static void showAppDownloadStartedPopup(NSString *fileName, NSString *renamedName, NSString *renamedPath, NSString *fileId);
-static UIView *findSubviewWithText(UIView *view, NSString *text);
-static void performTapOnView(UIView *view);
-static void simulateTapFileNamed(NSString *fileName);
 static void fetchFileList(NSString *path, void (^completion)(NSArray *files, NSError *err));
 static NSString * digOutDlink(id obj);
 static void fetchDlinkViaFilemetas(NSString *filePath, NSInteger retry, void (^completion)(NSString *dlink, NSError *err));
@@ -505,93 +498,7 @@ static void renameFile(NSString *fileId, NSString *path, NSString *newName, void
     });
 }
 
-// ========== 修改后的 runPipeline ==========
-
-static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentPath, NSInteger fileSize) {
-    NSString *originalName = fileName;
-    
-    void (^finishWithRestore)(NSString *, NSError *) = ^(NSString *dlink, NSError *err) {
-        if (dlink) {
-            [[UIPasteboard generalPasteboard] setString:dlink];
-            showSuccessPopup(originalName, dlink);
-        } else {
-            showErrorPopup(err.localizedDescription);
-        }
-    };
-    
-    NSString *fullPath;
-    if ([currentPath isEqualToString:@"/"]) {
-        fullPath = [NSString stringWithFormat:@"/%@", originalName];
-    } else {
-        fullPath = [NSString stringWithFormat:@"%@/%@", currentPath, originalName];
-    }
-    DLog(@"Final path: %@", fullPath);
-    
-    if (![originalName hasSuffix:@".pdf"]) {
-        NSString *renamedName = [originalName stringByAppendingString:@".pdf"];
-        DLog(@"Rename: %@ -> %@", fullPath, renamedName);
-        
-        renameFile(fileId, fullPath, renamedName, ^(BOOL success, NSError *err) {
-            if (!success) {
-                showErrorPopup(err.localizedDescription);
-                return;
-            }
-            
-            NSString *renamedPath = [currentPath isEqualToString:@"/"] ? [NSString stringWithFormat:@"/%@", renamedName] : [NSString stringWithFormat:@"%@/%@", currentPath, renamedName];
-            
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kWaitTimeAfterRename * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
-                void (^doFetch)(void) = ^{
-                    fetchDlinkPortal(renamedPath, ^(NSString *dlink, NSError *err) {
-                        if (!dlink) {
-                            // 获取直链失败，恢复文件名并显示错误
-                            renameFile(fileId, renamedPath, originalName, ^(BOOL s, NSError *e) {
-                                if (!s) DLog(@"Restore name failed: %@", e.localizedDescription);
-                                finishWithRestore(nil, err);
-                            });
-                            return;
-                        }
-                        
-                        // 获取直链成功，显示选择弹窗
-                        showActionPopup(originalName, dlink, renamedPath, fileId, currentPath, ^{
-                            // ===== 用户选择：App 内下载（利用 SVIP） =====
-                            DLog(@"User chose App-internal download");
-                            refreshFileListCache(currentPath, ^{
-                                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                                    simulateTapFileNamed(renamedName);
-                                    showAppDownloadStartedPopup(originalName, renamedName, renamedPath, fileId);
-                                });
-                            });
-                        }, ^{
-                            // ===== 用户选择：复制直链 =====
-                            DLog(@"User chose copy link");
-                            renameFile(fileId, renamedPath, originalName, ^(BOOL s, NSError *e) {
-                                if (!s) DLog(@"Restore name failed: %@", e.localizedDescription);
-                                finishWithRestore(dlink, nil);
-                            });
-                        });
-                    });
-                };
-                
-                if (fileSize > kLargeFileThreshold) {
-                    DLog(@"Large file (%ld MB), refresh cache + extra wait", (long)(fileSize/1024/1024));
-                    refreshFileListCache(currentPath, ^{
-                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                            refreshFileMeta(renamedPath, ^{
-                                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kLargeFileExtraWait * NSEC_PER_MSEC)), dispatch_get_main_queue(), doFetch);
-                            });
-                        });
-                    });
-                } else {
-                    doFetch();
-                }
-            });
-        });
-    } else {
-        fetchDlinkPortal(fullPath, finishWithRestore);
-    }
-}
-
-// ========== 弹窗 UI 实现 ==========
+// ========== 弹窗 UI 实现（放在 runPipeline 之前） ==========
 
 static void showSuccessPopup(NSString *fileName, NSString *link) {
     UIViewController *vc = topViewController();
@@ -767,7 +674,28 @@ static void showErrorPopup(NSString *message) {
     [overlay addGestureRecognizer:tapOverlay];
 }
 
-// ========== 新增：操作选择弹窗 ==========
+static void showAppDownloadStartedPopup(NSString *fileName, NSString *renamedName, NSString *renamedPath, NSString *fileId) {
+    UIViewController *vc = topViewController();
+    if (!vc) return;
+    
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"已触发 App 内下载" message:[NSString stringWithFormat:@"文件 '%@' 已临时重命名为 '%@'。\n\n百度网盘将尝试预览/下载此 PDF 文件（利用 SVIP 加速通道）。\n\n⚠️ 下载完成后，请务必恢复文件名，否则文件将一直保持 .pdf 后缀。", fileName, renamedName] preferredStyle:UIAlertControllerStyleAlert];
+    
+    [alert addAction:[UIAlertAction actionWithTitle:@"✅ 恢复文件名" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        renameFile(fileId, renamedPath, fileName, ^(BOOL s, NSError *e) {
+            if (s) {
+                UIAlertController *ok = [UIAlertController alertControllerWithTitle:@"已恢复" message:@"文件名已恢复为原始名称" preferredStyle:UIAlertControllerStyleAlert];
+                [ok addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                [vc presentViewController:ok animated:YES completion:nil];
+            } else {
+                showErrorPopup(e.localizedDescription);
+            }
+        });
+    }]];
+    
+    [alert addAction:[UIAlertAction actionWithTitle:@"稍后再说" style:UIAlertActionStyleCancel handler:nil]];
+    
+    [vc presentViewController:alert animated:YES completion:nil];
+}
 
 static void showActionPopup(NSString *fileName, NSString *dlink, NSString *renamedPath, NSString *fileId, NSString *currentPath, void (^appDownloadAction)(void), void (^copyLinkAction)(void)) {
     UIViewController *vc = topViewController();
@@ -792,29 +720,90 @@ static void showActionPopup(NSString *fileName, NSString *dlink, NSString *renam
     [vc presentViewController:alert animated:YES completion:nil];
 }
 
-// ========== 新增：App 内下载提示弹窗 ==========
+// ========== 修改后的 runPipeline ==========
 
-static void showAppDownloadStartedPopup(NSString *fileName, NSString *renamedName, NSString *renamedPath, NSString *fileId) {
-    UIViewController *vc = topViewController();
-    if (!vc) return;
+static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentPath, NSInteger fileSize) {
+    NSString *originalName = fileName;
     
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"已触发 App 内下载" message:[NSString stringWithFormat:@"文件 '%@' 已临时重命名为 '%@'。\n\n百度网盘将尝试预览/下载此 PDF 文件（利用 SVIP 加速通道）。\n\n⚠️ 下载完成后，请务必恢复文件名，否则文件将一直保持 .pdf 后缀。", fileName, renamedName] preferredStyle:UIAlertControllerStyleAlert];
+    void (^finishWithRestore)(NSString *, NSError *) = ^(NSString *dlink, NSError *err) {
+        if (dlink) {
+            [[UIPasteboard generalPasteboard] setString:dlink];
+            showSuccessPopup(originalName, dlink);
+        } else {
+            showErrorPopup(err.localizedDescription);
+        }
+    };
     
-    [alert addAction:[UIAlertAction actionWithTitle:@"✅ 恢复文件名" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        renameFile(fileId, renamedPath, fileName, ^(BOOL s, NSError *e) {
-            if (s) {
-                UIAlertController *ok = [UIAlertController alertControllerWithTitle:@"已恢复" message:@"文件名已恢复为原始名称" preferredStyle:UIAlertControllerStyleAlert];
-                [ok addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-                [vc presentViewController:ok animated:YES completion:nil];
-            } else {
-                showErrorPopup(e.localizedDescription);
+    NSString *fullPath;
+    if ([currentPath isEqualToString:@"/"]) {
+        fullPath = [NSString stringWithFormat:@"/%@", originalName];
+    } else {
+        fullPath = [NSString stringWithFormat:@"%@/%@", currentPath, originalName];
+    }
+    DLog(@"Final path: %@", fullPath);
+    
+    if (![originalName hasSuffix:@".pdf"]) {
+        NSString *renamedName = [originalName stringByAppendingString:@".pdf"];
+        DLog(@"Rename: %@ -> %@", fullPath, renamedName);
+        
+        renameFile(fileId, fullPath, renamedName, ^(BOOL success, NSError *err) {
+            if (!success) {
+                showErrorPopup(err.localizedDescription);
+                return;
             }
+            
+            NSString *renamedPath = [currentPath isEqualToString:@"/"] ? [NSString stringWithFormat:@"/%@", renamedName] : [NSString stringWithFormat:@"%@/%@", currentPath, renamedName];
+            
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kWaitTimeAfterRename * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+                void (^doFetch)(void) = ^{
+                    fetchDlinkPortal(renamedPath, ^(NSString *dlink, NSError *err) {
+                        if (!dlink) {
+                            // 获取直链失败，恢复文件名并显示错误
+                            renameFile(fileId, renamedPath, originalName, ^(BOOL s, NSError *e) {
+                                if (!s) DLog(@"Restore name failed: %@", e.localizedDescription);
+                                finishWithRestore(nil, err);
+                            });
+                            return;
+                        }
+                        
+                        // 获取直链成功，显示选择弹窗
+                        showActionPopup(originalName, dlink, renamedPath, fileId, currentPath, ^{
+                            // ===== 用户选择：App 内下载（利用 SVIP） =====
+                            DLog(@"User chose App-internal download");
+                            refreshFileListCache(currentPath, ^{
+                                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                                    simulateTapFileNamed(renamedName);
+                                    showAppDownloadStartedPopup(originalName, renamedName, renamedPath, fileId);
+                                });
+                            });
+                        }, ^{
+                            // ===== 用户选择：复制直链 =====
+                            DLog(@"User chose copy link");
+                            renameFile(fileId, renamedPath, originalName, ^(BOOL s, NSError *e) {
+                                if (!s) DLog(@"Restore name failed: %@", e.localizedDescription);
+                                finishWithRestore(dlink, nil);
+                            });
+                        });
+                    });
+                };
+                
+                if (fileSize > kLargeFileThreshold) {
+                    DLog(@"Large file (%ld MB), refresh cache + extra wait", (long)(fileSize/1024/1024));
+                    refreshFileListCache(currentPath, ^{
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                            refreshFileMeta(renamedPath, ^{
+                                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kLargeFileExtraWait * NSEC_PER_MSEC)), dispatch_get_main_queue(), doFetch);
+                            });
+                        });
+                    });
+                } else {
+                    doFetch();
+                }
+            });
         });
-    }]];
-    
-    [alert addAction:[UIAlertAction actionWithTitle:@"稍后再说" style:UIAlertActionStyleCancel handler:nil]];
-    
-    [vc presentViewController:alert animated:YES completion:nil];
+    } else {
+        fetchDlinkPortal(fullPath, finishWithRestore);
+    }
 }
 
 // ========== NSURLSession Hook ==========
