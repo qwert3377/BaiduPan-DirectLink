@@ -1,8 +1,7 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v8.1
-//  UI: Removed "copy first link" button, link in scrollable text field with "copy again" button
-//  Toast: "直链已复制到剪贴板！"
-//  Hardcoded fallback token: 3eccd84d4fec365844c6a7dc6f37dca6
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v8.2
+//  Fix: objc_setAssociatedObject key type (const void*), removed hardcoded fallback token
+//  Token source: auto-detected from app only (NSUserDefaults + memory scan)
 //
 
 #import <UIKit/UIKit.h>
@@ -14,8 +13,6 @@ static NSString *gCurrentPath = nil;
 static NSString *gBdstoken = nil;
 static NSString *gBDUSS = nil;
 static UIButton *gFloatButton = nil;
-
-static NSString * const FALLBACK_TOKEN = @"3eccd84d4fec365844c6a7dc6f37dca6";
 
 static UIViewController * topViewController(void) {
     UIWindow *window = nil;
@@ -160,7 +157,8 @@ static void autoDetectPathAndToken(void) {
         if (gBdstoken) { DLog(@"Got bdstoken from key: %@", key); break; }
     }
     if (!gBdstoken) gBdstoken = scanMemoryForBdstoken();
-    if (!gBdstoken) { gBdstoken = FALLBACK_TOKEN; DLog(@"Using fallback hardcoded token"); }
+    if (!gBdstoken) DLog(@"WARNING: No token detected from app");
+
     NSHTTPCookieStorage *cookieStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
     for (NSHTTPCookie *cookie in [cookieStorage cookies]) {
         if ([cookie.name isEqualToString:@"BDUSS"]) { gBDUSS = cookie.value; DLog(@"Got BDUSS from cookie"); break; }
@@ -174,7 +172,7 @@ static void autoDetectPathAndToken(void) {
 
 static void fetchFileList(void (^completion)(NSArray *files, NSError *err)) {
     if (!gBdstoken) {
-        completion(nil, [NSError errorWithDomain:@"BaiduPanTroll" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"No token"}]);
+        completion(nil, [NSError errorWithDomain:@"BaiduPanTroll" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"No token detected from app. Please ensure you are logged in."}]);
         return;
     }
     NSString *encodedPath = strictEncodeURIComponent(gCurrentPath ?: @"/");
@@ -349,15 +347,26 @@ static void forceRefreshFileList(void) {
     }
 }
 
-// ========== v8.1 核心流程 ==========
+// ========== v8.2 UI Dialog ==========
+
+@interface LinkCopyButton : UIButton
+@property (nonatomic, copy) NSString *linkText;
+@end
+
+@implementation LinkCopyButton
+- (void)copyBtnTapped {
+    if (self.linkText) {
+        copyToClipboard(self.linkText);
+        showToast(@"直链已复制到剪贴板！");
+    }
+}
+@end
 
 static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId, NSString *pdfPath) {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"直链已复制" message:nil preferredStyle:UIAlertControllerStyleAlert];
 
-    // 创建自定义视图容器
     UIView *customView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 270, 120)];
 
-    // 文件名标签
     UILabel *nameLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 270, 20)];
     nameLabel.text = [NSString stringWithFormat:@"%@ 的直链已成功复制到剪贴板。", fileName];
     nameLabel.font = [UIFont systemFontOfSize:13];
@@ -369,7 +378,6 @@ static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId,
     nameLabel.frame = nameFrame;
     [customView addSubview:nameLabel];
 
-    // 链接输入框
     CGFloat nameH = nameLabel.frame.size.height + 8;
     UITextField *linkField = [[UITextField alloc] initWithFrame:CGRectMake(0, nameH, 200, 36)];
     linkField.text = link;
@@ -384,8 +392,7 @@ static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId,
     linkField.clearButtonMode = UITextFieldViewModeNever;
     [customView addSubview:linkField];
 
-    // 再次复制按钮
-    UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    LinkCopyButton *copyBtn = [LinkCopyButton buttonWithType:UIButtonTypeSystem];
     copyBtn.frame = CGRectMake(210, nameH, 60, 36);
     [copyBtn setTitle:@"再次复制" forState:UIControlStateNormal];
     copyBtn.titleLabel.font = [UIFont systemFontOfSize:13];
@@ -393,11 +400,10 @@ static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId,
     copyBtn.backgroundColor = [UIColor colorWithRed:0.18 green:0.42 blue:1.0 alpha:1.0];
     copyBtn.layer.cornerRadius = 6;
     copyBtn.layer.masksToBounds = YES;
-    [copyBtn addTarget:copyBtn action:@selector(copyBtnTapped:) forControlEvents:UIControlEventTouchUpInside];
-    objc_setAssociatedObject(copyBtn, @"linkText", link, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    copyBtn.linkText = link;
+    [copyBtn addTarget:copyBtn action:@selector(copyBtnTapped) forControlEvents:UIControlEventTouchUpInside];
     [customView addSubview:copyBtn];
 
-    // 提示文字
     CGFloat hintY = nameH + 44;
     UILabel *hintLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, hintY, 270, 20)];
     hintLabel.text = @"提示：可使用 IDM、Aria2、Motrix 等工具粘贴下载";
@@ -416,20 +422,6 @@ static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId,
     UIViewController *vc = topViewController();
     if (vc) [vc presentViewController:alert animated:YES completion:nil];
 }
-
-@interface UIButton (BaiduPanTroll)
-- (void)copyBtnTapped:(id)sender;
-@end
-
-@implementation UIButton (BaiduPanTroll)
-- (void)copyBtnTapped:(id)sender {
-    NSString *link = objc_getAssociatedObject(self, @"linkText");
-    if (link) {
-        copyToClipboard(link);
-        showToast(@"直链已复制到剪贴板！");
-    }
-}
-@end
 
 static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString *fileId) {
     NSString *pdfName = [fileName stringByAppendingString:@".pdf"];
@@ -538,7 +530,7 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 16 ? 16 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v8.1"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v8.2"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"📥 获取直链" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
@@ -594,7 +586,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v8.1 loaded");
+    DLog(@"BaiduPan Troll v8.2 loaded");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
