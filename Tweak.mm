@@ -54,6 +54,7 @@ static void simulateTapFileNamed(NSString *fileName);
 static void triggerClientDownload(NSString *fileId, NSString *path, NSString *fileName);
 static void hookNetworkRequests(void);
 static NSString * generateRandomSuffix(void);
+static void findScrollViewRecursive(UIView *view, UIScrollView **outScrollView);
 
 // ========== 工具函数 ==========
 
@@ -592,20 +593,6 @@ static void simulateTapFileNamed(NSString *fileName) {
 
     __block UIScrollView *targetScrollView = nil;
 
-    // 使用普通函数递归避免 block retain cycle
-    void findScrollViewRecursive(UIView *view, UIScrollView **outScrollView) {
-        if (*outScrollView) return;
-
-        if ([view isKindOfClass:[UITableView class]] || [view isKindOfClass:[UICollectionView class]]) {
-            *outScrollView = (UIScrollView *)view;
-            return;
-        }
-
-        for (UIView *subview in view.subviews) {
-            findScrollViewRecursive(subview, outScrollView);
-        }
-    }
-
     findScrollViewRecursive(vc.view, &targetScrollView);
 
     if (!targetScrollView) {
@@ -813,6 +800,19 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
 }
 
 @end
+
+static void findScrollViewRecursive(UIView *view, UIScrollView **outScrollView) {
+    if (*outScrollView) return;
+
+    if ([view isKindOfClass:[UITableView class]] || [view isKindOfClass:[UICollectionView class]]) {
+        *outScrollView = (UIScrollView *)view;
+        return;
+    }
+
+    for (UIView *subview in view.subviews) {
+        findScrollViewRecursive(subview, outScrollView);
+    }
+}
 
 static void hookNetworkRequests(void) {
     static dispatch_once_t onceToken;
