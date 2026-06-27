@@ -1,6 +1,6 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v7.7
-//  Fixed: Auto navigate back after tap to refresh file state
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v7.8
+//  Added: Fetch & copy direct download link to clipboard for testing
 //
 
 #import <UIKit/UIKit.h>
@@ -20,11 +20,17 @@ static UIViewController * topViewController(void);
 static void showFloatButton(void);
 static void autoDetectPathAndToken(void);
 static NSString * strictEncodeURIComponent(NSString *str);
+static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *headers, NSString *body, void (^handler)(id json, NSError *err));
 static void fetchFileList(void (^completion)(NSArray *files, NSError *err));
 static void renameFile(NSString *fileId, NSString *path, NSString *newName, void (^completion)(BOOL success, NSError *err));
+static void fetchDirectLink(NSString *fsId, void (^completion)(NSString *link, NSError *err));
+static void copyToClipboard(NSString *text);
+static void copyDirectLink(NSString *fileId, NSString *fileName);
 static void simulateTapFileNamed(NSString *fileName);
 static void forceRefreshFileList(void);
+static void downloadSingleFile(NSString *fileName, NSString *filePath, NSString *fileId);
 static void triggerDownloadFlow(void);
+static void autoNavigateBack(void);
 
 // ========== 工具函数 ==========
 
@@ -272,6 +278,77 @@ static void renameFile(NSString *fileId, NSString *path, NSString *newName, void
     });
 }
 
+// ========== 直链获取 & 剪贴板 ==========
+
+static void fetchDirectLink(NSString *fsId, void (^completion)(NSString *link, NSError *err)) {
+    if (!gBdstoken) {
+        completion(nil, [NSError errorWithDomain:@"BaiduPanTroll" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"No token"}]);
+        return;
+    }
+
+    NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/filemetas?bdstoken=%@&channel=chunlei&clienttype=1&web=1&app_id=250528&fsids=[%@]&dlink=1", gBdstoken, fsId];
+
+    bdAsyncRequest(url, @"GET", nil, nil, ^(id json, NSError *err) {
+        if (err) { completion(nil, err); return; }
+        NSNumber *errnoNum = json[@"errno"];
+        if (errnoNum && [errnoNum integerValue] == 0) {
+            NSArray *list = json[@"info"];
+            if (list && [list isKindOfClass:[NSArray class]] && list.count > 0) {
+                NSDictionary *fileInfo = list[0];
+                NSString *dlink = fileInfo[@"dlink"];
+                if (dlink && [dlink isKindOfClass:[NSString class]] && dlink.length > 0) {
+                    completion(dlink, nil);
+                } else {
+                    completion(nil, [NSError errorWithDomain:@"BaiduPanTroll" code:-3 userInfo:@{NSLocalizedDescriptionKey: @"No dlink in response"}]);
+                }
+            } else {
+                completion(nil, [NSError errorWithDomain:@"BaiduPanTroll" code:-4 userInfo:@{NSLocalizedDescriptionKey: @"No file info in response"}]);
+            }
+        } else {
+            NSString *msg = json[@"errmsg"] ?: [NSString stringWithFormat:@"Unknown error (errno=%@)", errnoNum];
+            completion(nil, [NSError errorWithDomain:@"BaiduPanTroll" code:[errnoNum integerValue] userInfo:@{NSLocalizedDescriptionKey: msg}]);
+        }
+    });
+}
+
+static void copyToClipboard(NSString *text) {
+    if (!text) return;
+    UIPasteboard *pasteboard = [UIPasteboard generalPasteboard];
+    pasteboard.string = text;
+    DLog(@"📋 Copied to clipboard: %@", text);
+}
+
+static void copyDirectLink(NSString *fileId, NSString *fileName) {
+    DLog(@"🔗 Fetching direct link for: %@", fileName);
+
+    UIAlertController *loadingAlert = [UIAlertController alertControllerWithTitle:@"获取直链中..." message:fileName preferredStyle:UIAlertControllerStyleAlert];
+    UIViewController *vc = topViewController();
+    if (vc) [vc presentViewController:loadingAlert animated:YES completion:nil];
+
+    fetchDirectLink(fileId, ^(NSString *link, NSError *err) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [loadingAlert dismissViewControllerAnimated:YES completion:^{
+                if (err || !link) {
+                    UIAlertController *errAlert = [UIAlertController alertControllerWithTitle:@"获取直链失败" message:err.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
+                    [errAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                    UIViewController *vc2 = topViewController();
+                    if (vc2) [vc2 presentViewController:errAlert animated:YES completion:nil];
+                } else {
+                    copyToClipboard(link);
+                    NSString *msg = [NSString stringWithFormat:@"文件名: %@\n\n链接已复制到剪贴板，可用浏览器或下载工具测试。\n\n%@", fileName, link];
+                    if (gBDUSS) {
+                        msg = [NSString stringWithFormat:@"文件名: %@\n\n链接已复制到剪贴板，可用浏览器或下载工具测试。\n\n%@\n\n⚠️ 提示：若链接无法直接下载，尝试在请求头中添加 Cookie: BDUSS=%@", fileName, link, gBDUSS];
+                    }
+                    UIAlertController *succAlert = [UIAlertController alertControllerWithTitle:@"✅ 直链已复制" message:msg preferredStyle:UIAlertControllerStyleAlert];
+                    [succAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                    UIViewController *vc2 = topViewController();
+                    if (vc2) [vc2 presentViewController:succAlert animated:YES completion:nil];
+                }
+            }];
+        });
+    });
+}
+
 // ========== 强制刷新文件列表 ==========
 
 static void triggerRefreshControlInView(UIView *view) {
@@ -462,7 +539,6 @@ static void autoNavigateBack(void) {
             DLog(@"✅ Popped view controller");
         });
     } else {
-        // 尝试关闭模态视图
         dispatch_async(dispatch_get_main_queue(), ^{
             [vc dismissViewControllerAnimated:YES completion:nil];
             DLog(@"✅ Dismissed modal");
@@ -497,22 +573,17 @@ static void downloadSingleFile(NSString *fileName, NSString *filePath, NSString 
         UIViewController *vc = topViewController();
         if (vc) [vc presentViewController:alert animated:YES completion:nil];
 
-        // 等待 Alert 消失后模拟点击
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
 
-            // 第一次点击：进入预览界面刷新文件状态
             simulateTapFileNamed(pdfName);
 
-            // 等待2秒后自动返回
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 autoNavigateBack();
 
-                // 返回后再等待2秒，再次点击触发下载
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     DLog(@"🎯 Second tap to trigger download...");
                     simulateTapFileNamed(pdfName);
 
-                    // 10秒后改回原名
                     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                         DLog(@"🔄 Restoring original name...");
                         NSString *pdfPath = [[filePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:pdfName];
@@ -558,7 +629,7 @@ static void triggerDownloadFlow(void) {
             return;
         }
 
-        UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"选择要下载的文件" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+        UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"选择文件" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
 
         for (NSDictionary *file in fileItems) {
             NSString *name = file[@"server_filename"];
@@ -573,7 +644,26 @@ static void triggerDownloadFlow(void) {
             }
 
             [sheet addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                downloadSingleFile(name, path, fileId);
+                UIAlertController *actionSheet = [UIAlertController alertControllerWithTitle:name message:@"选择操作方式" preferredStyle:UIAlertControllerStyleAlert];
+
+                [actionSheet addAction:[UIAlertAction actionWithTitle:@"📥 触发下载(重命名法)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+                    downloadSingleFile(name, path, fileId);
+                }]];
+
+                [actionSheet addAction:[UIAlertAction actionWithTitle:@"🔗 复制直链到剪贴板" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+                    copyDirectLink(fileId, name);
+                }]];
+
+                [actionSheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+
+                UIViewController *vc = topViewController();
+                if (vc) {
+                    if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
+                        actionSheet.popoverPresentationController.sourceView = vc.view;
+                        actionSheet.popoverPresentationController.sourceRect = CGRectMake(vc.view.bounds.size.width / 2, vc.view.bounds.size.height / 2, 1, 1);
+                    }
+                    [vc presentViewController:actionSheet animated:YES completion:nil];
+                }
             }]];
         }
 
@@ -602,13 +692,39 @@ static void onFloatButtonTap(void) {
                      (unsigned long)gBdstoken.length];
     }
 
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v7.8"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@", gCurrentPath, tokenInfo, gBDUSS ? @"✅" : @"❌"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
 
-    [alert addAction:[UIAlertAction actionWithTitle:@"触发下载" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+    [alert addAction:[UIAlertAction actionWithTitle:@"📥 触发下载" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         triggerDownloadFlow();
     }]];
+    
+    [alert addAction:[UIAlertAction actionWithTitle:@"🔗 复制首个直链" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        fetchFileList(^(NSArray *files, NSError *err) {
+            if (err || !files || files.count == 0) {
+                UIAlertController *errAlert = [UIAlertController alertControllerWithTitle:@"失败" message:@"无法获取文件列表" preferredStyle:UIAlertControllerStyleAlert];
+                [errAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                UIViewController *vc = topViewController();
+                if (vc) [vc presentViewController:errAlert animated:YES completion:nil];
+                return;
+            }
+            for (NSDictionary *file in files) {
+                NSNumber *isdir = file[@"isdir"];
+                if (!isdir || [isdir integerValue] == 0) {
+                    NSString *fid = [file[@"fs_id"] stringValue];
+                    NSString *fname = file[@"server_filename"];
+                    copyDirectLink(fid, fname);
+                    return;
+                }
+            }
+            UIAlertController *errAlert = [UIAlertController alertControllerWithTitle:@"失败" message:@"当前文件夹没有文件" preferredStyle:UIAlertControllerStyleAlert];
+            [errAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            UIViewController *vc = topViewController();
+            if (vc) [vc presentViewController:errAlert animated:YES completion:nil];
+        });
+    }]];
+
     [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
 
     UIViewController *vc = topViewController();
@@ -676,7 +792,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"🚀 BaiduPan Troll v7.7 loaded");
+    DLog(@"🚀 BaiduPan Troll v7.8 loaded");
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
