@@ -58,13 +58,13 @@ static void findScrollViewRecursive(UIView *view, UIScrollView **outScrollView);
 
 // ========== 工具函数 ==========
 
-static NSString * generateRandomSuffix(void) {
+static NSString * __attribute__((unused)) generateRandomSuffix(void) {
     NSTimeInterval ts = [[NSDate date] timeIntervalSince1970];
     NSInteger random = arc4random_uniform(10000);
     return [NSString stringWithFormat:@"_%.0f_%ld", ts * 1000, (long)random];
 }
 
-static UIViewController * topViewController(void) {
+static UIViewController * __attribute__((unused)) topViewController() {
     UIWindow *window = nil;
     if (@available(iOS 13.0, *)) {
         for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
@@ -99,7 +99,7 @@ static UIViewController * topViewController(void) {
 
 // ========== 自动获取 Token ==========
 
-static NSString * getBdstoken(void) {
+static NSString * __attribute__((unused)) getBdstoken() {
     if (gBdstoken) return gBdstoken;
 
     // 方法1: 从 NSUserDefaults 获取
@@ -148,7 +148,7 @@ static NSString * getBdstoken(void) {
     return nil;
 }
 
-static NSString * getBDUSS(void) {
+static NSString * __attribute__((unused)) getBDUSS() {
     if (gBDUSS) return gBDUSS;
 
     // 从 Cookie 获取
@@ -172,7 +172,7 @@ static NSString * getBDUSS(void) {
     return nil;
 }
 
-static NSString * getCuid(void) {
+static NSString * __attribute__((unused)) getCuid() {
     if (gCuid) return gCuid;
 
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
@@ -196,7 +196,7 @@ static NSString * __attribute__((unused)) getAppUID(void) {
 
 // ========== 自动获取当前路径 ==========
 
-static NSString * extractPathFromViewController(UIViewController *vc) {
+static NSString * __attribute__((unused)) extractPathFromViewController() {
     if (!vc) return nil;
 
     NSString *path = nil;
@@ -215,7 +215,7 @@ static NSString * extractPathFromViewController(UIViewController *vc) {
     return path;
 }
 
-static NSString * getPathFromNavStack(void) {
+static NSString * __attribute__((unused)) getPathFromNavStack() {
     UIViewController *vc = topViewController();
     if (!vc) return nil;
 
@@ -274,7 +274,7 @@ static NSString * __attribute__((unused)) extractPathFromURL(NSString *urlString
     return path;
 }
 
-static void autoDetectPathAndToken(void) {
+static void __attribute__((unused)) autoDetectPathAndToken() {
     DLog(@"🔍 Starting auto-detection...");
 
     NSString *bdstoken = getBdstoken();
@@ -346,7 +346,7 @@ static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *header
     [task resume];
 }
 
-static NSString * strictEncodeURIComponent(NSString *str) {
+static NSString * __attribute__((unused)) strictEncodeURIComponent() {
     if (!str) return @"";
     NSMutableCharacterSet *cs = [NSMutableCharacterSet alphanumericCharacterSet];
     [cs addCharactersInString:@"-_.!~*'()"];
@@ -386,7 +386,7 @@ static void fetchFileList(NSString *path, void (^completion)(NSArray *files, NSE
 
 // ========== 直链获取（多种方式） ==========
 
-static NSString * digOutDlink(id obj) {
+static NSString * __attribute__((unused)) digOutDlink() {
     if (!obj) return nil;
 
     if ([obj isKindOfClass:[NSString class]]) {
@@ -582,7 +582,7 @@ static void refreshFileListCache(NSString *path, void (^completion)(void)) {
 
 // ========== 模拟点击触发客户端下载 ==========
 
-static void simulateTapFileNamed(NSString *fileName) {
+static void __attribute__((unused)) simulateTapFileNamed() {
     DLog(@"👆 Simulating tap on file: %@", fileName);
 
     UIViewController *vc = topViewController();
@@ -674,7 +674,7 @@ static void simulateTapFileNamed(NSString *fileName) {
 
 // ========== 触发客户端下载流程 ==========
 
-static void triggerClientDownload(NSString *fileId, NSString *path, NSString *fileName) {
+static void __attribute__((unused)) triggerClientDownload() {
     DLog(@"🚀 Triggering client download flow for: %@", fileName);
 
     NSString *pdfName = [fileName stringByAppendingString:@".pdf"];
@@ -721,7 +721,7 @@ static void triggerClientDownload(NSString *fileId, NSString *path, NSString *fi
 
 // ========== 主流程 ==========
 
-static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentPath, NSInteger fileSize) {
+static void __attribute__((unused)) runPipeline() {
     DLog(@"🎯 Starting pipeline for: %@ (size: %ld)", fileName, (long)fileSize);
 
     if (!gPathAutoDetected || !gBdstoken) {
@@ -801,7 +801,7 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
 
 @end
 
-static void findScrollViewRecursive(UIView *view, UIScrollView **outScrollView) {
+static void __attribute__((unused)) findScrollViewRecursive() {
     if (*outScrollView) return;
 
     if ([view isKindOfClass:[UITableView class]] || [view isKindOfClass:[UICollectionView class]]) {
@@ -814,7 +814,7 @@ static void findScrollViewRecursive(UIView *view, UIScrollView **outScrollView) 
     }
 }
 
-static void hookNetworkRequests(void) {
+static void __attribute__((unused)) hookNetworkRequests() {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         gInterceptedDlinks = [NSMutableDictionary dictionary];
