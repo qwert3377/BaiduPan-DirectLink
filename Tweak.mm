@@ -1,6 +1,6 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v7.3
-//  Fixed: Path detection via view hierarchy analysis
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v7.4
+//  Added: File rename + simulate tap to trigger client download
 //
 
 #import <UIKit/UIKit.h>
@@ -13,12 +13,17 @@ static NSString *gCurrentPath = nil;
 static NSString *gBdstoken = nil;
 static NSString *gBDUSS = nil;
 static UIButton *gFloatButton = nil;
+static NSMutableArray *gFileList = nil;
 
 // ========== 前向声明 ==========
 static UIViewController * topViewController(void);
 static void showFloatButton(void);
 static void autoDetectPathAndToken(void);
-static NSString * findPathInViewHierarchy(UIView *view);
+static NSString * strictEncodeURIComponent(NSString *str);
+static void fetchFileList(void (^completion)(NSArray *files, NSError *err));
+static void renameFile(NSString *fileId, NSString *path, NSString *newName, void (^completion)(BOOL success, NSError *err));
+static void simulateTapFileNamed(NSString *fileName);
+static void triggerDownloadFlow(void);
 
 // ========== 工具函数 ==========
 
@@ -54,12 +59,50 @@ static UIViewController * topViewController(void) {
     return vc;
 }
 
-// ========== 扫描内存中的 bdstoken ==========
+static NSString * strictEncodeURIComponent(NSString *str) {
+    if (!str) return @"";
+    NSMutableCharacterSet *cs = [NSMutableCharacterSet alphanumericCharacterSet];
+    [cs addCharactersInString:@"-_.!~*'()"];
+    return [str stringByAddingPercentEncodingWithAllowedCharacters:cs];
+}
+
+// ========== 网络请求 ==========
+
+static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *headers, NSString *body, void (^handler)(id json, NSError *err)) {
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
+    req.HTTPMethod = method ?: @"GET";
+    req.timeoutInterval = 30;
+
+    NSMutableDictionary *allHeaders = [@{
+        @"User-Agent": @"Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+        @"Accept": @"application/json, text/plain, */*",
+        @"Accept-Language": @"zh-CN,zh-Hans;q=0.9",
+        @"Referer": @"https://pan.baidu.com/"
+    } mutableCopy];
+
+    if (gBDUSS) {
+        allHeaders[@"Cookie"] = [NSString stringWithFormat:@"BDUSS=%@", gBDUSS];
+    }
+    if (headers) [allHeaders addEntriesFromDictionary:headers];
+    req.allHTTPHeaderFields = allHeaders;
+    if (body) req.HTTPBody = [body dataUsingEncoding:NSUTF8StringEncoding];
+
+    NSURLSession *session = [NSURLSession sharedSession];
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (error) { handler(nil, error); return; }
+            id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            handler(json, nil);
+        });
+    }];
+    [task resume];
+}
+
+// ========== 自动获取 Token & Path ==========
 
 static NSString * scanMemoryForBdstoken(void) {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSDictionary *allDefaults = [defaults dictionaryRepresentation];
-
     NSString *bestToken = nil;
     NSString *bestKey = nil;
 
@@ -67,18 +110,14 @@ static NSString * scanMemoryForBdstoken(void) {
         id value = allDefaults[key];
         if ([value isKindOfClass:[NSString class]]) {
             NSString *str = value;
-            // 检查是否是十六进制字符串
             NSRegularExpression *hexRegex = [NSRegularExpression regularExpressionWithPattern:@"^[a-fA-F0-9]+$" options:0 error:nil];
             if ([hexRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, str.length)] == 1) {
-                // 必须包含至少一个字母（排除纯数字）
                 NSRegularExpression *letterRegex = [NSRegularExpression regularExpressionWithPattern:@"[a-fA-F]" options:0 error:nil];
                 if ([letterRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, str.length)] > 0) {
-                    // 优先找32位的（网页版标准长度）
                     if (str.length == 32) {
                         DLog(@"🔍 Found 32-bit token in key '%@': %@...", key, [str substringToIndex:MIN(16, str.length)]);
-                        return str;  // 找到32位直接返回
+                        return str;
                     }
-                    // 记录16位的作为备选
                     if (str.length == 16 && !bestToken) {
                         bestToken = str;
                         bestKey = key;
@@ -87,55 +126,16 @@ static NSString * scanMemoryForBdstoken(void) {
             }
         }
     }
-
     if (bestToken) {
-        DLog(@"⚠️ Only found 16-bit token in key '%@': %@... (expected 32-bit)", bestKey, [bestToken substringToIndex:MIN(16, bestToken.length)]);
+        DLog(@"⚠️ Only found 16-bit token in key '%@': %@...", bestKey, [bestToken substringToIndex:MIN(16, bestToken.length)]);
         return bestToken;
     }
-
     return nil;
 }
-
-// ========== 从视图层级递归查找路径信息 ==========
-
-static NSString * findPathInViewHierarchy(UIView *view) {
-    if (!view) return nil;
-
-    // 检查当前 view 的 accessibilityLabel/hint
-    if (view.accessibilityLabel && [view.accessibilityLabel hasPrefix:@"/"]) {
-        return view.accessibilityLabel;
-    }
-
-    // 检查 UILabel 的文本是否像路径
-    if ([view isKindOfClass:[UILabel class]]) {
-        UILabel *label = (UILabel *)view;
-        if (label.text && [label.text hasPrefix:@"/"]) {
-            return label.text;
-        }
-    }
-
-    // 递归检查子视图
-    for (UIView *subview in view.subviews) {
-        NSString *path = findPathInViewHierarchy(subview);
-        if (path) return path;
-    }
-
-    return nil;
-}
-
-// ========== 从 ViewController 获取路径 ==========
 
 static NSString * extractPathFromVC(UIViewController *vc) {
     if (!vc) return nil;
-
-    // 1. 尝试各种属性名
-    NSArray *pathKeys = @[
-        @"path", @"currentPath", @"filePath", @"dirPath", 
-        @"currentDir", @"_path", @"_currentPath",
-        @"directory", @"folderPath", @"currentFolder",
-        @"mPath", @"_mPath", @"fileListPath"
-    ];
-
+    NSArray *pathKeys = @[@"path", @"currentPath", @"filePath", @"dirPath", @"currentDir", @"_path", @"_currentPath", @"directory", @"folderPath", @"currentFolder", @"mPath", @"_mPath", @"fileListPath"];
     for (NSString *key in pathKeys) {
         @try {
             id value = [vc valueForKey:key];
@@ -145,28 +145,8 @@ static NSString * extractPathFromVC(UIViewController *vc) {
             }
         } @catch (NSException *e) {}
     }
-
-    // 2. 尝试从 view 层级查找
-    if (vc.view) {
-        NSString *path = findPathInViewHierarchy(vc.view);
-        if (path) {
-            DLog(@"✅ Found path from view hierarchy: %@", path);
-            return path;
-        }
-    }
-
-    // 3. 尝试从 navigationItem.title
-    if (vc.navigationItem.title && vc.navigationItem.title.length > 0 
-        && ![vc.navigationItem.title isEqualToString:@"百度网盘"]
-        && ![vc.navigationItem.title isEqualToString:@"文件"]) {
-        DLog(@"ℹ️ Using navigation title: %@", vc.navigationItem.title);
-        return vc.navigationItem.title;
-    }
-
     return nil;
 }
-
-// ========== 从导航栈构建完整路径 ==========
 
 static NSString * buildPathFromNavStack(void) {
     UIViewController *vc = topViewController();
@@ -208,30 +188,17 @@ static NSString * buildPathFromNavStack(void) {
     return fullPath;
 }
 
-// ========== 自动获取 Token & Path ==========
-
 static void autoDetectPathAndToken(void) {
     DLog(@"🔍 Starting auto-detection...");
 
-    // 1. 获取 bdstoken - 尝试多种可能的键名
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSArray *tokenKeys = @[@"bdstoken", @"BDSTOKEN", @"token", @"TOKEN", @"access_token", @"bd_token", @"pan_token"];
     for (NSString *key in tokenKeys) {
         gBdstoken = [defaults objectForKey:key];
-        if (gBdstoken) {
-            DLog(@"✅ Got bdstoken from key: %@", key);
-            break;
-        }
+        if (gBdstoken) { DLog(@"✅ Got bdstoken from key: %@", key); break; }
     }
     if (!gBdstoken) gBdstoken = scanMemoryForBdstoken();
 
-    if (gBdstoken) {
-        DLog(@"✅ Got bdstoken: %@...", [gBdstoken substringToIndex:MIN(16, gBdstoken.length)]);
-    } else {
-        DLog(@"❌ bdstoken not found");
-    }
-
-    // 2. 获取 BDUSS
     NSHTTPCookieStorage *cookieStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
     for (NSHTTPCookie *cookie in [cookieStorage cookies]) {
         if ([cookie.name isEqualToString:@"BDUSS"]) {
@@ -245,18 +212,180 @@ static void autoDetectPathAndToken(void) {
         if (gBDUSS) DLog(@"✅ Got BDUSS from NSUserDefaults");
     }
 
-    // 3. 获取路径 - 多种方式
     gCurrentPath = buildPathFromNavStack();
-    if (!gCurrentPath) {
-        UIViewController *vc = topViewController();
-        gCurrentPath = extractPathFromVC(vc);
-    }
     if (!gCurrentPath) gCurrentPath = @"/";
 
     DLog(@"📊 Path: %@ | Token: %@ | BDUSS: %@", 
          gCurrentPath, 
-         gBdstoken ? @"✅" : @"❌", 
+         gBdstoken ? [gBdstoken substringToIndex:MIN(16, gBdstoken.length)] : @"❌", 
          gBDUSS ? @"✅" : @"❌");
+}
+
+// ========== 文件列表获取 ==========
+
+static void fetchFileList(void (^completion)(NSArray *files, NSError *err)) {
+    if (!gBdstoken) {
+        completion(nil, [NSError errorWithDomain:@"BaiduPanTroll" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"No token"}]);
+        return;
+    }
+
+    NSString *encodedPath = strictEncodeURIComponent(gCurrentPath ?: @"/");
+    NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/list?dir=%@&bdstoken=%@&order=time&desc=1&showempty=0&web=1&page=1&num=100", encodedPath, gBdstoken];
+
+    bdAsyncRequest(url, @"GET", nil, nil, ^(id json, NSError *err) {
+        if (err) { completion(nil, err); return; }
+        NSArray *list = json[@"list"];
+        if (![list isKindOfClass:[NSArray class]]) {
+            completion(nil, [NSError errorWithDomain:@"BaiduPanTroll" code:-2 userInfo:@{NSLocalizedDescriptionKey: @"Invalid response"}]);
+            return;
+        }
+        completion(list, nil);
+    });
+}
+
+// ========== 文件重命名 ==========
+
+static void renameFile(NSString *fileId, NSString *path, NSString *newName, void (^completion)(BOOL success, NSError *err)) {
+    if (!gBdstoken) {
+        completion(NO, [NSError errorWithDomain:@"BaiduPanTroll" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"No token"}]);
+        return;
+    }
+
+    NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/filemanager?opera=rename&bdstoken=%@", gBdstoken];
+    NSString *body = [NSString stringWithFormat:@"filelist=[{\"path\":\"%@\",\"newname\":\"%@\"}]", path, newName];
+
+    NSDictionary *headers = @{
+        @"Content-Type": @"application/x-www-form-urlencoded",
+        @"X-Requested-With": @"XMLHttpRequest"
+    };
+
+    bdAsyncRequest(url, @"POST", headers, body, ^(id json, NSError *err) {
+        if (err) { completion(NO, err); return; }
+        NSNumber *errnoNum = json[@"errno"];
+        if (errnoNum && [errnoNum integerValue] == 0) {
+            completion(YES, nil);
+        } else {
+            NSString *msg = json[@"errmsg"] ?: @"Unknown error";
+            completion(NO, [NSError errorWithDomain:@"BaiduPanTroll" code:[errnoNum integerValue] userInfo:@{NSLocalizedDescriptionKey: msg}]);
+        }
+    });
+}
+
+// ========== 模拟点击文件 ==========
+
+static void simulateTapFileNamed(NSString *fileName) {
+    DLog(@"👆 Simulating tap on file: %@", fileName);
+
+    UIViewController *vc = topViewController();
+    if (!vc) { DLog(@"❌ No top VC"); return; }
+
+    __block UIScrollView *targetScrollView = nil;
+
+    void (^findScrollView)(UIView *) = ^(UIView *view) {
+        if (targetScrollView) return;
+        if ([view isKindOfClass:[UITableView class]] || [view isKindOfClass:[UICollectionView class]]) {
+            targetScrollView = (UIScrollView *)view;
+            return;
+        }
+        for (UIView *subview in view.subviews) {
+            if (!targetScrollView) findScrollView(subview);
+        }
+    };
+    findScrollView(vc.view);
+
+    if (!targetScrollView) { DLog(@"❌ No scroll view found"); return; }
+
+    if ([targetScrollView isKindOfClass:[UITableView class]]) {
+        UITableView *tableView = (UITableView *)targetScrollView;
+        for (NSIndexPath *indexPath in [tableView indexPathsForVisibleRows]) {
+            UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+            if (!cell) continue;
+
+            for (UIView *subview in cell.contentView.subviews) {
+                if ([subview isKindOfClass:[UILabel class]]) {
+                    UILabel *label = (UILabel *)subview;
+                    if (label.text && [label.text containsString:fileName]) {
+                        DLog(@"✅ Found cell at indexPath: %@", indexPath);
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            [tableView.delegate tableView:tableView didSelectRowAtIndexPath:indexPath];
+                            [tableView selectRowAtIndexPath:indexPath animated:NO scrollPosition:UITableViewScrollPositionNone];
+                        });
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    DLog(@"⚠️ Cell not found for: %@", fileName);
+}
+
+// ========== 触发下载流程 ==========
+
+static void triggerDownloadFlow(void) {
+    DLog(@"🚀 Starting download flow...");
+
+    fetchFileList(^(NSArray *files, NSError *err) {
+        if (err || !files || files.count == 0) {
+            DLog(@"❌ Failed to get file list: %@", err.localizedDescription);
+            return;
+        }
+
+        gFileList = [files mutableCopy];
+        DLog(@"✅ Got %lu files", (unsigned long)files.count);
+
+        // 选择第一个文件（非文件夹）
+        NSDictionary *targetFile = nil;
+        for (NSDictionary *file in files) {
+            NSNumber *isdir = file[@"isdir"];
+            if (!isdir || [isdir integerValue] == 0) {
+                targetFile = file;
+                break;
+            }
+        }
+
+        if (!targetFile) {
+            DLog(@"⚠️ No file found in list");
+            return;
+        }
+
+        NSString *fileName = targetFile[@"server_filename"];
+        NSString *filePath = targetFile[@"path"];
+        NSString *fileId = [targetFile[@"fs_id"] stringValue];
+
+        if (!fileName || !filePath) {
+            DLog(@"❌ Missing file info");
+            return;
+        }
+
+        DLog(@"🎯 Target file: %@ at %@", fileName, filePath);
+
+        // 重命名为 .pdf 触发预览/下载
+        NSString *pdfName = [fileName stringByAppendingString:@".pdf"];
+        DLog(@"📝 Renaming to: %@", pdfName);
+
+        renameFile(fileId, filePath, pdfName, ^(BOOL success, NSError *err) {
+            if (!success) {
+                DLog(@"❌ Rename failed: %@", err.localizedDescription);
+                return;
+            }
+
+            DLog(@"✅ Renamed, waiting 4s...");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+
+                // 模拟点击重命名后的文件
+                simulateTapFileNamed(pdfName);
+
+                // 6秒后改回原名
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    DLog(@"🔄 Restoring original name...");
+                    NSString *pdfPath = [[filePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:pdfName];
+                    renameFile(fileId, pdfPath, fileName, ^(BOOL success, NSError *err) {
+                        DLog(@"%@ Restore name: %@", success ? @"✅" : @"❌", err ? err.localizedDescription : @"");
+                    });
+                });
+            });
+        });
+    });
 }
 
 // ========== 浮游按钮 ==========
@@ -264,15 +393,21 @@ static void autoDetectPathAndToken(void) {
 static void onFloatButtonTap(void) {
     autoDetectPathAndToken();
 
-    NSString *msg = [NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@",
-                       gCurrentPath,
-                       gBdstoken ? [gBdstoken substringToIndex:MIN(16, gBdstoken.length)] : @"❌",
-                       gBDUSS ? @"✅" : @"❌"];
+    NSString *tokenInfo = @"❌";
+    if (gBdstoken) {
+        tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", 
+                     [gBdstoken substringToIndex:MIN(16, gBdstoken.length)], 
+                     (unsigned long)gBdstoken.length];
+    }
 
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll"
-                                                                   message:msg
+                                                                   message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@", gCurrentPath, tokenInfo, gBDUSS ? @"✅" : @"❌"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+
+    [alert addAction:[UIAlertAction actionWithTitle:@"触发下载" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        triggerDownloadFlow();
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
 
     UIViewController *vc = topViewController();
     if (vc) [vc presentViewController:alert animated:YES completion:nil];
@@ -339,7 +474,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"🚀 BaiduPan Troll v7.3 loaded");
+    DLog(@"🚀 BaiduPan Troll v7.4 loaded");
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
