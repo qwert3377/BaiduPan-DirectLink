@@ -1,6 +1,6 @@
 //
-//  BaiduPan Final Probe - 修复版
-//  所有普通函数放在 %hook 块外面
+//  BaiduPan Final Probe - 修复宏定义
+//  修复变量名冲突问题
 //
 
 #import <UIKit/UIKit.h>
@@ -10,16 +10,19 @@ static NSMutableString *gLog = nil;
 static NSMutableArray *gKeyFindings = nil;
 
 #define LOG(fmt, ...) do { \
-    NSString *msg = [NSString stringWithFormat:@"[PROBE] " fmt, ##__VA_ARGS__]; \
-    NSLog(@"%@", msg); \
-    if (gLog) [gLog appendString:msg]; \
+    NSString *_logMsg = [NSString stringWithFormat:@"[PROBE] " fmt, ##__VA_ARGS__]; \
+    NSLog(@"%@", _logMsg); \
+    if (gLog) [gLog appendString:_logMsg]; \
     if (gLog) [gLog appendString:@"\n"]; \
 } while(0)
 
 #define KEY(fmt, ...) do { \
-    NSString *msg = [NSString stringWithFormat:fmt, ##__VA_ARGS__]; \
-    if (gKeyFindings) [gKeyFindings addObject:msg]; \
-    LOG("KEY: %@", msg); \
+    NSString *_keyMsg = [NSString stringWithFormat:fmt, ##__VA_ARGS__]; \
+    if (gKeyFindings) [gKeyFindings addObject:_keyMsg]; \
+    NSString *_logMsg = [NSString stringWithFormat:@"[PROBE] KEY: %@", _keyMsg]; \
+    NSLog(@"%@", _logMsg); \
+    if (gLog) [gLog appendString:_logMsg]; \
+    if (gLog) [gLog appendString:@"\n"]; \
 } while(0)
 
 static void showResults(void) {
