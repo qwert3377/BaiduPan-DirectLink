@@ -1,6 +1,6 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v6.0
-//  Fix: Reordered function definitions to resolve forward-declaration block capture issues
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v6.1
+//  Flow: Rename -> Fetch -> Simulate Tap -> Restore
 //
 
 #import <UIKit/UIKit.h>
@@ -36,7 +36,7 @@ static NSString * extractPathFromViewController(UIViewController *vc);
 static NSString * getPathFromNavStack(void);
 static NSString * extractPathFromURL(NSString *urlString);
 
-// ========== 工具函数实现 ==========
+// ========== 工具函数 ==========
 
 static UIViewController * topViewController(void) {
     UIWindow *window = nil;
@@ -83,8 +83,7 @@ static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *header
         for (NSHTTPCookie *cookie in cookies) {
             [cookieStrings addObject:[NSString stringWithFormat:@"%@=%@", cookie.name, cookie.value]];
         }
-        NSString *cookieHeader = [cookieStrings componentsJoinedByString:@"; "];
-        [req setValue:cookieHeader forHTTPHeaderField:@"Cookie"];
+        [req setValue:[cookieStrings componentsJoinedByString:@"; "] forHTTPHeaderField:@"Cookie"];
     }
 
     if (headers) {
@@ -200,11 +199,10 @@ static NSString * getPathFromNavStack(void) {
     return nil;
 }
 
-// ========== UI 模拟点击辅助函数 ==========
+// ========== 模拟点击辅助 ==========
 
 static UIView *findSubviewWithText(UIView *view, NSString *text) {
     if (!view || !text) return nil;
-    
     if ([view isKindOfClass:[UILabel class]]) {
         UILabel *label = (UILabel *)view;
         if (label.text && [label.text containsString:text]) return label;
@@ -218,7 +216,6 @@ static UIView *findSubviewWithText(UIView *view, NSString *text) {
         NSString *btnTitle = [btn titleForState:UIControlStateNormal];
         if (btnTitle && [btnTitle containsString:text]) return btn;
     }
-    
     for (UIView *subview in view.subviews) {
         UIView *found = findSubviewWithText(subview, text);
         if (found) return found;
@@ -228,34 +225,25 @@ static UIView *findSubviewWithText(UIView *view, NSString *text) {
 
 static void performTapOnView(UIView *view) {
     if (!view) return;
-    
     UIView *target = view;
     while (target) {
-        if ([target isKindOfClass:[UIControl class]] && target.gestureRecognizers.count > 0) {
-            break;
-        }
-        if ([target isKindOfClass:[UITableViewCell class]] || [target isKindOfClass:[UICollectionViewCell class]]) {
-            break;
-        }
+        if ([target isKindOfClass:[UIControl class]] && target.gestureRecognizers.count > 0) break;
+        if ([target isKindOfClass:[UITableViewCell class]] || [target isKindOfClass:[UICollectionViewCell class]]) break;
         target = target.superview;
     }
     if (!target) target = view;
-    
+
     if ([target isKindOfClass:[UIControl class]]) {
         [(UIControl *)target sendActionsForControlEvents:UIControlEventTouchUpInside];
         DLog(@"Simulated UIControl tap");
         return;
     }
-    
     if ([target isKindOfClass:[UITableViewCell class]]) {
         UITableViewCell *cell = (UITableViewCell *)target;
         UITableView *tableView = nil;
         UIView *parent = cell.superview;
         while (parent) {
-            if ([parent isKindOfClass:[UITableView class]]) {
-                tableView = (UITableView *)parent;
-                break;
-            }
+            if ([parent isKindOfClass:[UITableView class]]) { tableView = (UITableView *)parent; break; }
             parent = parent.superview;
         }
         if (tableView) {
@@ -270,16 +258,12 @@ static void performTapOnView(UIView *view) {
         }
         return;
     }
-    
     if ([target isKindOfClass:[UICollectionViewCell class]]) {
         UICollectionViewCell *cell = (UICollectionViewCell *)target;
         UICollectionView *collectionView = nil;
         UIView *parent = cell.superview;
         while (parent) {
-            if ([parent isKindOfClass:[UICollectionView class]]) {
-                collectionView = (UICollectionView *)parent;
-                break;
-            }
+            if ([parent isKindOfClass:[UICollectionView class]]) { collectionView = (UICollectionView *)parent; break; }
             parent = parent.superview;
         }
         if (collectionView) {
@@ -299,7 +283,6 @@ static void performTapOnView(UIView *view) {
 static void simulateTapFileNamed(NSString *fileName) {
     UIViewController *vc = topViewController();
     if (!vc) return;
-    
     UIView *targetView = findSubviewWithText(vc.view, fileName);
     if (targetView) {
         DLog(@"Found view for '%@', performing tap", fileName);
@@ -312,7 +295,7 @@ static void simulateTapFileNamed(NSString *fileName) {
     }
 }
 
-// ========== 核心 API 实现 ==========
+// ========== 核心 API ==========
 
 static void fetchFileList(NSString *path, void (^completion)(NSArray *files, NSError *err)) {
     NSString *token = getBdstoken();
@@ -327,8 +310,7 @@ static void fetchFileList(NSString *path, void (^completion)(NSArray *files, NSE
         if (err) { completion(nil, err); return; }
         NSInteger errnoVal = [json[@"errno"] integerValue];
         if (errnoVal == 0) {
-            NSArray *list = json[@"list"] ?: @[];
-            completion(list, nil);
+            completion(json[@"list"] ?: @[], nil);
         } else {
             NSString *msg = json[@"errmsg"] ?: [NSString stringWithFormat:@"Error: %ld", (long)errnoVal];
             completion(nil, [NSError errorWithDomain:@"BaiduPan" code:errnoVal userInfo:@{NSLocalizedDescriptionKey: msg}]);
@@ -498,242 +480,53 @@ static void renameFile(NSString *fileId, NSString *path, NSString *newName, void
     });
 }
 
-// ========== 弹窗 UI 实现（放在 runPipeline 之前） ==========
-
-static void showSuccessPopup(NSString *fileName, NSString *link) {
-    UIViewController *vc = topViewController();
-    if (!vc) return;
-
-    UIView *overlay = [[UIView alloc] initWithFrame:vc.view.bounds];
-    overlay.backgroundColor = [UIColor colorWithWhite:0 alpha:0.45];
-    overlay.alpha = 0;
-    overlay.tag = 99999;
-    [vc.view addSubview:overlay];
-
-    UIView *modal = [[UIView alloc] init];
-    modal.backgroundColor = [UIColor whiteColor];
-    modal.layer.cornerRadius = 12;
-    modal.translatesAutoresizingMaskIntoConstraints = NO;
-    [overlay addSubview:modal];
-
-    UILabel *titleLabel = [[UILabel alloc] init];
-    titleLabel.text = @"Link Copied";
-    titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-    titleLabel.textColor = [UIColor colorWithRed:0.2 green:0.2 blue:0.2 alpha:1];
-    titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [modal addSubview:titleLabel];
-
-    UILabel *msgLabel = [[UILabel alloc] init];
-    msgLabel.text = [NSString stringWithFormat:@"%@ link has been copied to clipboard.", fileName];
-    msgLabel.font = [UIFont systemFontOfSize:14];
-    msgLabel.textColor = [UIColor colorWithRed:0.27 green:0.27 blue:0.27 alpha:1];
-    msgLabel.numberOfLines = 0;
-    msgLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [modal addSubview:msgLabel];
-
-    UITextField *linkInput = [[UITextField alloc] init];
-    linkInput.text = link;
-    linkInput.font = [UIFont fontWithName:@"Menlo" size:11] ?: [UIFont systemFontOfSize:11];
-    linkInput.textColor = [UIColor colorWithRed:0.18 green:0.42 blue:1 alpha:1];
-    linkInput.backgroundColor = [UIColor colorWithRed:0.97 green:0.98 blue:1 alpha:1];
-    linkInput.layer.borderColor = [UIColor colorWithRed:0.86 green:0.87 blue:0.88 alpha:1].CGColor;
-    linkInput.layer.borderWidth = 1;
-    linkInput.layer.cornerRadius = 6;
-    linkInput.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 10, 0)];
-    linkInput.leftViewMode = UITextFieldViewModeAlways;
-    linkInput.rightView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 10, 0)];
-    linkInput.rightViewMode = UITextFieldViewModeAlways;
-    linkInput.translatesAutoresizingMaskIntoConstraints = NO;
-    linkInput.enabled = NO;
-    [modal addSubview:linkInput];
-
-    UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    [copyBtn setTitle:@"Copy Again" forState:UIControlStateNormal];
-    copyBtn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
-    copyBtn.backgroundColor = [UIColor colorWithRed:0.18 green:0.42 blue:1 alpha:1];
-    [copyBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    copyBtn.layer.cornerRadius = 6;
-    copyBtn.translatesAutoresizingMaskIntoConstraints = NO;
-    [modal addSubview:copyBtn];
-
-    UILabel *hintLabel = [[UILabel alloc] init];
-    hintLabel.text = @"Tip: Use IDM, Aria2, Motrix to paste download";
-    hintLabel.font = [UIFont systemFontOfSize:11];
-    hintLabel.textColor = [UIColor colorWithRed:0.53 green:0.53 blue:0.53 alpha:1];
-    hintLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [modal addSubview:hintLabel];
-
-    CGFloat modalWidth = MIN(420, vc.view.bounds.size.width * 0.92);
-    [NSLayoutConstraint activateConstraints:@[
-        [modal.centerXAnchor constraintEqualToAnchor:overlay.centerXAnchor],
-        [modal.centerYAnchor constraintEqualToAnchor:overlay.centerYAnchor],
-        [modal.widthAnchor constraintEqualToConstant:modalWidth],
-
-        [titleLabel.topAnchor constraintEqualToAnchor:modal.topAnchor constant:16],
-        [titleLabel.leadingAnchor constraintEqualToAnchor:modal.leadingAnchor constant:16],
-        [titleLabel.trailingAnchor constraintEqualToAnchor:modal.trailingAnchor constant:-16],
-
-        [msgLabel.topAnchor constraintEqualToAnchor:titleLabel.bottomAnchor constant:12],
-        [msgLabel.leadingAnchor constraintEqualToAnchor:modal.leadingAnchor constant:16],
-        [msgLabel.trailingAnchor constraintEqualToAnchor:modal.trailingAnchor constant:-16],
-
-        [linkInput.topAnchor constraintEqualToAnchor:msgLabel.bottomAnchor constant:12],
-        [linkInput.leadingAnchor constraintEqualToAnchor:modal.leadingAnchor constant:16],
-        [linkInput.trailingAnchor constraintEqualToAnchor:modal.trailingAnchor constant:-16],
-        [linkInput.heightAnchor constraintEqualToConstant:36],
-
-        [copyBtn.topAnchor constraintEqualToAnchor:linkInput.bottomAnchor constant:12],
-        [copyBtn.trailingAnchor constraintEqualToAnchor:modal.trailingAnchor constant:-16],
-        [copyBtn.widthAnchor constraintEqualToConstant:100],
-        [copyBtn.heightAnchor constraintEqualToConstant:36],
-
-        [hintLabel.topAnchor constraintEqualToAnchor:copyBtn.bottomAnchor constant:12],
-        [hintLabel.leadingAnchor constraintEqualToAnchor:modal.leadingAnchor constant:16],
-        [hintLabel.trailingAnchor constraintEqualToAnchor:modal.trailingAnchor constant:-16],
-        [hintLabel.bottomAnchor constraintEqualToAnchor:modal.bottomAnchor constant:-16]
-    ]]; 
-
-    [UIView animateWithDuration:0.2 animations:^{
-        overlay.alpha = 1;
-    }];
-
-    [copyBtn addTarget:overlay action:@selector(removeFromSuperview) forControlEvents:UIControlEventTouchUpInside];
-    UITapGestureRecognizer *tapOverlay = [[UITapGestureRecognizer alloc] initWithTarget:overlay action:@selector(removeFromSuperview)];
-    tapOverlay.cancelsTouchesInView = NO;
-    [overlay addGestureRecognizer:tapOverlay];
-}
+// ========== 弹窗 UI（必须在 runPipeline 之前定义） ==========
 
 static void showErrorPopup(NSString *message) {
     UIViewController *vc = topViewController();
     if (!vc) return;
-
-    UIView *overlay = [[UIView alloc] initWithFrame:vc.view.bounds];
-    overlay.backgroundColor = [UIColor colorWithWhite:0 alpha:0.45];
-    overlay.alpha = 0;
-    overlay.tag = 99999;
-    [vc.view addSubview:overlay];
-
-    UIView *modal = [[UIView alloc] init];
-    modal.backgroundColor = [UIColor whiteColor];
-    modal.layer.cornerRadius = 12;
-    modal.translatesAutoresizingMaskIntoConstraints = NO;
-    [overlay addSubview:modal];
-
-    UILabel *titleLabel = [[UILabel alloc] init];
-    titleLabel.text = @"Failed";
-    titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-    titleLabel.textColor = [UIColor colorWithRed:0.78 green:0.24 blue:0.18 alpha:1];
-    titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [modal addSubview:titleLabel];
-
-    UILabel *msgLabel = [[UILabel alloc] init];
-    msgLabel.text = message;
-    msgLabel.font = [UIFont systemFontOfSize:14];
-    msgLabel.textColor = [UIColor colorWithRed:0.27 green:0.27 blue:0.27 alpha:1];
-    msgLabel.numberOfLines = 0;
-    msgLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [modal addSubview:msgLabel];
-
-    UIButton *okBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    [okBtn setTitle:@"OK" forState:UIControlStateNormal];
-    okBtn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
-    okBtn.backgroundColor = [UIColor colorWithRed:0.18 green:0.42 blue:1 alpha:1];
-    [okBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    okBtn.layer.cornerRadius = 6;
-    okBtn.translatesAutoresizingMaskIntoConstraints = NO;
-    [modal addSubview:okBtn];
-
-    CGFloat modalWidth = MIN(420, vc.view.bounds.size.width * 0.92);
-    [NSLayoutConstraint activateConstraints:@[
-        [modal.centerXAnchor constraintEqualToAnchor:overlay.centerXAnchor],
-        [modal.centerYAnchor constraintEqualToAnchor:overlay.centerYAnchor],
-        [modal.widthAnchor constraintEqualToConstant:modalWidth],
-
-        [titleLabel.topAnchor constraintEqualToAnchor:modal.topAnchor constant:16],
-        [titleLabel.leadingAnchor constraintEqualToAnchor:modal.leadingAnchor constant:16],
-        [titleLabel.trailingAnchor constraintEqualToAnchor:modal.trailingAnchor constant:-16],
-
-        [msgLabel.topAnchor constraintEqualToAnchor:titleLabel.bottomAnchor constant:12],
-        [msgLabel.leadingAnchor constraintEqualToAnchor:modal.leadingAnchor constant:16],
-        [msgLabel.trailingAnchor constraintEqualToAnchor:modal.trailingAnchor constant:-16],
-
-        [okBtn.topAnchor constraintEqualToAnchor:msgLabel.bottomAnchor constant:16],
-        [okBtn.trailingAnchor constraintEqualToAnchor:modal.trailingAnchor constant:-16],
-        [okBtn.widthAnchor constraintEqualToConstant:80],
-        [okBtn.heightAnchor constraintEqualToConstant:36],
-        [okBtn.bottomAnchor constraintEqualToAnchor:modal.bottomAnchor constant:-16]
-    ]]; 
-
-    [UIView animateWithDuration:0.2 animations:^{
-        overlay.alpha = 1;
-    }];
-
-    [okBtn addTarget:overlay action:@selector(removeFromSuperview) forControlEvents:UIControlEventTouchUpInside];
-    UITapGestureRecognizer *tapOverlay = [[UITapGestureRecognizer alloc] initWithTarget:overlay action:@selector(removeFromSuperview)];
-    tapOverlay.cancelsTouchesInView = NO;
-    [overlay addGestureRecognizer:tapOverlay];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"失败" message:message preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [vc presentViewController:alert animated:YES completion:nil];
 }
 
-static void showAppDownloadStartedPopup(NSString *fileName, NSString *renamedName, NSString *renamedPath, NSString *fileId) {
+static void showRestorePopup(NSString *originalName, NSString *renamedName, NSString *renamedPath, NSString *fileId, NSString *dlink) {
     UIViewController *vc = topViewController();
     if (!vc) return;
-    
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"已触发 App 内下载" message:[NSString stringWithFormat:@"文件 '%@' 已临时重命名为 '%@'。\n\n百度网盘将尝试预览/下载此 PDF 文件（利用 SVIP 加速通道）。\n\n⚠️ 下载完成后，请务必恢复文件名，否则文件将一直保持 .pdf 后缀。", fileName, renamedName] preferredStyle:UIAlertControllerStyleAlert];
-    
+
+    // 复制直链到剪贴板（备用）
+    if (dlink && dlink.length > 0) {
+        [[UIPasteboard generalPasteboard] setString:dlink];
+    }
+
+    NSString *msg = [NSString stringWithFormat:
+        @"文件已临时重命名为：%@\n\n已尝试触发百度网盘 App 内预览/下载（利用 SVIP 通道）。\n\n直链已复制到剪贴板（备用）。\n\n⚠️ 下载完成后，请点击「恢复文件名」改回原名，否则文件将一直保持 .pdf 后缀。",
+        renamedName];
+
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"下载已触发" message:msg preferredStyle:UIAlertControllerStyleAlert];
+
     [alert addAction:[UIAlertAction actionWithTitle:@"✅ 恢复文件名" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        renameFile(fileId, renamedPath, fileName, ^(BOOL s, NSError *e) {
-            if (s) {
-                UIAlertController *ok = [UIAlertController alertControllerWithTitle:@"已恢复" message:@"文件名已恢复为原始名称" preferredStyle:UIAlertControllerStyleAlert];
+        renameFile(fileId, renamedPath, originalName, ^(BOOL success, NSError *err) {
+            if (success) {
+                UIAlertController *ok = [UIAlertController alertControllerWithTitle:@"完成" message:@"文件名已恢复" preferredStyle:UIAlertControllerStyleAlert];
                 [ok addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
                 [vc presentViewController:ok animated:YES completion:nil];
             } else {
-                showErrorPopup(e.localizedDescription);
+                showErrorPopup(err.localizedDescription);
             }
         });
     }]];
-    
-    [alert addAction:[UIAlertAction actionWithTitle:@"稍后再说" style:UIAlertActionStyleCancel handler:nil]];
-    
+
+    [alert addAction:[UIAlertAction actionWithTitle:@"稍后再恢复" style:UIAlertActionStyleCancel handler:nil]];
+
     [vc presentViewController:alert animated:YES completion:nil];
 }
 
-static void showActionPopup(NSString *fileName, NSString *dlink, NSString *renamedPath, NSString *fileId, NSString *currentPath, void (^appDownloadAction)(void), void (^copyLinkAction)(void)) {
-    UIViewController *vc = topViewController();
-    if (!vc) return;
-    
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"直链获取成功" message:[NSString stringWithFormat:@"文件: %@\n\n已临时重命名为 .pdf 扩展名。请选择操作方式：", fileName] preferredStyle:UIAlertControllerStyleAlert];
-    
-    [alert addAction:[UIAlertAction actionWithTitle:@"📥 App 内下载 (SVIP)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        if (appDownloadAction) appDownloadAction();
-    }]];
-    
-    [alert addAction:[UIAlertAction actionWithTitle:@"📋 复制直链" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        if (copyLinkAction) copyLinkAction();
-    }]];
-    
-    [alert addAction:[UIAlertAction actionWithTitle:@"❌ 取消并恢复" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
-        renameFile(fileId, renamedPath, fileName, ^(BOOL s, NSError *e) {
-            if (!s) DLog(@"Restore failed: %@", e.localizedDescription);
-        });
-    }]];
-    
-    [vc presentViewController:alert animated:YES completion:nil];
-}
-
-// ========== 修改后的 runPipeline ==========
+// ========== 主流程：完全匹配备忘录 4 步 ==========
 
 static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentPath, NSInteger fileSize) {
     NSString *originalName = fileName;
-    
-    void (^finishWithRestore)(NSString *, NSError *) = ^(NSString *dlink, NSError *err) {
-        if (dlink) {
-            [[UIPasteboard generalPasteboard] setString:dlink];
-            showSuccessPopup(originalName, dlink);
-        } else {
-            showErrorPopup(err.localizedDescription);
-        }
-    };
-    
+
     NSString *fullPath;
     if ([currentPath isEqualToString:@"/"]) {
         fullPath = [NSString stringWithFormat:@"/%@", originalName];
@@ -741,69 +534,73 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
         fullPath = [NSString stringWithFormat:@"%@/%@", currentPath, originalName];
     }
     DLog(@"Final path: %@", fullPath);
-    
-    if (![originalName hasSuffix:@".pdf"]) {
-        NSString *renamedName = [originalName stringByAppendingString:@".pdf"];
-        DLog(@"Rename: %@ -> %@", fullPath, renamedName);
-        
-        renameFile(fileId, fullPath, renamedName, ^(BOOL success, NSError *err) {
-            if (!success) {
+
+    // 如果已经是 .pdf，直接获取直链并结束
+    if ([originalName hasSuffix:@".pdf"]) {
+        fetchDlinkPortal(fullPath, ^(NSString *dlink, NSError *err) {
+            if (dlink) {
+                [[UIPasteboard generalPasteboard] setString:dlink];
+                showRestorePopup(originalName, originalName, fullPath, fileId, dlink);
+            } else {
                 showErrorPopup(err.localizedDescription);
-                return;
             }
-            
-            NSString *renamedPath = [currentPath isEqualToString:@"/"] ? [NSString stringWithFormat:@"/%@", renamedName] : [NSString stringWithFormat:@"%@/%@", currentPath, renamedName];
-            
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kWaitTimeAfterRename * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
-                void (^doFetch)(void) = ^{
-                    fetchDlinkPortal(renamedPath, ^(NSString *dlink, NSError *err) {
-                        if (!dlink) {
-                            // 获取直链失败，恢复文件名并显示错误
-                            renameFile(fileId, renamedPath, originalName, ^(BOOL s, NSError *e) {
-                                if (!s) DLog(@"Restore name failed: %@", e.localizedDescription);
-                                finishWithRestore(nil, err);
-                            });
-                            return;
-                        }
-                        
-                        // 获取直链成功，显示选择弹窗
-                        showActionPopup(originalName, dlink, renamedPath, fileId, currentPath, ^{
-                            // ===== 用户选择：App 内下载（利用 SVIP） =====
-                            DLog(@"User chose App-internal download");
-                            refreshFileListCache(currentPath, ^{
-                                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                                    simulateTapFileNamed(renamedName);
-                                    showAppDownloadStartedPopup(originalName, renamedName, renamedPath, fileId);
-                                });
-                            });
-                        }, ^{
-                            // ===== 用户选择：复制直链 =====
-                            DLog(@"User chose copy link");
-                            renameFile(fileId, renamedPath, originalName, ^(BOOL s, NSError *e) {
-                                if (!s) DLog(@"Restore name failed: %@", e.localizedDescription);
-                                finishWithRestore(dlink, nil);
-                            });
-                        });
-                    });
-                };
-                
-                if (fileSize > kLargeFileThreshold) {
-                    DLog(@"Large file (%ld MB), refresh cache + extra wait", (long)(fileSize/1024/1024));
-                    refreshFileListCache(currentPath, ^{
-                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                            refreshFileMeta(renamedPath, ^{
-                                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kLargeFileExtraWait * NSEC_PER_MSEC)), dispatch_get_main_queue(), doFetch);
-                            });
-                        });
-                    });
-                } else {
-                    doFetch();
-                }
-            });
         });
-    } else {
-        fetchDlinkPortal(fullPath, finishWithRestore);
+        return;
     }
+
+    // Step 2: 改名 .pdf
+    NSString *renamedName = [originalName stringByAppendingString:@".pdf"];
+    DLog(@"Rename: %@ -> %@", fullPath, renamedName);
+
+    renameFile(fileId, fullPath, renamedName, ^(BOOL success, NSError *err) {
+        if (!success) {
+            showErrorPopup(err.localizedDescription);
+            return;
+        }
+
+        NSString *renamedPath = [currentPath isEqualToString:@"/"] ? [NSString stringWithFormat:@"/%@", renamedName] : [NSString stringWithFormat:@"%@/%@", currentPath, renamedName];
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kWaitTimeAfterRename * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+
+            void (^doFetch)(void) = ^{
+                // Step 3: 获取直链 + 模拟点击
+                fetchDlinkPortal(renamedPath, ^(NSString *dlink, NSError *err) {
+                    if (!dlink) {
+                        // 失败则恢复原名
+                        renameFile(fileId, renamedPath, originalName, ^(BOOL s, NSError *e) {
+                            if (!s) DLog(@"Restore failed: %@", e.localizedDescription);
+                            showErrorPopup(err.localizedDescription);
+                        });
+                        return;
+                    }
+
+                    // 刷新列表缓存，让 UI 更新显示 .pdf 文件名
+                    refreshFileListCache(currentPath, ^{
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                            // 模拟点击改名后的文件，触发百度网盘预览/下载
+                            simulateTapFileNamed(renamedName);
+
+                            // Step 4: 弹出恢复提示（用户手动确认后改回）
+                            showRestorePopup(originalName, renamedName, renamedPath, fileId, dlink);
+                        });
+                    });
+                });
+            };
+
+            if (fileSize > kLargeFileThreshold) {
+                DLog(@"Large file (%ld MB), extra wait", (long)(fileSize/1024/1024));
+                refreshFileListCache(currentPath, ^{
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        refreshFileMeta(renamedPath, ^{
+                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kLargeFileExtraWait * NSEC_PER_MSEC)), dispatch_get_main_queue(), doFetch);
+                        });
+                    });
+                });
+            } else {
+                doFetch();
+            }
+        });
+    });
 }
 
 // ========== NSURLSession Hook ==========
@@ -1059,7 +856,7 @@ static void swizzleInstanceMethod(Class cls, SEL originalSelector, SEL swizzledS
 @end
 
 __attribute__((constructor)) static void init() {
-    DLog(@"Loaded v6.0 (arm64) - App Download Edition");
+    DLog(@"Loaded v6.1 (arm64) - Auto Tap Edition");
 
     static dispatch_once_t sessionOnce;
     dispatch_once(&sessionOnce, ^{
