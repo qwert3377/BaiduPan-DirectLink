@@ -421,7 +421,7 @@ static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString
                 showToast(@"直链已复制到剪贴板！");
                 showLinkDialog(link, fileName, fileId, filePath, NO);
             }];
-        }];
+        });
         return;
     }
 
