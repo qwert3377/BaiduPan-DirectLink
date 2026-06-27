@@ -602,4 +602,3 @@ static void baiduPanTrollInit(void) {
         autoDetectPathAndToken();
     });
 }
-
