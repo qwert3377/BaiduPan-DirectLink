@@ -1,3 +1,4 @@
+//
 //  BaiduPan SVIP Direct Link Helper - TrollStore Edition v9.0
 //  Feature: Added internal app download trigger for large files (>50MB)
 //  Fix: objc_setAssociatedObject key type (const void*), removed hardcoded fallback token
@@ -365,9 +366,9 @@ static NSString * formatFileSize(long long bytes) {
     return [NSString stringWithFormat:@"%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0)];
 }
 
+
 // ========== v9.1 改进：更可靠的客户端下载触发 ==========
 
-// 恢复文件名并触发下载（改进版）
 static void restoreNameAndTriggerDownload(NSString *fileId, NSString *pdfPath, NSString *originalName) {
     renameFile(fileId, pdfPath, originalName, ^(BOOL ok, NSError *e) {
         if (ok) {
