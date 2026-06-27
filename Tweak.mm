@@ -350,65 +350,78 @@ static void forceRefreshFileList(void) {
 // ========== v8.2 UI Dialog (Fixed) ==========
 
 static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId, NSString *pdfPath) {
-    // 1. Use UIViewController as contentViewController to avoid KVC layout conflicts
     UIViewController *contentVC = [[UIViewController alloc] init];
-    contentVC.preferredContentSize = CGSizeMake(270, 160);
+    contentVC.preferredContentSize = CGSizeMake(270, 180);
 
     UIView *container = contentVC.view;
     container.backgroundColor = [UIColor clearColor];
 
-    // File name label
-    UILabel *nameLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 270, 20)];
+    CGFloat margin = 16;
+    CGFloat contentW = 270 - margin * 2;
+    CGFloat y = 8;
+
+    // 文件名
+    UILabel *nameLabel = [[UILabel alloc] initWithFrame:CGRectMake(margin, y, contentW, 20)];
     nameLabel.text = [NSString stringWithFormat:@"%@ 的直链已成功复制到剪贴板。", fileName];
     nameLabel.font = [UIFont systemFontOfSize:13];
     nameLabel.textColor = [UIColor darkTextColor];
     nameLabel.numberOfLines = 0;
     [nameLabel sizeToFit];
-    CGRect nameFrame = nameLabel.frame;
-    nameFrame.size.width = 270;
-    nameLabel.frame = nameFrame;
+    CGRect nf = nameLabel.frame;
+    nf.size.width = contentW;
+    nameLabel.frame = nf;
     [container addSubview:nameLabel];
 
-    CGFloat nameH = nameLabel.frame.size.height + 8;
+    y = CGRectGetMaxY(nameLabel.frame) + 12;
 
-    // 2. Use UIScrollView to horizontally wrap long links
-    UIScrollView *scrollView = [[UIScrollView alloc] initWithFrame:CGRectMake(0, nameH, 200, 36)];
-    scrollView.showsHorizontalScrollIndicator = YES;
-    scrollView.layer.borderColor = [UIColor colorWithRed:0.85 green:0.85 blue:0.85 alpha:1.0].CGColor;
-    scrollView.layer.borderWidth = 1.0;
+    // 链接 + 按钮 同一行
+    CGFloat linkH = 36;
+    CGFloat btnW = 72;
+    CGFloat linkW = contentW - btnW - 8;
+
+    UIScrollView *scrollView = [[UIScrollView alloc] initWithFrame:CGRectMake(margin, y, linkW, linkH)];
+    scrollView.showsHorizontalScrollIndicator = NO;
+    scrollView.layer.borderColor = [UIColor colorWithRed:0.85 green:0.85 blue:0.88 alpha:1.0].CGColor;
+    scrollView.layer.borderWidth = 0.5;
     scrollView.layer.cornerRadius = 6;
-    scrollView.backgroundColor = [UIColor colorWithRed:0.97 green:0.97 blue:1.0 alpha:1.0];
+    scrollView.backgroundColor = [UIColor colorWithRed:0.97 green:0.97 blue:0.99 alpha:1.0];
 
-    // 3. Remove UITextField, use UILabel to avoid keyboard focus competition
     UILabel *linkLabel = [[UILabel alloc] init];
     linkLabel.text = link;
     linkLabel.font = [UIFont fontWithName:@"Menlo" size:11];
-    linkLabel.textColor = [UIColor colorWithRed:0.18 green:0.42 blue:1.0 alpha:1.0];
+    linkLabel.textColor = [UIColor colorWithRed:0.20 green:0.40 blue:0.90 alpha:1.0];
     [linkLabel sizeToFit];
-    linkLabel.frame = CGRectMake(8, 8, linkLabel.frame.size.width, 20);
-    scrollView.contentSize = CGSizeMake(linkLabel.frame.size.width + 16, 36);
+    linkLabel.frame = CGRectMake(8, (linkH - linkLabel.frame.size.height) / 2, linkLabel.frame.size.width, linkLabel.frame.size.height);
+    scrollView.contentSize = CGSizeMake(linkLabel.frame.size.width + 16, linkH);
     [scrollView addSubview:linkLabel];
     [container addSubview:scrollView];
 
-    // Copy again button
+    // 再次复制按钮
     UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    copyBtn.frame = CGRectMake(210, nameH, 60, 36);
+    copyBtn.frame = CGRectMake(margin + linkW + 8, y, btnW, linkH);
     [copyBtn setTitle:@"再次复制" forState:UIControlStateNormal];
     copyBtn.titleLabel.font = [UIFont systemFontOfSize:13];
     [copyBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    copyBtn.backgroundColor = [UIColor colorWithRed:0.18 green:0.42 blue:1.0 alpha:1.0];
+    copyBtn.backgroundColor = [UIColor colorWithRed:0.20 green:0.48 blue:1.0 alpha:1.0];
     copyBtn.layer.cornerRadius = 6;
     copyBtn.layer.masksToBounds = YES;
     [copyBtn addTarget:nil action:@selector(bdt_copyLinkTapped:) forControlEvents:UIControlEventTouchUpInside];
     objc_setAssociatedObject(copyBtn, "linkText", link, OBJC_ASSOCIATION_COPY_NONATOMIC);
     [container addSubview:copyBtn];
 
-    CGFloat hintY = nameH + 44;
-    UILabel *hintLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, hintY, 270, 20)];
+    y += linkH + 10;
+
+    // 提示
+    UILabel *hintLabel = [[UILabel alloc] initWithFrame:CGRectMake(margin, y, contentW, 18)];
     hintLabel.text = @"提示：可使用 IDM、Aria2、Motrix 等工具粘贴下载";
-    hintLabel.font = [UIFont systemFontOfSize:12];
-    hintLabel.textColor = [UIColor grayColor];
+    hintLabel.font = [UIFont systemFontOfSize:11];
+    hintLabel.textColor = [UIColor colorWithWhite:0.5 alpha:1.0];
     [container addSubview:hintLabel];
+
+    y += 26;
+
+    // 更新 preferredContentSize 为实际高度
+    contentVC.preferredContentSize = CGSizeMake(270, y);
 
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"直链已复制"
                                                                    message:nil
