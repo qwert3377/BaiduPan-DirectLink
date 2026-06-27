@@ -1,12 +1,11 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v6.3
-//  Feature: Aggressive auto-detect via CFNetwork hook + runtime class scan
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v6.4
+//  Fix: Force refresh file list after rename, retry tap with fallback
 //
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <WebKit/WebKit.h>
-#import <CFNetwork/CFNetwork.h>
 
 #define DLog(fmt, ...) NSLog((@"[BaiduPanTroll] " fmt), ##__VA_ARGS__)
 
@@ -14,6 +13,7 @@ static const NSInteger kLargeFileThreshold = 30 * 1024 * 1024;
 static const NSInteger kWaitTimeAfterRename = 4000;
 static const NSInteger kLargeFileExtraWait = 10000;
 static const NSInteger kDlinkRetryCount = 3;
+static const NSInteger kRefreshRetryCount = 5;
 
 static NSString *gManualToken = nil;
 static NSString *gCurrentPath = nil;
@@ -43,6 +43,8 @@ static void autoDetectPathAndToken(void);
 static NSString * extractTokenFromWebView(UIView *view);
 static void scanAllClassesForToken(void);
 static void scanAllClassesForPath(void);
+static void forceReloadFileList(void);
+static void simulateTapWithRetry(NSString *fileName, NSString *originalName, NSInteger retryCount);
 
 // ========== 工具函数 ==========
 
@@ -116,6 +118,69 @@ static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *header
     [task resume];
 }
 
+// ========== 强制刷新文件列表 ==========
+
+static void forceReloadFileList(void) {
+    // 方法1: 查找 UITableView 并调用 reloadData
+    UIViewController *vc = topViewController();
+    if (!vc) return;
+    
+    // 递归查找 UITableView
+    NSMutableArray *tableViews = [NSMutableArray array];
+    void (^findTableViews)(UIView *) = ^(UIView *view) {
+        if ([view isKindOfClass:[UITableView class]]) {
+            [tableViews addObject:view];
+        }
+        for (UIView *sub in view.subviews) {
+            findTableViews(sub);
+        }
+    };
+    findTableViews(vc.view);
+    
+    for (UITableView *tv in tableViews) {
+        DLog(@"Found UITableView, calling reloadData");
+        [tv reloadData];
+    }
+    
+    // 方法2: 尝试调用百度网盘可能的刷新方法
+    NSArray *possibleSelectors = @[
+        @"refreshData", @"reloadData", @"refreshList", @"reloadList",
+        @"refreshFileList", @"reloadFileList", @"loadData", @"fetchData",
+        @"refresh", @"reload", @"updateData", @"updateList"
+    ];
+    
+    for (NSString *selName in possibleSelectors) {
+        SEL sel = NSSelectorFromString(selName);
+        if ([vc respondsToSelector:sel]) {
+            DLog(@"Calling [%@ %@]", NSStringFromClass([vc class]), selName);
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [vc performSelector:sel];
+            #pragma clang diagnostic pop
+        }
+    }
+    
+    // 方法3: 遍历所有子 view controller
+    for (UIViewController *child in vc.childViewControllers) {
+        for (NSString *selName in possibleSelectors) {
+            SEL sel = NSSelectorFromString(selName);
+            if ([child respondsToSelector:sel]) {
+                DLog(@"Calling [%@ %@]", NSStringFromClass([child class]), selName);
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                [child performSelector:sel];
+                #pragma clang diagnostic pop
+            }
+        }
+    }
+    
+    // 方法4: 发送通知（百度网盘可能监听的通知）
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"BDFileListNeedRefresh" object:nil];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"PanFileListRefresh" object:nil];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"BaiduPanRefresh" object:nil];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"FileListChanged" object:nil];
+}
+
 // ========== 从 WebView 提取 Token ==========
 
 static NSString * extractTokenFromWebView(UIView *view) {
@@ -153,10 +218,8 @@ static void scanAllClassesForToken(void) {
         Class cls = classes[i];
         NSString *className = NSStringFromClass(cls);
         
-        // 跳过系统类
         if ([className hasPrefix:@"NS"] || [className hasPrefix:@"UI"] || [className hasPrefix:@"_"]) continue;
         
-        // 查找包含 token 相关属性的类
         unsigned int propCount = 0;
         objc_property_t *props = class_copyPropertyList(cls, &propCount);
         BOOL hasTokenProp = NO;
@@ -172,7 +235,6 @@ static void scanAllClassesForToken(void) {
         
         if (!hasTokenProp) continue;
         
-        // 尝试获取单例
         @try {
             id shared = nil;
             if ([cls respondsToSelector:@selector(sharedInstance)]) {
@@ -185,7 +247,6 @@ static void scanAllClassesForToken(void) {
             
             if (!shared) continue;
             
-            // 遍历所有属性查找 token
             props = class_copyPropertyList(cls, &propCount);
             for (unsigned int j = 0; j < propCount; j++) {
                 NSString *propName = [NSString stringWithUTF8String:property_getName(props[j])];
@@ -277,7 +338,6 @@ static void scanAllClassesForPath(void) {
 // ========== 自动检测 Token ==========
 
 static NSString * autoDetectBdstoken(void) {
-    // 1. 从 NSUserDefaults
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSString *token = [defaults stringForKey:@"bdstoken"];
     if (token && token.length > 0) {
@@ -286,18 +346,6 @@ static NSString * autoDetectBdstoken(void) {
         return token;
     }
     
-    // 2. 从 Cookie 中的 BDUSS 推导（如果有 BDUSS，说明已登录）
-    NSHTTPCookieStorage *storage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
-    NSArray *cookies = [storage cookiesForURL:[NSURL URLWithString:@"https://pan.baidu.com"]];
-    for (NSHTTPCookie *cookie in cookies) {
-        if ([cookie.name isEqualToString:@"BDUSS"] || [cookie.name isEqualToString:@"STOKEN"]) {
-            // 已登录，尝试其他方式获取 token
-            DLog(@"Found login cookie: %@", cookie.name);
-            break;
-        }
-    }
-    
-    // 3. 从 WebView
     for (UIWindow *window in [UIApplication sharedApplication].windows) {
         NSString *tokenFromWebView = extractTokenFromWebView(window);
         if (tokenFromWebView) {
@@ -306,10 +354,8 @@ static NSString * autoDetectBdstoken(void) {
         }
     }
     
-    // 4. 运行时扫描所有类
     scanAllClassesForToken();
     
-    // 5. 尝试常见的百度网盘内部类
     NSArray *possibleClasses = @[
         @"BaiduPanFileManager", @"PanFileManager", @"BDFileService",
         @"BaiduPanUserManager", @"PanUserManager", @"BDUserService",
@@ -337,7 +383,6 @@ static NSString * autoDetectBdstoken(void) {
             
             if (!shared) continue;
             
-            // 尝试所有可能的方法
             NSArray *possibleMethods = @[
                 @"bdstoken", @"token", @"_bdstoken", @"_token",
                 @"accessToken", @"access_token", @"userToken",
@@ -355,7 +400,6 @@ static NSString * autoDetectBdstoken(void) {
                 }
             }
             
-            // 尝试 Ivar
             unsigned int ivarCount = 0;
             Ivar *ivars = class_copyIvarList(cls, &ivarCount);
             for (unsigned int k = 0; k < ivarCount; k++) {
@@ -473,7 +517,6 @@ static NSString * getPathFromNavStack(void) {
 }
 
 static void autoDetectPathAndToken(void) {
-    // 先尝试从 ViewController 获取路径
     NSString *autoPath = getPathFromNavStack();
     if (autoPath) {
         gCurrentPath = autoPath;
@@ -481,17 +524,14 @@ static void autoDetectPathAndToken(void) {
         DLog(@"Auto path (VC): %@", autoPath);
     }
     
-    // 如果失败，运行时扫描所有类
     if (!gPathAutoDetected || !gCurrentPath || gCurrentPath.length == 0) {
         scanAllClassesForPath();
     }
     
-    // 如果还是失败，使用默认
     if (!gCurrentPath || gCurrentPath.length == 0) {
         gCurrentPath = @"/";
     }
     
-    // 检测 token
     NSString *autoToken = autoDetectBdstoken();
     if (autoToken) {
         gManualToken = autoToken;
@@ -501,7 +541,7 @@ static void autoDetectPathAndToken(void) {
     }
 }
 
-// ========== UI 模拟点击辅助 ==========
+// ========== UI 模拟点击辅助（带重试） ==========
 
 static UIView *findSubviewWithText(UIView *view, NSString *text) {
     if (!view || !text) return nil;
@@ -584,20 +624,42 @@ static void performTapOnView(UIView *view) {
     }
 }
 
-static void simulateTapFileNamed(NSString *fileName) {
+// 带重试的模拟点击：先尝试新文件名，再尝试原始文件名
+static void simulateTapWithRetry(NSString *fileName, NSString *originalName, NSInteger retryCount) {
     UIViewController *vc = topViewController();
     if (!vc) return;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    
+    if (retryCount <= 0) {
+        DLog(@"All retries failed for %@", fileName);
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"请手动点击" message:[NSString stringWithFormat:@"未能在当前界面自动定位到 '%@'，请在文件列表中手动点击该文件以触发下载", fileName] preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [vc presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+    
+    // 先强制刷新
+    forceReloadFileList();
+    
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        // 尝试新文件名
         UIView *targetView = findSubviewWithText(vc.view, fileName);
         if (targetView) {
             DLog(@"Found view for '%@', performing tap", fileName);
             performTapOnView(targetView);
-        } else {
-            DLog(@"Could not find view for '%@', user manual tap needed", fileName);
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"请手动点击" message:[NSString stringWithFormat:@"未能在当前界面自动定位到 '%@'，请在文件列表中手动点击该文件以触发下载", fileName] preferredStyle:UIAlertControllerStyleAlert];
-            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-            [vc presentViewController:alert animated:YES completion:nil];
+            return;
         }
+        
+        // 尝试原始文件名（UI 可能还没更新）
+        targetView = findSubviewWithText(vc.view, originalName);
+        if (targetView) {
+            DLog(@"Found view for original name '%@', performing tap (UI not updated yet)", originalName);
+            performTapOnView(targetView);
+            return;
+        }
+        
+        // 重试
+        DLog(@"Retry %ld for %@", (long)retryCount, fileName);
+        simulateTapWithRetry(fileName, originalName, retryCount - 1);
     });
 }
 
@@ -875,9 +937,14 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
                         return;
                     }
 
+                    // 刷新列表缓存
                     refreshFileListCache(currentPath, ^{
-                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                            simulateTapFileNamed(renamedName);
+                        // 强制刷新 UI
+                        forceReloadFileList();
+                        
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                            // 使用带重试的模拟点击
+                            simulateTapWithRetry(renamedName, originalName, kRefreshRetryCount);
                             showRestorePopup(originalName, renamedName, renamedPath, fileId, dlink);
                         });
                     });
@@ -1019,11 +1086,9 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
         UIViewController *vc = topViewController();
         if (!vc) return;
 
-        // 重置检测状态
         gPathAutoDetected = NO;
         gTokenAutoDetected = NO;
         
-        // 执行自动检测
         autoDetectPathAndToken();
 
         BOOL needToken = !getBdstoken();
@@ -1063,7 +1128,6 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
         if (userPath.length > 0) gCurrentPath = userPath;
         if (token.length > 0) gManualToken = token;
         
-        // 保存到 NSUserDefaults 供下次使用
         NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
         if (userPath.length > 0) [defaults setObject:userPath forKey:@"currentPath"];
         if (token.length > 0) [defaults setObject:token forKey:@"bdstoken"];
@@ -1175,7 +1239,7 @@ static void swizzleInstanceMethod(Class cls, SEL originalSelector, SEL swizzledS
 @end
 
 __attribute__((constructor)) static void init() {
-    DLog(@"Loaded v6.3 (arm64) - Aggressive Auto Detect");
+    DLog(@"Loaded v6.4 (arm64) - Force Refresh Edition");
 
     static dispatch_once_t sessionOnce;
     dispatch_once(&sessionOnce, ^{
