@@ -592,7 +592,7 @@ static void simulateTapFileNamed(NSString *fileName) {
 
     __block UIScrollView *targetScrollView = nil;
 
-    void (^findScrollView)(UIView *) = ^(UIView *view) {
+    __block void (^findScrollView)(UIView *) = ^(UIView *view) {
         if (targetScrollView) return;
 
         if ([view isKindOfClass:[UITableView class]] || [view isKindOfClass:[UICollectionView class]]) {
