@@ -273,26 +273,24 @@ static void renameFile(NSString *fileId, NSString *path, NSString *newName, void
 
 // ========== 模拟点击文件 ==========
 
+static UIScrollView * findScrollViewInView(UIView *view) {
+    if ([view isKindOfClass:[UITableView class]] || [view isKindOfClass:[UICollectionView class]]) {
+        return (UIScrollView *)view;
+    }
+    for (UIView *subview in view.subviews) {
+        UIScrollView *found = findScrollViewInView(subview);
+        if (found) return found;
+    }
+    return nil;
+}
+
 static void simulateTapFileNamed(NSString *fileName) {
     DLog(@"👆 Simulating tap on file: %@", fileName);
 
     UIViewController *vc = topViewController();
     if (!vc) { DLog(@"❌ No top VC"); return; }
 
-    __block UIScrollView *targetScrollView = nil;
-
-    void (^findScrollView)(UIView *) = ^(UIView *view) {
-        if (targetScrollView) return;
-        if ([view isKindOfClass:[UITableView class]] || [view isKindOfClass:[UICollectionView class]]) {
-            targetScrollView = (UIScrollView *)view;
-            return;
-        }
-        for (UIView *subview in view.subviews) {
-            if (!targetScrollView) findScrollView(subview);
-        }
-    };
-    findScrollView(vc.view);
-
+    UIScrollView *targetScrollView = findScrollViewInView(vc.view);
     if (!targetScrollView) { DLog(@"❌ No scroll view found"); return; }
 
     if ([targetScrollView isKindOfClass:[UITableView class]]) {
