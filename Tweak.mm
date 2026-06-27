@@ -1,6 +1,6 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v7.4
-//  Added: File rename + simulate tap to trigger client download
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v7.5
+//  Fixed: Better simulate tap with real touch events, support UICollectionView
 //
 
 #import <UIKit/UIKit.h>
@@ -271,7 +271,7 @@ static void renameFile(NSString *fileId, NSString *path, NSString *newName, void
     });
 }
 
-// ========== 模拟点击文件 ==========
+// ========== 模拟点击 - 使用真实触摸事件 ==========
 
 static UIScrollView * findScrollViewInView(UIView *view) {
     if ([view isKindOfClass:[UITableView class]] || [view isKindOfClass:[UICollectionView class]]) {
@@ -284,6 +284,33 @@ static UIScrollView * findScrollViewInView(UIView *view) {
     return nil;
 }
 
+static void simulateRealTapOnView(UIView *targetView) {
+    if (!targetView) return;
+
+    CGPoint center = CGPointMake(targetView.bounds.size.width / 2, targetView.bounds.size.height / 2);
+
+    // 创建触摸事件
+    UITouch *touch = [[UITouch alloc] init];
+    // 使用私有 API 设置触摸属性
+    @try {
+        [touch setValue:targetView forKey:@"view"];
+        [touch setValue:[NSNumber numberWithInteger:1] forKey:@"phase"];
+        [touch setValue:[NSNumber numberWithBool:NO] forKey:@"isTap"];
+        [touch setValue:[NSNumber numberWithInteger:1] forKey:@"tapCount"];
+    } @catch (NSException *e) {}
+
+    UIEvent *event = [[UIApplication sharedApplication] performSelector:@selector(_touchesEvent)];
+
+    // 发送触摸事件
+    [targetView touchesBegan:[NSSet setWithObject:touch] withEvent:event];
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [targetView touchesEnded:[NSSet setWithObject:touch] withEvent:event];
+    });
+
+    DLog(@"👆 Simulated real tap on view");
+}
+
 static void simulateTapFileNamed(NSString *fileName) {
     DLog(@"👆 Simulating tap on file: %@", fileName);
 
@@ -293,28 +320,76 @@ static void simulateTapFileNamed(NSString *fileName) {
     UIScrollView *targetScrollView = findScrollViewInView(vc.view);
     if (!targetScrollView) { DLog(@"❌ No scroll view found"); return; }
 
+    DLog(@"✅ Found scroll view: %@", NSStringFromClass([targetScrollView class]));
+
     if ([targetScrollView isKindOfClass:[UITableView class]]) {
         UITableView *tableView = (UITableView *)targetScrollView;
-        for (NSIndexPath *indexPath in [tableView indexPathsForVisibleRows]) {
-            UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
-            if (!cell) continue;
 
-            for (UIView *subview in cell.contentView.subviews) {
-                if ([subview isKindOfClass:[UILabel class]]) {
-                    UILabel *label = (UILabel *)subview;
-                    if (label.text && [label.text containsString:fileName]) {
-                        DLog(@"✅ Found cell at indexPath: %@", indexPath);
-                        dispatch_async(dispatch_get_main_queue(), ^{
-                            [tableView.delegate tableView:tableView didSelectRowAtIndexPath:indexPath];
-                            [tableView selectRowAtIndexPath:indexPath animated:NO scrollPosition:UITableViewScrollPositionNone];
-                        });
-                        return;
+        // 先刷新数据
+        [tableView reloadData];
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            for (NSIndexPath *indexPath in [tableView indexPathsForVisibleRows]) {
+                UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+                if (!cell) continue;
+
+                for (UIView *subview in cell.contentView.subviews) {
+                    if ([subview isKindOfClass:[UILabel class]]) {
+                        UILabel *label = (UILabel *)subview;
+                        if (label.text && [label.text containsString:fileName]) {
+                            DLog(@"✅ Found cell at indexPath: %@", indexPath);
+
+                            // 方法1: 调用 delegate
+                            dispatch_async(dispatch_get_main_queue(), ^{
+                                [tableView.delegate tableView:tableView didSelectRowAtIndexPath:indexPath];
+                                [tableView selectRowAtIndexPath:indexPath animated:NO scrollPosition:UITableViewScrollPositionNone];
+                            });
+
+                            // 方法2: 真实触摸事件
+                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                                simulateRealTapOnView(cell);
+                            });
+
+                            return;
+                        }
                     }
                 }
             }
-        }
+            DLog(@"⚠️ Cell not found for: %@", fileName);
+        });
+
+    } else if ([targetScrollView isKindOfClass:[UICollectionView class]]) {
+        UICollectionView *collectionView = (UICollectionView *)targetScrollView;
+
+        [collectionView reloadData];
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            for (NSIndexPath *indexPath in [collectionView indexPathsForVisibleItems]) {
+                UICollectionViewCell *cell = [collectionView cellForItemAtIndexPath:indexPath];
+                if (!cell) continue;
+
+                for (UIView *subview in cell.contentView.subviews) {
+                    if ([subview isKindOfClass:[UILabel class]]) {
+                        UILabel *label = (UILabel *)subview;
+                        if (label.text && [label.text containsString:fileName]) {
+                            DLog(@"✅ Found collection cell at indexPath: %@", indexPath);
+
+                            dispatch_async(dispatch_get_main_queue(), ^{
+                                [collectionView.delegate collectionView:collectionView didSelectItemAtIndexPath:indexPath];
+                            });
+
+                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                                simulateRealTapOnView(cell);
+                            });
+
+                            return;
+                        }
+                    }
+                }
+            }
+            DLog(@"⚠️ Collection cell not found for: %@", fileName);
+        });
     }
-    DLog(@"⚠️ Cell not found for: %@", fileName);
 }
 
 // ========== 触发下载流程 ==========
@@ -322,27 +397,21 @@ static void simulateTapFileNamed(NSString *fileName) {
 static void downloadSingleFile(NSString *fileName, NSString *filePath, NSString *fileId) {
     DLog(@"🎯 Target file: %@ at %@", fileName, filePath);
 
-    // 重命名为 .pdf 触发预览/下载
     NSString *pdfName = [fileName stringByAppendingString:@".pdf"];
     DLog(@"📝 Renaming to: %@", pdfName);
 
     renameFile(fileId, filePath, pdfName, ^(BOOL success, NSError *err) {
         if (!success) {
             DLog(@"❌ Rename failed: %@", err.localizedDescription);
-
-            // 显示错误
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"重命名失败"
-                                                                           message:err.localizedDescription
-                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"重命名失败" message:err.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
             UIViewController *vc = topViewController();
             if (vc) [vc presentViewController:alert animated:YES completion:nil];
             return;
         }
 
-        DLog(@"✅ Renamed, waiting 4s...");
+        DLog(@"✅ Renamed, waiting 4s then simulating tap...");
 
-        // 显示提示
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"已触发下载"
                                                                        message:[NSString stringWithFormat:@"%@ 已重命名为 %@，正在模拟点击...", fileName, pdfName]
                                                                 preferredStyle:UIAlertControllerStyleAlert];
@@ -352,11 +421,10 @@ static void downloadSingleFile(NSString *fileName, NSString *filePath, NSString 
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
 
-            // 模拟点击重命名后的文件
             simulateTapFileNamed(pdfName);
 
-            // 6秒后改回原名
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            // 8秒后改回原名（给下载足够时间）
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 DLog(@"🔄 Restoring original name...");
                 NSString *pdfPath = [[filePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:pdfName];
                 renameFile(fileId, pdfPath, fileName, ^(BOOL success, NSError *err) {
@@ -373,10 +441,7 @@ static void triggerDownloadFlow(void) {
     fetchFileList(^(NSArray *files, NSError *err) {
         if (err || !files || files.count == 0) {
             DLog(@"❌ Failed to get file list: %@", err ? err.localizedDescription : @"No files");
-
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"获取文件列表失败"
-                                                                           message:err ? err.localizedDescription : @"文件夹为空"
-                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"获取文件列表失败" message:err ? err.localizedDescription : @"文件夹为空" preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
             UIViewController *vc = topViewController();
             if (vc) [vc presentViewController:alert animated:YES completion:nil];
@@ -386,7 +451,6 @@ static void triggerDownloadFlow(void) {
         gFileList = [files mutableCopy];
         DLog(@"✅ Got %lu files", (unsigned long)files.count);
 
-        // 过滤出文件（排除文件夹）
         NSMutableArray *fileItems = [NSMutableArray array];
         for (NSDictionary *file in files) {
             NSNumber *isdir = file[@"isdir"];
@@ -396,19 +460,14 @@ static void triggerDownloadFlow(void) {
         }
 
         if (fileItems.count == 0) {
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"没有文件"
-                                                                           message:@"当前文件夹没有可下载的文件"
-                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"没有文件" message:@"当前文件夹没有可下载的文件" preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
             UIViewController *vc = topViewController();
             if (vc) [vc presentViewController:alert animated:YES completion:nil];
             return;
         }
 
-        // 弹出文件选择列表
-        UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"选择要下载的文件"
-                                                                       message:nil
-                                                                preferredStyle:UIAlertControllerStyleActionSheet];
+        UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"选择要下载的文件" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
 
         for (NSDictionary *file in fileItems) {
             NSString *name = file[@"server_filename"];
@@ -431,7 +490,6 @@ static void triggerDownloadFlow(void) {
 
         UIViewController *vc = topViewController();
         if (vc) {
-            // iPad 需要设置 popover
             if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
                 sheet.popoverPresentationController.sourceView = vc.view;
                 sheet.popoverPresentationController.sourceRect = CGRectMake(vc.view.bounds.size.width / 2, vc.view.bounds.size.height / 2, 1, 1);
@@ -527,7 +585,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"🚀 BaiduPan Troll v7.4 loaded");
+    DLog(@"🚀 BaiduPan Troll v7.5 loaded");
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
