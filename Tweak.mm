@@ -64,11 +64,16 @@ static NSString * scanMemoryForBdstoken(void) {
         id value = allDefaults[key];
         if ([value isKindOfClass:[NSString class]]) {
             NSString *str = value;
-            if (str.length >= 16 && str.length <= 64) {
-                NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"^[a-f0-9]{16,64}$" options:0 error:nil];
-                if ([regex numberOfMatchesInString:str options:0 range:NSMakeRange(0, str.length)] == 1) {
-                    DLog(@"🔍 Found potential token in key: %@ = %@...", key, [str substringToIndex:MIN(16, str.length)]);
-                    return str;
+            // bdstoken: 32位十六进制，必须同时包含数字和字母
+            if (str.length == 32) {
+                NSRegularExpression *hexRegex = [NSRegularExpression regularExpressionWithPattern:@"^[a-f0-9]{32}$" options:NSRegularExpressionCaseInsensitive error:nil];
+                if ([hexRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, str.length)] == 1) {
+                    // 必须包含至少一个字母（排除纯数字）
+                    NSRegularExpression *letterRegex = [NSRegularExpression regularExpressionWithPattern:@"[a-fA-F]" options:0 error:nil];
+                    if ([letterRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, str.length)] > 0) {
+                        DLog(@"🔍 Found bdstoken in key: %@ = %@...", key, [str substringToIndex:MIN(16, str.length)]);
+                        return str;
+                    }
                 }
             }
         }
@@ -193,11 +198,16 @@ static NSString * buildPathFromNavStack(void) {
 static void autoDetectPathAndToken(void) {
     DLog(@"🔍 Starting auto-detection...");
 
-    // 1. 获取 bdstoken
+    // 1. 获取 bdstoken - 尝试多种可能的键名
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    gBdstoken = [defaults objectForKey:@"bdstoken"];
-    if (!gBdstoken) gBdstoken = [defaults objectForKey:@"BDSTOKEN"];
-    if (!gBdstoken) gBdstoken = [defaults objectForKey:@"token"];
+    NSArray *tokenKeys = @[@"bdstoken", @"BDSTOKEN", @"token", @"TOKEN", @"access_token", @"bd_token", @"pan_token"];
+    for (NSString *key in tokenKeys) {
+        gBdstoken = [defaults objectForKey:key];
+        if (gBdstoken) {
+            DLog(@"✅ Got bdstoken from key: %@", key);
+            break;
+        }
+    }
     if (!gBdstoken) gBdstoken = scanMemoryForBdstoken();
 
     if (gBdstoken) {
