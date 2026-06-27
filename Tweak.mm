@@ -629,7 +629,7 @@ static BOOL isBaiduPanFileCell(UIView *view) {
     __block BOOL hasSizeLabel = NO;
     __block BOOL hasNameLabel = NO;
 
-    void (^search)(UIView *) = ^(UIView *v) {
+    void (^__block search)(UIView *) = ^(UIView *v) {
         for (UIView *sub in v.subviews) {
             if ([sub isKindOfClass:[UILabel class]]) {
                 UILabel *l = (UILabel *)sub;
@@ -655,7 +655,7 @@ static NSString * extractFileNameFromCell(UIView *cell) {
     UILabel *bestLabel = nil;
     CGFloat maxWidth = 0;
 
-    void (^search)(UIView *) = ^(UIView *v) {
+    void (^__block search)(UIView *) = ^(UIView *v) {
         for (UIView *sub in v.subviews) {
             if ([sub isKindOfClass:[UILabel class]]) {
                 UILabel *l = (UILabel *)sub;
@@ -689,7 +689,7 @@ static void injectDirectLinkButtons(void) {
     if (!vc) return;
 
     NSMutableArray *scrollViews = [NSMutableArray array];
-    void (^findScrollViews)(UIView *) = ^(UIView *v) {
+    void (^__block findScrollViews)(UIView *) = ^(UIView *v) {
         if ([v isKindOfClass:[UITableView class]] || [v isKindOfClass:[UICollectionView class]]) {
             [scrollViews addObject:v];
         }
@@ -713,10 +713,10 @@ static void injectDirectLinkButtons(void) {
             NSString *fileName = extractFileNameFromCell(cell);
             if (!fileName || fileName.length == 0) continue;
 
-            UIButton *btn = [cell viewWithTag:0xBDT123];
+            UIButton *btn = [cell viewWithTag:0xBDE123];
             if (!btn) {
                 btn = [UIButton buttonWithType:UIButtonTypeSystem];
-                btn.tag = 0xBDT123;
+                btn.tag = 0xBDE123;
                 btn.frame = CGRectMake(cell.bounds.size.width - 70, (cell.bounds.size.height - 28) / 2, 60, 28);
                 btn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
                 [btn setTitle:@"直链" forState:UIControlStateNormal];
