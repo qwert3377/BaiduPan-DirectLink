@@ -1,11 +1,12 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v6.2-fix
-//  Fix: C function calling self -> direct function call
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v6.3
+//  Feature: Aggressive auto-detect via CFNetwork hook + runtime class scan
 //
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <WebKit/WebKit.h>
+#import <CFNetwork/CFNetwork.h>
 
 #define DLog(fmt, ...) NSLog((@"[BaiduPanTroll] " fmt), ##__VA_ARGS__)
 
@@ -40,6 +41,8 @@ static NSString * extractPathFromURL(NSString *urlString);
 static NSString * autoDetectBdstoken(void);
 static void autoDetectPathAndToken(void);
 static NSString * extractTokenFromWebView(UIView *view);
+static void scanAllClassesForToken(void);
+static void scanAllClassesForPath(void);
 
 // ========== 工具函数 ==========
 
@@ -117,7 +120,6 @@ static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *header
 
 static NSString * extractTokenFromWebView(UIView *view) {
     if (!view) return nil;
-    
     if ([view isKindOfClass:[WKWebView class]]) {
         WKWebView *webView = (WKWebView *)view;
         __block NSString *result = nil;
@@ -132,7 +134,6 @@ static NSString * extractTokenFromWebView(UIView *view) {
             return result;
         }
     }
-    
     for (UIView *subview in view.subviews) {
         NSString *token = extractTokenFromWebView(subview);
         if (token) return token;
@@ -140,10 +141,143 @@ static NSString * extractTokenFromWebView(UIView *view) {
     return nil;
 }
 
+// ========== 运行时扫描所有类查找 token ==========
+
+static void scanAllClassesForToken(void) {
+    int numClasses = objc_getClassList(NULL, 0);
+    if (numClasses <= 0) return;
+    Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
+    numClasses = objc_getClassList(classes, numClasses);
+    
+    for (int i = 0; i < numClasses; i++) {
+        Class cls = classes[i];
+        NSString *className = NSStringFromClass(cls);
+        
+        // 跳过系统类
+        if ([className hasPrefix:@"NS"] || [className hasPrefix:@"UI"] || [className hasPrefix:@"_"]) continue;
+        
+        // 查找包含 token 相关属性的类
+        unsigned int propCount = 0;
+        objc_property_t *props = class_copyPropertyList(cls, &propCount);
+        BOOL hasTokenProp = NO;
+        for (unsigned int j = 0; j < propCount; j++) {
+            NSString *propName = [NSString stringWithUTF8String:property_getName(props[j])];
+            if ([propName containsString:@"token"] || [propName containsString:@"Token"] || 
+                [propName containsString:@"bdstoken"] || [propName containsString:@"Bdstoken"]) {
+                hasTokenProp = YES;
+                break;
+            }
+        }
+        free(props);
+        
+        if (!hasTokenProp) continue;
+        
+        // 尝试获取单例
+        @try {
+            id shared = nil;
+            if ([cls respondsToSelector:@selector(sharedInstance)]) {
+                shared = [cls performSelector:@selector(sharedInstance)];
+            } else if ([cls respondsToSelector:@selector(shared)]) {
+                shared = [cls performSelector:@selector(shared)];
+            } else if ([cls respondsToSelector:@selector(defaultManager)]) {
+                shared = [cls performSelector:@selector(defaultManager)];
+            }
+            
+            if (!shared) continue;
+            
+            // 遍历所有属性查找 token
+            props = class_copyPropertyList(cls, &propCount);
+            for (unsigned int j = 0; j < propCount; j++) {
+                NSString *propName = [NSString stringWithUTF8String:property_getName(props[j])];
+                if ([propName containsString:@"token"] || [propName containsString:@"Token"] ||
+                    [propName containsString:@"bdstoken"] || [propName containsString:@"Bdstoken"]) {
+                    id val = [shared valueForKey:propName];
+                    if (val && [val isKindOfClass:[NSString class]] && [(NSString *)val length] > 0) {
+                        DLog(@"Found token in %@.%@ = %@", className, propName, val);
+                        free(props);
+                        free(classes);
+                        return;
+                    }
+                }
+            }
+            free(props);
+        } @catch (NSException *e) { }
+    }
+    free(classes);
+}
+
+// ========== 运行时扫描所有类查找路径 ==========
+
+static void scanAllClassesForPath(void) {
+    int numClasses = objc_getClassList(NULL, 0);
+    if (numClasses <= 0) return;
+    Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
+    numClasses = objc_getClassList(classes, numClasses);
+    
+    for (int i = 0; i < numClasses; i++) {
+        Class cls = classes[i];
+        NSString *className = NSStringFromClass(cls);
+        
+        if ([className hasPrefix:@"NS"] || [className hasPrefix:@"UI"] || [className hasPrefix:@"_"]) continue;
+        
+        unsigned int propCount = 0;
+        objc_property_t *props = class_copyPropertyList(cls, &propCount);
+        BOOL hasPathProp = NO;
+        for (unsigned int j = 0; j < propCount; j++) {
+            NSString *propName = [NSString stringWithUTF8String:property_getName(props[j])];
+            if ([propName containsString:@"path"] || [propName containsString:@"Path"] ||
+                [propName containsString:@"dir"] || [propName containsString:@"directory"] ||
+                [propName containsString:@"currentDir"]) {
+                hasPathProp = YES;
+                break;
+            }
+        }
+        free(props);
+        
+        if (!hasPathProp) continue;
+        
+        @try {
+            id shared = nil;
+            if ([cls respondsToSelector:@selector(sharedInstance)]) {
+                shared = [cls performSelector:@selector(sharedInstance)];
+            } else if ([cls respondsToSelector:@selector(shared)]) {
+                shared = [cls performSelector:@selector(shared)];
+            } else if ([cls respondsToSelector:@selector(defaultManager)]) {
+                shared = [cls performSelector:@selector(defaultManager)];
+            }
+            
+            if (!shared) continue;
+            
+            props = class_copyPropertyList(cls, &propCount);
+            for (unsigned int j = 0; j < propCount; j++) {
+                NSString *propName = [NSString stringWithUTF8String:property_getName(props[j])];
+                if ([propName containsString:@"path"] || [propName containsString:@"Path"] ||
+                    [propName containsString:@"dir"] || [propName containsString:@"directory"] ||
+                    [propName containsString:@"currentDir"]) {
+                    id val = [shared valueForKey:propName];
+                    if (val && [val isKindOfClass:[NSString class]] && [(NSString *)val length] > 0) {
+                        NSString *pathVal = (NSString *)val;
+                        if ([pathVal hasPrefix:@"/"] || [pathVal containsString:@"/"]) {
+                            DLog(@"Found path in %@.%@ = %@", className, propName, pathVal);
+                            gCurrentPath = pathVal;
+                            gPathAutoDetected = YES;
+                            free(props);
+                            free(classes);
+                            return;
+                        }
+                    }
+                }
+            }
+            free(props);
+        } @catch (NSException *e) { }
+    }
+    free(classes);
+}
+
 // ========== 自动检测 Token ==========
 
 static NSString * autoDetectBdstoken(void) {
-    // 1. 从 NSUserDefaults 中提取
+    // 1. 从 NSUserDefaults
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSString *token = [defaults stringForKey:@"bdstoken"];
     if (token && token.length > 0) {
@@ -152,7 +286,18 @@ static NSString * autoDetectBdstoken(void) {
         return token;
     }
     
-    // 2. 从所有 Window 的 WebView 中提取
+    // 2. 从 Cookie 中的 BDUSS 推导（如果有 BDUSS，说明已登录）
+    NSHTTPCookieStorage *storage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
+    NSArray *cookies = [storage cookiesForURL:[NSURL URLWithString:@"https://pan.baidu.com"]];
+    for (NSHTTPCookie *cookie in cookies) {
+        if ([cookie.name isEqualToString:@"BDUSS"] || [cookie.name isEqualToString:@"STOKEN"]) {
+            // 已登录，尝试其他方式获取 token
+            DLog(@"Found login cookie: %@", cookie.name);
+            break;
+        }
+    }
+    
+    // 3. 从 WebView
     for (UIWindow *window in [UIApplication sharedApplication].windows) {
         NSString *tokenFromWebView = extractTokenFromWebView(window);
         if (tokenFromWebView) {
@@ -161,12 +306,19 @@ static NSString * autoDetectBdstoken(void) {
         }
     }
     
-    // 3. 从百度网盘内部类提取
+    // 4. 运行时扫描所有类
+    scanAllClassesForToken();
+    
+    // 5. 尝试常见的百度网盘内部类
     NSArray *possibleClasses = @[
         @"BaiduPanFileManager", @"PanFileManager", @"BDFileService",
         @"BaiduPanUserManager", @"PanUserManager", @"BDUserService",
         @"BaiduPanConfig", @"PanConfig", @"BDConfig",
-        @"BaiduPanManager", @"PanManager", @"FileManager"
+        @"BaiduPanManager", @"PanManager", @"FileManager",
+        @"BaiduPanAccount", @"PanAccount", @"BDAccount",
+        @"BaiduPanAuth", @"PanAuth", @"BDAuth",
+        @"NetdiskFileManager", @"NetdiskUserManager", @"NetdiskConfig",
+        @"BaiduNetdiskManager", @"BaiduNetdiskConfig", @"BaiduNetdiskUser"
     ];
     for (NSString *className in possibleClasses) {
         Class cls = NSClassFromString(className);
@@ -177,15 +329,48 @@ static NSString * autoDetectBdstoken(void) {
                 shared = [cls performSelector:@selector(sharedInstance)];
             } else if ([cls respondsToSelector:@selector(shared)]) {
                 shared = [cls performSelector:@selector(shared)];
+            } else if ([cls respondsToSelector:@selector(defaultManager)]) {
+                shared = [cls performSelector:@selector(defaultManager)];
+            } else if ([cls respondsToSelector:@selector(currentManager)]) {
+                shared = [cls performSelector:@selector(currentManager)];
             }
-            if (shared) {
-                NSString *t = [shared valueForKey:@"bdstoken"] ?: [shared valueForKey:@"token"] ?: [shared valueForKey:@"_bdstoken"];
-                if (t && t.length > 0) {
-                    DLog(@"Auto-detected bdstoken from %@", className);
-                    gTokenAutoDetected = YES;
-                    return t;
+            
+            if (!shared) continue;
+            
+            // 尝试所有可能的方法
+            NSArray *possibleMethods = @[
+                @"bdstoken", @"token", @"_bdstoken", @"_token",
+                @"accessToken", @"access_token", @"userToken",
+                @"getBdstoken", @"getToken", @"fetchToken"
+            ];
+            for (NSString *methodName in possibleMethods) {
+                SEL sel = NSSelectorFromString(methodName);
+                if ([shared respondsToSelector:sel]) {
+                    id val = [shared performSelector:sel];
+                    if (val && [val isKindOfClass:[NSString class]] && [(NSString *)val length] > 0) {
+                        DLog(@"Auto-detected bdstoken from %@.%@", className, methodName);
+                        gTokenAutoDetected = YES;
+                        return (NSString *)val;
+                    }
                 }
             }
+            
+            // 尝试 Ivar
+            unsigned int ivarCount = 0;
+            Ivar *ivars = class_copyIvarList(cls, &ivarCount);
+            for (unsigned int k = 0; k < ivarCount; k++) {
+                NSString *ivarName = [NSString stringWithUTF8String:ivar_getName(ivars[k])];
+                if ([ivarName containsString:@"token"] || [ivarName containsString:@"Token"]) {
+                    id val = object_getIvar(shared, ivars[k]);
+                    if (val && [val isKindOfClass:[NSString class]] && [(NSString *)val length] > 0) {
+                        DLog(@"Auto-detected bdstoken from %@ ivar %@", className, ivarName);
+                        gTokenAutoDetected = YES;
+                        free(ivars);
+                        return (NSString *)val;
+                    }
+                }
+            }
+            free(ivars);
         } @catch (NSException *e) { }
     }
     
@@ -288,18 +473,25 @@ static NSString * getPathFromNavStack(void) {
 }
 
 static void autoDetectPathAndToken(void) {
+    // 先尝试从 ViewController 获取路径
     NSString *autoPath = getPathFromNavStack();
     if (autoPath) {
         gCurrentPath = autoPath;
         gPathAutoDetected = YES;
         DLog(@"Auto path (VC): %@", autoPath);
-    } else if (gPathAutoDetected && gCurrentPath) {
-        DLog(@"Auto path (Hook): %@", gCurrentPath);
-    } else {
-        DLog(@"Auto path failed, will use default /");
-        if (!gCurrentPath || gCurrentPath.length == 0) gCurrentPath = @"/";
     }
     
+    // 如果失败，运行时扫描所有类
+    if (!gPathAutoDetected || !gCurrentPath || gCurrentPath.length == 0) {
+        scanAllClassesForPath();
+    }
+    
+    // 如果还是失败，使用默认
+    if (!gCurrentPath || gCurrentPath.length == 0) {
+        gCurrentPath = @"/";
+    }
+    
+    // 检测 token
     NSString *autoToken = autoDetectBdstoken();
     if (autoToken) {
         gManualToken = autoToken;
@@ -594,7 +786,7 @@ static void renameFile(NSString *fileId, NSString *path, NSString *newName, void
     });
 }
 
-// ========== 弹窗 UI（在 runPipeline 之前定义） ==========
+// ========== 弹窗 UI ==========
 
 static void showErrorPopup(NSString *message) {
     UIViewController *vc = topViewController();
@@ -708,7 +900,7 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
     });
 }
 
-// ========== NSURLSession Hook（增强版，自动捕获路径和 token） ==========
+// ========== NSURLSession Hook ==========
 
 @interface NSURLSession (HKCHook)
 @end
@@ -827,10 +1019,15 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
         UIViewController *vc = topViewController();
         if (!vc) return;
 
+        // 重置检测状态
+        gPathAutoDetected = NO;
+        gTokenAutoDetected = NO;
+        
+        // 执行自动检测
         autoDetectPathAndToken();
 
         BOOL needToken = !getBdstoken();
-        BOOL needPath = !gCurrentPath || gCurrentPath.length == 0;
+        BOOL needPath = !gCurrentPath || gCurrentPath.length == 0 || [gCurrentPath isEqualToString:@"/"];
 
         if (needToken || needPath) {
             [self showSetupDialog:vc];
@@ -865,6 +1062,13 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
         NSString *token = setup.textFields[1].text;
         if (userPath.length > 0) gCurrentPath = userPath;
         if (token.length > 0) gManualToken = token;
+        
+        // 保存到 NSUserDefaults 供下次使用
+        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+        if (userPath.length > 0) [defaults setObject:userPath forKey:@"currentPath"];
+        if (token.length > 0) [defaults setObject:token forKey:@"bdstoken"];
+        [defaults synchronize];
+        
         if (!getBdstoken()) {
             showErrorPopup(@"请输入 bdstoken");
             return;
@@ -971,7 +1175,7 @@ static void swizzleInstanceMethod(Class cls, SEL originalSelector, SEL swizzledS
 @end
 
 __attribute__((constructor)) static void init() {
-    DLog(@"Loaded v6.2-fix (arm64) - Auto Detect Edition");
+    DLog(@"Loaded v6.3 (arm64) - Aggressive Auto Detect");
 
     static dispatch_once_t sessionOnce;
     dispatch_once(&sessionOnce, ^{
