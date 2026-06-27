@@ -1,6 +1,6 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v5.1
-//  Fix: forward declarations + simplified popup UI
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v6.0
+//  Feature: App-internal download via simulated tap + .pdf rename trick
 //
 
 #import <UIKit/UIKit.h>
@@ -24,6 +24,11 @@ static NSString * getBdstoken(void);
 static NSString * getCurrentPath(void);
 static void showSuccessPopup(NSString *fileName, NSString *link);
 static void showErrorPopup(NSString *message);
+static void showActionPopup(NSString *fileName, NSString *dlink, NSString *renamedPath, NSString *fileId, NSString *currentPath, void (^appDownloadAction)(void), void (^copyLinkAction)(void));
+static void showAppDownloadStartedPopup(NSString *fileName, NSString *renamedName, NSString *renamedPath, NSString *fileId);
+static UIView *findSubviewWithText(UIView *view, NSString *text);
+static void performTapOnView(UIView *view);
+static void simulateTapFileNamed(NSString *fileName);
 static void fetchFileList(NSString *path, void (^completion)(NSArray *files, NSError *err));
 static NSString * digOutDlink(id obj);
 static void fetchDlinkViaFilemetas(NSString *filePath, NSInteger retry, void (^completion)(NSString *dlink, NSError *err));
@@ -200,6 +205,118 @@ static NSString * getPathFromNavStack(void) {
         }
     }
     return nil;
+}
+
+// ========== UI 模拟点击辅助函数 ==========
+
+static UIView *findSubviewWithText(UIView *view, NSString *text) {
+    if (!view || !text) return nil;
+    
+    if ([view isKindOfClass:[UILabel class]]) {
+        UILabel *label = (UILabel *)view;
+        if (label.text && [label.text containsString:text]) return label;
+    }
+    if ([view isKindOfClass:[UITextField class]]) {
+        UITextField *tf = (UITextField *)view;
+        if (tf.text && [tf.text containsString:text]) return tf;
+    }
+    if ([view isKindOfClass:[UIButton class]]) {
+        UIButton *btn = (UIButton *)view;
+        NSString *btnTitle = [btn titleForState:UIControlStateNormal];
+        if (btnTitle && [btnTitle containsString:text]) return btn;
+    }
+    
+    for (UIView *subview in view.subviews) {
+        UIView *found = findSubviewWithText(subview, text);
+        if (found) return found;
+    }
+    return nil;
+}
+
+static void performTapOnView(UIView *view) {
+    if (!view) return;
+    
+    UIView *target = view;
+    while (target) {
+        if ([target isKindOfClass:[UIControl class]] && target.gestureRecognizers.count > 0) {
+            break;
+        }
+        if ([target isKindOfClass:[UITableViewCell class]] || [target isKindOfClass:[UICollectionViewCell class]]) {
+            break;
+        }
+        target = target.superview;
+    }
+    if (!target) target = view;
+    
+    if ([target isKindOfClass:[UIControl class]]) {
+        [(UIControl *)target sendActionsForControlEvents:UIControlEventTouchUpInside];
+        DLog(@"Simulated UIControl tap");
+        return;
+    }
+    
+    if ([target isKindOfClass:[UITableViewCell class]]) {
+        UITableViewCell *cell = (UITableViewCell *)target;
+        UITableView *tableView = nil;
+        UIView *parent = cell.superview;
+        while (parent) {
+            if ([parent isKindOfClass:[UITableView class]]) {
+                tableView = (UITableView *)parent;
+                break;
+            }
+            parent = parent.superview;
+        }
+        if (tableView) {
+            NSIndexPath *indexPath = [tableView indexPathForCell:cell];
+            if (indexPath) {
+                [tableView selectRowAtIndexPath:indexPath animated:YES scrollPosition:UITableViewScrollPositionNone];
+                if (tableView.delegate && [tableView.delegate respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) {
+                    [tableView.delegate tableView:tableView didSelectRowAtIndexPath:indexPath];
+                }
+                DLog(@"Simulated UITableViewCell selection at %@", indexPath);
+            }
+        }
+        return;
+    }
+    
+    if ([target isKindOfClass:[UICollectionViewCell class]]) {
+        UICollectionViewCell *cell = (UICollectionViewCell *)target;
+        UICollectionView *collectionView = nil;
+        UIView *parent = cell.superview;
+        while (parent) {
+            if ([parent isKindOfClass:[UICollectionView class]]) {
+                collectionView = (UICollectionView *)parent;
+                break;
+            }
+            parent = parent.superview;
+        }
+        if (collectionView) {
+            NSIndexPath *indexPath = [collectionView indexPathForCell:cell];
+            if (indexPath) {
+                [collectionView selectItemAtIndexPath:indexPath animated:YES scrollPosition:UICollectionViewScrollPositionNone];
+                if (collectionView.delegate && [collectionView.delegate respondsToSelector:@selector(collectionView:didSelectItemAtIndexPath:)]) {
+                    [collectionView.delegate collectionView:collectionView didSelectItemAtIndexPath:indexPath];
+                }
+                DLog(@"Simulated UICollectionViewCell selection at %@", indexPath);
+            }
+        }
+        return;
+    }
+}
+
+static void simulateTapFileNamed(NSString *fileName) {
+    UIViewController *vc = topViewController();
+    if (!vc) return;
+    
+    UIView *targetView = findSubviewWithText(vc.view, fileName);
+    if (targetView) {
+        DLog(@"Found view for '%@', performing tap", fileName);
+        performTapOnView(targetView);
+    } else {
+        DLog(@"Could not find view for '%@', user manual tap needed", fileName);
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"请手动点击" message:[NSString stringWithFormat:@"未能在当前界面自动定位到 '%@'，请在文件列表中手动点击该文件以触发下载", fileName] preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [vc presentViewController:alert animated:YES completion:nil];
+    }
 }
 
 // ========== 核心 API 实现 ==========
@@ -388,9 +505,12 @@ static void renameFile(NSString *fileId, NSString *path, NSString *newName, void
     });
 }
 
+// ========== 修改后的 runPipeline ==========
+
 static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentPath, NSInteger fileSize) {
     NSString *originalName = fileName;
-    void (^finish)(NSString *, NSError *) = ^(NSString *dlink, NSError *err) {
+    
+    void (^finishWithRestore)(NSString *, NSError *) = ^(NSString *dlink, NSError *err) {
         if (dlink) {
             [[UIPasteboard generalPasteboard] setString:dlink];
             showSuccessPopup(originalName, dlink);
@@ -398,6 +518,7 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
             showErrorPopup(err.localizedDescription);
         }
     };
+    
     NSString *fullPath;
     if ([currentPath isEqualToString:@"/"]) {
         fullPath = [NSString stringWithFormat:@"/%@", originalName];
@@ -405,24 +526,52 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
         fullPath = [NSString stringWithFormat:@"%@/%@", currentPath, originalName];
     }
     DLog(@"Final path: %@", fullPath);
+    
     if (![originalName hasSuffix:@".pdf"]) {
         NSString *renamedName = [originalName stringByAppendingString:@".pdf"];
         DLog(@"Rename: %@ -> %@", fullPath, renamedName);
+        
         renameFile(fileId, fullPath, renamedName, ^(BOOL success, NSError *err) {
             if (!success) {
                 showErrorPopup(err.localizedDescription);
                 return;
             }
+            
             NSString *renamedPath = [currentPath isEqualToString:@"/"] ? [NSString stringWithFormat:@"/%@", renamedName] : [NSString stringWithFormat:@"%@/%@", currentPath, renamedName];
+            
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kWaitTimeAfterRename * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
                 void (^doFetch)(void) = ^{
                     fetchDlinkPortal(renamedPath, ^(NSString *dlink, NSError *err) {
-                        renameFile(fileId, renamedPath, originalName, ^(BOOL s, NSError *e) {
-                            if (!s) DLog(@"Restore name failed: %@", e.localizedDescription);
-                            finish(dlink, err);
+                        if (!dlink) {
+                            // 获取直链失败，恢复文件名并显示错误
+                            renameFile(fileId, renamedPath, originalName, ^(BOOL s, NSError *e) {
+                                if (!s) DLog(@"Restore name failed: %@", e.localizedDescription);
+                                finishWithRestore(nil, err);
+                            });
+                            return;
+                        }
+                        
+                        // 获取直链成功，显示选择弹窗
+                        showActionPopup(originalName, dlink, renamedPath, fileId, currentPath, ^{
+                            // ===== 用户选择：App 内下载（利用 SVIP） =====
+                            DLog(@"User chose App-internal download");
+                            refreshFileListCache(currentPath, ^{
+                                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                                    simulateTapFileNamed(renamedName);
+                                    showAppDownloadStartedPopup(originalName, renamedName, renamedPath, fileId);
+                                });
+                            });
+                        }, ^{
+                            // ===== 用户选择：复制直链 =====
+                            DLog(@"User chose copy link");
+                            renameFile(fileId, renamedPath, originalName, ^(BOOL s, NSError *e) {
+                                if (!s) DLog(@"Restore name failed: %@", e.localizedDescription);
+                                finishWithRestore(dlink, nil);
+                            });
                         });
                     });
                 };
+                
                 if (fileSize > kLargeFileThreshold) {
                     DLog(@"Large file (%ld MB), refresh cache + extra wait", (long)(fileSize/1024/1024));
                     refreshFileListCache(currentPath, ^{
@@ -438,7 +587,7 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
             });
         });
     } else {
-        fetchDlinkPortal(fullPath, finish);
+        fetchDlinkPortal(fullPath, finishWithRestore);
     }
 }
 
@@ -616,6 +765,56 @@ static void showErrorPopup(NSString *message) {
     UITapGestureRecognizer *tapOverlay = [[UITapGestureRecognizer alloc] initWithTarget:overlay action:@selector(removeFromSuperview)];
     tapOverlay.cancelsTouchesInView = NO;
     [overlay addGestureRecognizer:tapOverlay];
+}
+
+// ========== 新增：操作选择弹窗 ==========
+
+static void showActionPopup(NSString *fileName, NSString *dlink, NSString *renamedPath, NSString *fileId, NSString *currentPath, void (^appDownloadAction)(void), void (^copyLinkAction)(void)) {
+    UIViewController *vc = topViewController();
+    if (!vc) return;
+    
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"直链获取成功" message:[NSString stringWithFormat:@"文件: %@\n\n已临时重命名为 .pdf 扩展名。请选择操作方式：", fileName] preferredStyle:UIAlertControllerStyleAlert];
+    
+    [alert addAction:[UIAlertAction actionWithTitle:@"📥 App 内下载 (SVIP)" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        if (appDownloadAction) appDownloadAction();
+    }]];
+    
+    [alert addAction:[UIAlertAction actionWithTitle:@"📋 复制直链" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        if (copyLinkAction) copyLinkAction();
+    }]];
+    
+    [alert addAction:[UIAlertAction actionWithTitle:@"❌ 取消并恢复" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
+        renameFile(fileId, renamedPath, fileName, ^(BOOL s, NSError *e) {
+            if (!s) DLog(@"Restore failed: %@", e.localizedDescription);
+        });
+    }]];
+    
+    [vc presentViewController:alert animated:YES completion:nil];
+}
+
+// ========== 新增：App 内下载提示弹窗 ==========
+
+static void showAppDownloadStartedPopup(NSString *fileName, NSString *renamedName, NSString *renamedPath, NSString *fileId) {
+    UIViewController *vc = topViewController();
+    if (!vc) return;
+    
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"已触发 App 内下载" message:[NSString stringWithFormat:@"文件 '%@' 已临时重命名为 '%@'。\n\n百度网盘将尝试预览/下载此 PDF 文件（利用 SVIP 加速通道）。\n\n⚠️ 下载完成后，请务必恢复文件名，否则文件将一直保持 .pdf 后缀。", fileName, renamedName] preferredStyle:UIAlertControllerStyleAlert];
+    
+    [alert addAction:[UIAlertAction actionWithTitle:@"✅ 恢复文件名" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        renameFile(fileId, renamedPath, fileName, ^(BOOL s, NSError *e) {
+            if (s) {
+                UIAlertController *ok = [UIAlertController alertControllerWithTitle:@"已恢复" message:@"文件名已恢复为原始名称" preferredStyle:UIAlertControllerStyleAlert];
+                [ok addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                [vc presentViewController:ok animated:YES completion:nil];
+            } else {
+                showErrorPopup(e.localizedDescription);
+            }
+        });
+    }]];
+    
+    [alert addAction:[UIAlertAction actionWithTitle:@"稍后再说" style:UIAlertActionStyleCancel handler:nil]];
+    
+    [vc presentViewController:alert animated:YES completion:nil];
 }
 
 // ========== NSURLSession Hook ==========
@@ -871,7 +1070,7 @@ static void swizzleInstanceMethod(Class cls, SEL originalSelector, SEL swizzledS
 @end
 
 __attribute__((constructor)) static void init() {
-    DLog(@"Loaded v5.1 (arm64)");
+    DLog(@"Loaded v6.0 (arm64) - App Download Edition");
 
     static dispatch_once_t sessionOnce;
     dispatch_once(&sessionOnce, ^{
