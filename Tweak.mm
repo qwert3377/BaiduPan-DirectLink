@@ -1,7 +1,8 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v8.2
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v8.3
 //  Fix: objc_setAssociatedObject key type (const void*), removed hardcoded fallback token
 //  Token source: auto-detected from app only (NSUserDefaults + memory scan)
+//  UI: Injected "直链" buttons into file list cells
 //
 
 #import <UIKit/UIKit.h>
@@ -194,7 +195,7 @@ static void renameFile(NSString *fileId, NSString *path, NSString *newName, void
         return;
     }
     NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/filemanager?async=2&onnest=fail&opera=rename&clienttype=0&app_id=250528&web=1&bdstoken=%@", gBdstoken];
-    NSString *filelist = [NSString stringWithFormat:@"[{\"id\":%@,\"path\":\"%@\",\"newname\":\"%@\"}]", fileId, path, newName];
+    NSString *filelist = [NSString stringWithFormat:@"[{""id"":%@,""path"":""%@"",""newname"":""%@""}]", fileId, path, newName];
     NSString *body = [NSString stringWithFormat:@"filelist=%@", strictEncodeURIComponent(filelist)];
     NSDictionary *headers = @{
         @"Content-Type": @"application/x-www-form-urlencoded; charset=UTF-8",
@@ -347,103 +348,17 @@ static void forceRefreshFileList(void) {
     }
 }
 
-// ========== v8.2 UI Dialog (Fixed) ==========
-
-
-// ========== PDF Open Test Methods ==========
-
-static void openPDFWithDocumentInteraction(NSString *filePath) {
-    NSURL *fileURL = [NSURL fileURLWithPath:filePath];
-    if (!fileURL) {
-        showToast(@"文件路径无效");
-        return;
-    }
-
-    UIViewController *vc = topViewController();
-    if (!vc) return;
-
-    UIDocumentInteractionController *docController = [UIDocumentInteractionController interactionControllerWithURL:fileURL];
-    docController.delegate = (id<UIDocumentInteractionControllerDelegate>)vc;
-
-    // Try to present preview
-    BOOL previewOpened = [docController presentPreviewAnimated:YES];
-    if (!previewOpened) {
-        // Fallback to open in menu
-        CGRect rect = CGRectMake(vc.view.bounds.size.width/2 - 150, vc.view.bounds.size.height/2 - 150, 300, 300);
-        [docController presentOpenInMenuFromRect:rect inView:vc.view animated:YES];
-    }
-}
-
-static void openPDFWithQuickLook(NSString *filePath) {
-    // This requires importing QuickLook framework
-    // For now, just show a toast indicating we need to test this
-    showToast(@"QLPreviewController 需要 QuickLook.framework");
-}
-
-static void triggerBaiduPanInternalOpen(NSString *filePath, NSString *fileName, NSString *fileId) {
-    // Method 1: Try to find and call BaiduPan's internal file open method
-    // This is a guess based on common Baidu naming conventions
-
-    // Try to get the current file list VC
-    UIViewController *vc = topViewController();
-    if (!vc) return;
-
-    // Look for BaiduPan's file list view controller in the hierarchy
-    UIViewController *targetVC = nil;
-    for (UIViewController *child in vc.childViewControllers) {
-        NSString *className = NSStringFromClass([child class]);
-        if ([className containsString:@"File"] || [className containsString:@"List"] || 
-            [className containsString:@"Pan"] || [className containsString:@"Disk"]) {
-            targetVC = child;
-            break;
-        }
-    }
-
-    if (targetVC) {
-        DLog(@"Found potential file VC: %@", NSStringFromClass([targetVC class]));
-
-        // Try to call a method that might open the file
-        // Common patterns: openFile:, previewFile:, didSelectFile:, etc.
-        SEL selectors[] = {
-            NSSelectorFromString(@"openFile:"),
-            NSSelectorFromString(@"previewFile:"),
-            NSSelectorFromString(@"didSelectFile:"),
-            NSSelectorFromString(@"showFilePreview:"),
-            NSSelectorFromString(@"openDocument:"),
-            NSSelectorFromString(@"previewDocumentWithPath:"),
-            NSSelectorFromString(@"handleFileTap:"),
-            NSSelectorFromString(@"onFileSelected:"),
-            NSSelectorFromString(@"openFileWithId:path:name:"),
-            NSSelectorFromString(@"downloadAndOpenFile:"),
-        };
-
-        for (int i = 0; i < sizeof(selectors)/sizeof(SEL); i++) {
-            if ([targetVC respondsToSelector:selectors[i]]) {
-                DLog(@"Found selector: %@", NSStringFromSelector(selectors[i]));
-                // Don't actually call it yet, just log it
-                showToast([NSString stringWithFormat:@"找到方法: %@", NSStringFromSelector(selectors[i])]);
-                return;
-            }
-        }
-    }
-
-    // Fallback: Use UIDocumentInteractionController
-    openPDFWithDocumentInteraction(filePath);
-}
-
-static void bdtRestoreName(NSString *fileId, NSString *pdfPath, NSString *fileName, UIViewController *overlayVC);
+// ========== v8.3 UI Dialog ==========
 
 static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId, NSString *pdfPath) {
     UIViewController *vc = topViewController();
     if (!vc) return;
 
-    // Full-screen overlay
     UIViewController *overlayVC = [[UIViewController alloc] init];
     overlayVC.view.backgroundColor = [UIColor colorWithWhite:0 alpha:0.4];
     overlayVC.modalPresentationStyle = UIModalPresentationOverFullScreen;
     overlayVC.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
 
-    // Card container
     CGFloat cardW = MIN(vc.view.bounds.size.width - 32, 340);
     CGFloat margin = 20;
     CGFloat contentW = cardW - margin * 2;
@@ -454,7 +369,6 @@ static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId,
     card.layer.cornerRadius = 16;
     card.layer.masksToBounds = YES;
 
-    // Title row with close button
     UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(margin, y, contentW - 32, 22)];
     titleLabel.text = @"直链已复制";
     titleLabel.font = [UIFont boldSystemFontOfSize:17];
@@ -471,7 +385,6 @@ static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId,
 
     y += 36;
 
-    // File name
     UILabel *nameLabel = [[UILabel alloc] initWithFrame:CGRectMake(margin, y, contentW, 20)];
     nameLabel.text = [NSString stringWithFormat:@"%@ 的直链已成功复制到剪贴板。", fileName];
     nameLabel.font = [UIFont systemFontOfSize:13];
@@ -485,7 +398,6 @@ static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId,
 
     y = CGRectGetMaxY(nameLabel.frame) + 16;
 
-    // Link row
     CGFloat linkH = 40;
     CGFloat btnW = 80;
     CGFloat linkW = contentW - btnW - 10;
@@ -507,7 +419,6 @@ static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId,
     [scrollView addSubview:linkLabel];
     [card addSubview:scrollView];
 
-    // Copy button
     UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     copyBtn.frame = CGRectMake(margin + linkW + 10, y, btnW, linkH);
     [copyBtn setTitle:@"再次复制" forState:UIControlStateNormal];
@@ -522,7 +433,6 @@ static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId,
 
     y += linkH + 12;
 
-    // Hint
     UILabel *hintLabel = [[UILabel alloc] initWithFrame:CGRectMake(margin, y, contentW, 18)];
     hintLabel.text = @"提示：可使用 IDM、Aria2、Motrix 等工具粘贴下载";
     hintLabel.font = [UIFont systemFontOfSize:11];
@@ -531,14 +441,12 @@ static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId,
 
     y += 30;
 
-    // Divider
     UIView *divider = [[UIView alloc] initWithFrame:CGRectMake(0, y, cardW, 0.5)];
     divider.backgroundColor = [UIColor colorWithWhite:0.9 alpha:1.0];
     [card addSubview:divider];
 
     y += 1;
 
-    // Action buttons row
     CGFloat btnH = 48;
 
     UIButton *restoreBtn = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -570,7 +478,6 @@ static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId,
     card.frame = CGRectMake((vc.view.bounds.size.width - cardW) / 2, (vc.view.bounds.size.height - y) / 2, cardW, y);
     [overlayVC.view addSubview:card];
 
-    // Tap background to dismiss
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:overlayVC action:@selector(dismissViewControllerAnimated:completion:)];
     tap.cancelsTouchesInView = NO;
     [overlayVC.view addGestureRecognizer:tap];
@@ -585,8 +492,8 @@ static void bdtRestoreName(NSString *fileId, NSString *pdfPath, NSString *fileNa
         });
     }];
 }
+
 static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString *fileId) {
-    // 如果已经是 pdf，跳过改名直接获取直链
     if ([fileName.lowercaseString hasSuffix:@".pdf"]) {
         UIAlertController *progressAlert = [UIAlertController alertControllerWithTitle:@"处理中..." message:@"获取直链..." preferredStyle:UIAlertControllerStyleAlert];
         UIViewController *presentVC = topViewController();
@@ -652,6 +559,7 @@ static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString
         });
     });
 }
+
 static void triggerDownloadFlow(void) {
     DLog(@"Starting download flow...");
     fetchFileList(^(NSArray *files, NSError *err) {
@@ -703,6 +611,128 @@ static void triggerDownloadFlow(void) {
     });
 }
 
+// ========== UI Injection (File List Buttons) ==========
+
+static BOOL isBaiduPanFileListPage(void) {
+    UIViewController *vc = topViewController();
+    if (!vc) return NO;
+    NSString *title = vc.title ?: vc.navigationItem.title;
+    if (title && ([title containsString:@"百度网盘"] || [title containsString:@"文件"] || [title containsString:@"全部文件"])) return YES;
+    NSString *clsName = NSStringFromClass([vc class]);
+    if (clsName && ([clsName containsString:@"File"] || [clsName containsString:@"List"] || [clsName containsString:@"Pan"] || [clsName containsString:@"Disk"])) return YES;
+    return NO;
+}
+
+static BOOL isBaiduPanFileCell(UIView *view) {
+    if (![view isKindOfClass:[UITableViewCell class]] && ![view isKindOfClass:[UICollectionViewCell class]]) return NO;
+
+    __block BOOL hasSizeLabel = NO;
+    __block BOOL hasNameLabel = NO;
+
+    void (^search)(UIView *) = ^(UIView *v) {
+        for (UIView *sub in v.subviews) {
+            if ([sub isKindOfClass:[UILabel class]]) {
+                UILabel *l = (UILabel *)sub;
+                NSString *text = l.text;
+                if (!text || text.length == 0) continue;
+                if ([text rangeOfString:@"MB"].location != NSNotFound ||
+                    [text rangeOfString:@"GB"].location != NSNotFound ||
+                    [text rangeOfString:@"KB"].location != NSNotFound ||
+                    [text rangeOfString:@"B"].location != NSNotFound) {
+                    hasSizeLabel = YES;
+                }
+                if ([text isEqualToString:@"打开"] || [text isEqualToString:@"直链"] || [text isEqualToString:@"文件夹"] || [text rangeOfString:@"个文件"].location != NSNotFound) continue;
+                if (text.length > 0) hasNameLabel = YES;
+            }
+            search(sub);
+        }
+    };
+    search(view);
+    return hasSizeLabel && hasNameLabel;
+}
+
+static NSString * extractFileNameFromCell(UIView *cell) {
+    UILabel *bestLabel = nil;
+    CGFloat maxWidth = 0;
+
+    void (^search)(UIView *) = ^(UIView *v) {
+        for (UIView *sub in v.subviews) {
+            if ([sub isKindOfClass:[UILabel class]]) {
+                UILabel *l = (UILabel *)sub;
+                NSString *text = l.text;
+                if (!text || text.length == 0) continue;
+                if ([text rangeOfString:@"MB"].location != NSNotFound ||
+                    [text rangeOfString:@"GB"].location != NSNotFound ||
+                    [text rangeOfString:@"KB"].location != NSNotFound ||
+                    [text isEqualToString:@"打开"] ||
+                    [text isEqualToString:@"直链"] ||
+                    [text isEqualToString:@"文件夹"] ||
+                    [text rangeOfString:@"个文件"].location != NSNotFound) {
+                    continue;
+                }
+                if (l.frame.size.width > maxWidth) {
+                    maxWidth = l.frame.size.width;
+                    bestLabel = l;
+                }
+            }
+            search(sub);
+        }
+    };
+    search(cell);
+    return bestLabel.text;
+}
+
+static void injectDirectLinkButtons(void) {
+    if (!isBaiduPanFileListPage()) return;
+
+    UIViewController *vc = topViewController();
+    if (!vc) return;
+
+    NSMutableArray *scrollViews = [NSMutableArray array];
+    void (^findScrollViews)(UIView *) = ^(UIView *v) {
+        if ([v isKindOfClass:[UITableView class]] || [v isKindOfClass:[UICollectionView class]]) {
+            [scrollViews addObject:v];
+        }
+        for (UIView *sub in v.subviews) {
+            findScrollViews(sub);
+        }
+    };
+    findScrollViews(vc.view);
+
+    for (UIScrollView *scrollView in scrollViews) {
+        NSArray *cells = nil;
+        if ([scrollView isKindOfClass:[UITableView class]]) {
+            cells = [(UITableView *)scrollView visibleCells];
+        } else {
+            cells = [(UICollectionView *)scrollView visibleCells];
+        }
+
+        for (UIView *cell in cells) {
+            if (!isBaiduPanFileCell(cell)) continue;
+
+            NSString *fileName = extractFileNameFromCell(cell);
+            if (!fileName || fileName.length == 0) continue;
+
+            UIButton *btn = [cell viewWithTag:0xBDT123];
+            if (!btn) {
+                btn = [UIButton buttonWithType:UIButtonTypeSystem];
+                btn.tag = 0xBDT123;
+                btn.frame = CGRectMake(cell.bounds.size.width - 70, (cell.bounds.size.height - 28) / 2, 60, 28);
+                btn.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
+                [btn setTitle:@"直链" forState:UIControlStateNormal];
+                btn.titleLabel.font = [UIFont systemFontOfSize:13];
+                [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+                btn.backgroundColor = [UIColor colorWithRed:0.20 green:0.48 blue:1.0 alpha:1.0];
+                btn.layer.cornerRadius = 14;
+                btn.layer.masksToBounds = YES;
+                [btn addTarget:nil action:@selector(bdt_cellLinkTapped:) forControlEvents:UIControlEventTouchUpInside];
+                [cell addSubview:btn];
+            }
+            objc_setAssociatedObject(btn, "fileName", fileName, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        }
+    }
+}
+
 // ========== 浮游按钮 ==========
 
 static void onFloatButtonTap(void) {
@@ -713,7 +743,7 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 16 ? 16 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v8.2"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v8.3"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"📥 获取直链" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
@@ -755,6 +785,7 @@ static void showFloatButton(void) {
 @interface NSObject (BaiduPanTroll)
 - (void)bdt_floatButtonTapped:(id)sender;
 - (void)bdt_floatButtonPanned:(UIPanGestureRecognizer *)gesture;
+- (void)bdt_cellLinkTapped:(id)sender;
 @end
 
 @implementation NSObject (BaiduPanTroll)
@@ -764,6 +795,51 @@ static void showFloatButton(void) {
     CGPoint translation = [gesture translationInView:button.superview];
     button.center = CGPointMake(button.center.x + translation.x, button.center.y + translation.y);
     [gesture setTranslation:CGPointZero inView:button.superview];
+}
+- (void)bdt_cellLinkTapped:(UIButton *)sender {
+    NSString *fileName = objc_getAssociatedObject(sender, "fileName");
+    if (!fileName) {
+        showToast(@"无法获取文件名");
+        return;
+    }
+
+    autoDetectPathAndToken();
+
+    UIAlertController *progress = [UIAlertController alertControllerWithTitle:@"处理中..." message:@"获取文件信息..." preferredStyle:UIAlertControllerStyleAlert];
+    UIViewController *vc = topViewController();
+    if (vc) [vc presentViewController:progress animated:YES completion:nil];
+
+    fetchFileList(^(NSArray *files, NSError *err) {
+        if (err || !files) {
+            [progress dismissViewControllerAnimated:YES completion:^{
+                showToast(@"获取文件列表失败");
+            }];
+            return;
+        }
+
+        NSDictionary *targetFile = nil;
+        for (NSDictionary *file in files) {
+            NSString *name = file[@"server_filename"];
+            if ([name isEqualToString:fileName]) {
+                targetFile = file;
+                break;
+            }
+        }
+
+        if (!targetFile) {
+            [progress dismissViewControllerAnimated:YES completion:^{
+                showToast(@"未找到文件");
+            }];
+            return;
+        }
+
+        [progress dismissViewControllerAnimated:YES completion:^{
+            NSString *name = targetFile[@"server_filename"];
+            NSString *path = targetFile[@"path"];
+            NSString *fileId = [targetFile[@"fs_id"] stringValue];
+            runRenameAndGetLink(name, path, fileId);
+        }];
+    });
 }
 - (void)bdt_copyLinkTapped:(id)sender {
     NSString *link = objc_getAssociatedObject(sender, "linkText");
@@ -776,23 +852,27 @@ static void showFloatButton(void) {
     NSString *fileId = objc_getAssociatedObject(sender, "fileId");
     NSString *pdfPath = objc_getAssociatedObject(sender, "pdfPath");
     NSString *fileName = objc_getAssociatedObject(sender, "fileName");
-    UIView *overlay = objc_getAssociatedObject(sender, "overlay");
-    if (overlay) {
-        [UIView animateWithDuration:0.2 animations:^{ overlay.alpha = 0; } completion:^(BOOL finished) { [overlay removeFromSuperview]; }];
+    UIViewController *overlayVC = objc_getAssociatedObject(sender, "overlayVC");
+    if (overlayVC) {
+        [overlayVC dismissViewControllerAnimated:YES completion:^{
+            renameFile(fileId, pdfPath, fileName, ^(BOOL ok, NSError *e) {
+                DLog(@"Restore: %@", ok ? @"OK" : e.localizedDescription);
+            });
+        }];
+    } else {
+        renameFile(fileId, pdfPath, fileName, ^(BOOL ok, NSError *e) {
+            DLog(@"Restore: %@", ok ? @"OK" : e.localizedDescription);
+        });
     }
-    renameFile(fileId, pdfPath, fileName, ^(BOOL ok, NSError *e) {
-        DLog(@"Restore: %@", ok ? @"OK" : e.localizedDescription);
-    });
 }
 - (void)bdt_dismissDialog:(id)sender {
     UIView *overlay = nil;
     if ([sender isKindOfClass:[UITapGestureRecognizer class]]) {
         overlay = ((UITapGestureRecognizer *)sender).view;
     } else if ([sender isKindOfClass:[UIButton class]]) {
-        overlay = objc_getAssociatedObject(sender, "overlay");
+        overlay = objc_getAssociatedObject(sender, "overlayVC");
     }
     if (!overlay) {
-        // Try to find overlay by looking for the associated object
         if ([sender isKindOfClass:[UIView class]]) {
             overlay = (UIView *)sender;
         }
@@ -803,12 +883,15 @@ static void showFloatButton(void) {
 }
 @end
 
-
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v8.2 loaded");
+    DLog(@"BaiduPan Troll v8.3 loaded");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
+
+        [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer *timer) {
+            injectDirectLinkButtons();
+        }];
     });
 }
