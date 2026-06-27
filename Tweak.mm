@@ -579,7 +579,7 @@ static void triggerDownloadFlow(void) {
 
         if (fileItems.count == 0) {
             UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"没有文件" message:@"当前文件夹没有可下载的文件" preferredStyle:UIAlertControllerStyleAlert];
-            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIActionStyleDefault handler:nil]];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
             UIViewController *vc = topViewController(); if (vc) [vc presentViewController:alert animated:YES completion:nil];
             return;
         }
