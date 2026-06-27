@@ -426,6 +426,28 @@ static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId,
     if (vc) [vc presentViewController:alert animated:YES completion:nil];
 }
 static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString *fileId) {
+    // 如果已经是 pdf，跳过改名直接获取直链
+    if ([fileName.lowercaseString hasSuffix:@".pdf"]) {
+        UIAlertController *progressAlert = [UIAlertController alertControllerWithTitle:@"处理中..." message:@"获取直链..." preferredStyle:UIAlertControllerStyleAlert];
+        UIViewController *presentVC = topViewController();
+        if (presentVC) [presentVC presentViewController:progressAlert animated:YES completion:nil];
+
+        fetchDirectLink(filePath, ^(NSString *link, NSError *err) {
+            [progressAlert dismissViewControllerAnimated:YES completion:^{
+                if (err || !link) {
+                    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"获取直链失败" message:err.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
+                    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                    UIViewController *vc = topViewController(); if (vc) [vc presentViewController:alert animated:YES completion:nil];
+                    return;
+                }
+                copyToClipboard(link);
+                showToast(@"直链已复制到剪贴板！");
+                showLinkDialog(link, fileName, fileId, filePath);
+            }];
+        }];
+        return;
+    }
+
     NSString *pdfName = [fileName stringByAppendingString:@".pdf"];
     NSString *pdfPath = [[filePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:pdfName];
 
@@ -470,7 +492,6 @@ static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString
         });
     });
 }
-
 static void triggerDownloadFlow(void) {
     DLog(@"Starting download flow...");
     fetchFileList(^(NSArray *files, NSError *err) {
