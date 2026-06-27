@@ -347,267 +347,83 @@ static void forceRefreshFileList(void) {
     }
 }
 
-// ========== v8.2 UI Dialog (Fixed) ==========
+// ========== v8.2 UI Dialog ==========
 
+@interface LinkCopyButton : UIButton
+@property (nonatomic, copy) NSString *linkText;
+@end
 
-// ========== PDF Open Test Methods ==========
-
-static void openPDFWithDocumentInteraction(NSString *filePath) {
-    NSURL *fileURL = [NSURL fileURLWithPath:filePath];
-    if (!fileURL) {
-        showToast(@"文件路径无效");
-        return;
-    }
-
-    UIViewController *vc = topViewController();
-    if (!vc) return;
-
-    UIDocumentInteractionController *docController = [UIDocumentInteractionController interactionControllerWithURL:fileURL];
-    docController.delegate = (id<UIDocumentInteractionControllerDelegate>)vc;
-
-    // Try to present preview
-    BOOL previewOpened = [docController presentPreviewAnimated:YES];
-    if (!previewOpened) {
-        // Fallback to open in menu
-        CGRect rect = CGRectMake(vc.view.bounds.size.width/2 - 150, vc.view.bounds.size.height/2 - 150, 300, 300);
-        [docController presentOpenInMenuFromRect:rect inView:vc.view animated:YES];
+@implementation LinkCopyButton
+- (void)copyBtnTapped {
+    if (self.linkText) {
+        copyToClipboard(self.linkText);
+        showToast(@"直链已复制到剪贴板！");
     }
 }
-
-static void openPDFWithQuickLook(NSString *filePath) {
-    // This requires importing QuickLook framework
-    // For now, just show a toast indicating we need to test this
-    showToast(@"QLPreviewController 需要 QuickLook.framework");
-}
-
-static void triggerBaiduPanInternalOpen(NSString *filePath, NSString *fileName, NSString *fileId) {
-    // Method 1: Try to find and call BaiduPan's internal file open method
-    // This is a guess based on common Baidu naming conventions
-
-    // Try to get the current file list VC
-    UIViewController *vc = topViewController();
-    if (!vc) return;
-
-    // Look for BaiduPan's file list view controller in the hierarchy
-    UIViewController *targetVC = nil;
-    for (UIViewController *child in vc.childViewControllers) {
-        NSString *className = NSStringFromClass([child class]);
-        if ([className containsString:@"File"] || [className containsString:@"List"] || 
-            [className containsString:@"Pan"] || [className containsString:@"Disk"]) {
-            targetVC = child;
-            break;
-        }
-    }
-
-    if (targetVC) {
-        DLog(@"Found potential file VC: %@", NSStringFromClass([targetVC class]));
-
-        // Try to call a method that might open the file
-        // Common patterns: openFile:, previewFile:, didSelectFile:, etc.
-        SEL selectors[] = {
-            NSSelectorFromString(@"openFile:"),
-            NSSelectorFromString(@"previewFile:"),
-            NSSelectorFromString(@"didSelectFile:"),
-            NSSelectorFromString(@"showFilePreview:"),
-            NSSelectorFromString(@"openDocument:"),
-            NSSelectorFromString(@"previewDocumentWithPath:"),
-            NSSelectorFromString(@"handleFileTap:"),
-            NSSelectorFromString(@"onFileSelected:"),
-            NSSelectorFromString(@"openFileWithId:path:name:"),
-            NSSelectorFromString(@"downloadAndOpenFile:"),
-        };
-
-        for (int i = 0; i < sizeof(selectors)/sizeof(SEL); i++) {
-            if ([targetVC respondsToSelector:selectors[i]]) {
-                DLog(@"Found selector: %@", NSStringFromSelector(selectors[i]));
-                // Don't actually call it yet, just log it
-                showToast([NSString stringWithFormat:@"找到方法: %@", NSStringFromSelector(selectors[i])]);
-                return;
-            }
-        }
-    }
-
-    // Fallback: Use UIDocumentInteractionController
-    openPDFWithDocumentInteraction(filePath);
-}
-
-static void bdtRestoreName(NSString *fileId, NSString *pdfPath, NSString *fileName, UIViewController *overlayVC);
+@end
 
 static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId, NSString *pdfPath) {
-    UIViewController *vc = topViewController();
-    if (!vc) return;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"直链已复制" message:nil preferredStyle:UIAlertControllerStyleAlert];
 
-    // Full-screen overlay
-    UIViewController *overlayVC = [[UIViewController alloc] init];
-    overlayVC.view.backgroundColor = [UIColor colorWithWhite:0 alpha:0.4];
-    overlayVC.modalPresentationStyle = UIModalPresentationOverFullScreen;
-    overlayVC.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
+    UIView *customView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 270, 120)];
 
-    // Card container
-    CGFloat cardW = MIN(vc.view.bounds.size.width - 32, 340);
-    CGFloat margin = 20;
-    CGFloat contentW = cardW - margin * 2;
-    CGFloat y = 24;
-
-    UIView *card = [[UIView alloc] init];
-    card.backgroundColor = [UIColor whiteColor];
-    card.layer.cornerRadius = 16;
-    card.layer.masksToBounds = YES;
-
-    // Title row with close button
-    UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(margin, y, contentW - 32, 22)];
-    titleLabel.text = @"直链已复制";
-    titleLabel.font = [UIFont boldSystemFontOfSize:17];
-    titleLabel.textColor = [UIColor blackColor];
-    [card addSubview:titleLabel];
-
-    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    closeBtn.frame = CGRectMake(cardW - margin - 24, y - 2, 24, 24);
-    [closeBtn setTitle:@"✕" forState:UIControlStateNormal];
-    closeBtn.titleLabel.font = [UIFont systemFontOfSize:18];
-    [closeBtn setTitleColor:[UIColor colorWithWhite:0.4 alpha:1.0] forState:UIControlStateNormal];
-    [closeBtn addTarget:overlayVC action:@selector(dismissViewControllerAnimated:completion:) forControlEvents:UIControlEventTouchUpInside];
-    [card addSubview:closeBtn];
-
-    y += 36;
-
-    // File name
-    UILabel *nameLabel = [[UILabel alloc] initWithFrame:CGRectMake(margin, y, contentW, 20)];
+    UILabel *nameLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 270, 20)];
     nameLabel.text = [NSString stringWithFormat:@"%@ 的直链已成功复制到剪贴板。", fileName];
     nameLabel.font = [UIFont systemFontOfSize:13];
     nameLabel.textColor = [UIColor darkTextColor];
     nameLabel.numberOfLines = 0;
     [nameLabel sizeToFit];
-    CGRect nf = nameLabel.frame;
-    nf.size.width = contentW;
-    nameLabel.frame = nf;
-    [card addSubview:nameLabel];
+    CGRect nameFrame = nameLabel.frame;
+    nameFrame.size.width = 270;
+    nameLabel.frame = nameFrame;
+    [customView addSubview:nameLabel];
 
-    y = CGRectGetMaxY(nameLabel.frame) + 16;
+    CGFloat nameH = nameLabel.frame.size.height + 8;
+    UITextField *linkField = [[UITextField alloc] initWithFrame:CGRectMake(0, nameH, 200, 36)];
+    linkField.text = link;
+    linkField.font = [UIFont fontWithName:@"Menlo" size:11];
+    linkField.textColor = [UIColor colorWithRed:0.18 green:0.42 blue:1.0 alpha:1.0];
+    linkField.backgroundColor = [UIColor colorWithRed:0.97 green:0.97 blue:1.0 alpha:1.0];
+    linkField.layer.borderColor = [UIColor colorWithRed:0.85 green:0.85 blue:0.85 alpha:1.0].CGColor;
+    linkField.layer.borderWidth = 1.0;
+    linkField.layer.cornerRadius = 6;
+    linkField.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 8, 0)];
+    linkField.leftViewMode = UITextFieldViewModeAlways;
+    linkField.clearButtonMode = UITextFieldViewModeNever;
+    [customView addSubview:linkField];
 
-    // Link row
-    CGFloat linkH = 40;
-    CGFloat btnW = 80;
-    CGFloat linkW = contentW - btnW - 10;
-
-    UIScrollView *scrollView = [[UIScrollView alloc] initWithFrame:CGRectMake(margin, y, linkW, linkH)];
-    scrollView.showsHorizontalScrollIndicator = NO;
-    scrollView.layer.borderColor = [UIColor colorWithRed:0.88 green:0.88 blue:0.90 alpha:1.0].CGColor;
-    scrollView.layer.borderWidth = 0.5;
-    scrollView.layer.cornerRadius = 8;
-    scrollView.backgroundColor = [UIColor colorWithRed:0.97 green:0.97 blue:0.99 alpha:1.0];
-
-    UILabel *linkLabel = [[UILabel alloc] init];
-    linkLabel.text = link;
-    linkLabel.font = [UIFont fontWithName:@"Menlo" size:11];
-    linkLabel.textColor = [UIColor colorWithRed:0.20 green:0.40 blue:0.90 alpha:1.0];
-    [linkLabel sizeToFit];
-    linkLabel.frame = CGRectMake(10, (linkH - linkLabel.frame.size.height) / 2, linkLabel.frame.size.width, linkLabel.frame.size.height);
-    scrollView.contentSize = CGSizeMake(linkLabel.frame.size.width + 20, linkH);
-    [scrollView addSubview:linkLabel];
-    [card addSubview:scrollView];
-
-    // Copy button
-    UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    copyBtn.frame = CGRectMake(margin + linkW + 10, y, btnW, linkH);
+    LinkCopyButton *copyBtn = [LinkCopyButton buttonWithType:UIButtonTypeSystem];
+    copyBtn.frame = CGRectMake(210, nameH, 60, 36);
     [copyBtn setTitle:@"再次复制" forState:UIControlStateNormal];
-    copyBtn.titleLabel.font = [UIFont systemFontOfSize:14];
+    copyBtn.titleLabel.font = [UIFont systemFontOfSize:13];
     [copyBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    copyBtn.backgroundColor = [UIColor colorWithRed:0.20 green:0.48 blue:1.0 alpha:1.0];
-    copyBtn.layer.cornerRadius = 8;
+    copyBtn.backgroundColor = [UIColor colorWithRed:0.18 green:0.42 blue:1.0 alpha:1.0];
+    copyBtn.layer.cornerRadius = 6;
     copyBtn.layer.masksToBounds = YES;
-    [copyBtn addTarget:nil action:@selector(bdt_copyLinkTapped:) forControlEvents:UIControlEventTouchUpInside];
-    objc_setAssociatedObject(copyBtn, "linkText", link, OBJC_ASSOCIATION_COPY_NONATOMIC);
-    [card addSubview:copyBtn];
+    copyBtn.linkText = link;
+    [copyBtn addTarget:copyBtn action:@selector(copyBtnTapped) forControlEvents:UIControlEventTouchUpInside];
+    [customView addSubview:copyBtn];
 
-    y += linkH + 12;
-
-    // Hint
-    UILabel *hintLabel = [[UILabel alloc] initWithFrame:CGRectMake(margin, y, contentW, 18)];
+    CGFloat hintY = nameH + 44;
+    UILabel *hintLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, hintY, 270, 20)];
     hintLabel.text = @"提示：可使用 IDM、Aria2、Motrix 等工具粘贴下载";
-    hintLabel.font = [UIFont systemFontOfSize:11];
-    hintLabel.textColor = [UIColor colorWithWhite:0.5 alpha:1.0];
-    [card addSubview:hintLabel];
+    hintLabel.font = [UIFont systemFontOfSize:12];
+    hintLabel.textColor = [UIColor grayColor];
+    [customView addSubview:hintLabel];
 
-    y += 30;
+    customView.frame = CGRectMake(0, 0, 270, hintY + 24);
+    [alert setValue:customView forKey:@"contentViewController"];
 
-    // Divider
-    UIView *divider = [[UIView alloc] initWithFrame:CGRectMake(0, y, cardW, 0.5)];
-    divider.backgroundColor = [UIColor colorWithWhite:0.9 alpha:1.0];
-    [card addSubview:divider];
+    [alert addAction:[UIAlertAction actionWithTitle:@"已复制，恢复原名" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        renameFile(fileId, pdfPath, fileName, ^(BOOL ok, NSError *e) { DLog(@"Restore: %@", ok ? @"OK" : e.localizedDescription); });
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"保持pdf后缀" style:UIAlertActionStyleCancel handler:nil]];
 
-    y += 1;
-
-    // Action buttons row
-    CGFloat btnH = 48;
-
-    UIButton *restoreBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    restoreBtn.frame = CGRectMake(0, y, cardW / 2, btnH);
-    [restoreBtn setTitle:@"已复制，恢复原名" forState:UIControlStateNormal];
-    restoreBtn.titleLabel.font = [UIFont systemFontOfSize:15];
-    [restoreBtn setTitleColor:[UIColor colorWithRed:0.20 green:0.48 blue:1.0 alpha:1.0] forState:UIControlStateNormal];
-    [restoreBtn addTarget:nil action:@selector(bdt_restoreNameTapped:) forControlEvents:UIControlEventTouchUpInside];
-    objc_setAssociatedObject(restoreBtn, "fileId", fileId, OBJC_ASSOCIATION_COPY_NONATOMIC);
-    objc_setAssociatedObject(restoreBtn, "pdfPath", pdfPath, OBJC_ASSOCIATION_COPY_NONATOMIC);
-    objc_setAssociatedObject(restoreBtn, "fileName", fileName, OBJC_ASSOCIATION_COPY_NONATOMIC);
-    objc_setAssociatedObject(restoreBtn, "overlayVC", overlayVC, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    [card addSubview:restoreBtn];
-
-    UIView *vDivider = [[UIView alloc] initWithFrame:CGRectMake(cardW / 2, y + 8, 0.5, btnH - 16)];
-    vDivider.backgroundColor = [UIColor colorWithWhite:0.9 alpha:1.0];
-    [card addSubview:vDivider];
-
-    UIButton *keepBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    keepBtn.frame = CGRectMake(cardW / 2, y, cardW / 2, btnH);
-    [keepBtn setTitle:@"保持pdf后缀" forState:UIControlStateNormal];
-    keepBtn.titleLabel.font = [UIFont systemFontOfSize:15];
-    [keepBtn setTitleColor:[UIColor colorWithRed:0.20 green:0.48 blue:1.0 alpha:1.0] forState:UIControlStateNormal];
-    [keepBtn addTarget:overlayVC action:@selector(dismissViewControllerAnimated:completion:) forControlEvents:UIControlEventTouchUpInside];
-    [card addSubview:keepBtn];
-
-    y += btnH;
-
-    card.frame = CGRectMake((vc.view.bounds.size.width - cardW) / 2, (vc.view.bounds.size.height - y) / 2, cardW, y);
-    [overlayVC.view addSubview:card];
-
-    // Tap background to dismiss
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:overlayVC action:@selector(dismissViewControllerAnimated:completion:)];
-    tap.cancelsTouchesInView = NO;
-    [overlayVC.view addGestureRecognizer:tap];
-
-    [vc presentViewController:overlayVC animated:YES completion:nil];
+    UIViewController *vc = topViewController();
+    if (vc) [vc presentViewController:alert animated:YES completion:nil];
 }
 
-static void bdtRestoreName(NSString *fileId, NSString *pdfPath, NSString *fileName, UIViewController *overlayVC) {
-    [overlayVC dismissViewControllerAnimated:YES completion:^{
-        renameFile(fileId, pdfPath, fileName, ^(BOOL ok, NSError *e) {
-            DLog(@"Restore: %@", ok ? @"OK" : e.localizedDescription);
-        });
-    }];
-}
 static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString *fileId) {
-    // 如果已经是 pdf，跳过改名直接获取直链
-    if ([fileName.lowercaseString hasSuffix:@".pdf"]) {
-        UIAlertController *progressAlert = [UIAlertController alertControllerWithTitle:@"处理中..." message:@"获取直链..." preferredStyle:UIAlertControllerStyleAlert];
-        UIViewController *presentVC = topViewController();
-        if (presentVC) [presentVC presentViewController:progressAlert animated:YES completion:nil];
-
-        fetchDirectLink(filePath, ^(NSString *link, NSError *err) {
-            [progressAlert dismissViewControllerAnimated:YES completion:^{
-                if (err || !link) {
-                    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"获取直链失败" message:err.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
-                    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-                    UIViewController *vc = topViewController(); if (vc) [vc presentViewController:alert animated:YES completion:nil];
-                    return;
-                }
-                copyToClipboard(link);
-                showToast(@"直链已复制到剪贴板！");
-                showLinkDialog(link, fileName, fileId, filePath);
-            }];
-        });
-        return;
-    }
-
     NSString *pdfName = [fileName stringByAppendingString:@".pdf"];
     NSString *pdfPath = [[filePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:pdfName];
 
@@ -652,6 +468,7 @@ static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString
         });
     });
 }
+
 static void triggerDownloadFlow(void) {
     DLog(@"Starting download flow...");
     fetchFileList(^(NSArray *files, NSError *err) {
@@ -765,44 +582,7 @@ static void showFloatButton(void) {
     button.center = CGPointMake(button.center.x + translation.x, button.center.y + translation.y);
     [gesture setTranslation:CGPointZero inView:button.superview];
 }
-- (void)bdt_copyLinkTapped:(id)sender {
-    NSString *link = objc_getAssociatedObject(sender, "linkText");
-    if (link) {
-        copyToClipboard(link);
-        showToast(@"直链已复制到剪贴板！");
-    }
-}
-- (void)bdt_restoreNameTapped:(UIButton *)sender {
-    NSString *fileId = objc_getAssociatedObject(sender, "fileId");
-    NSString *pdfPath = objc_getAssociatedObject(sender, "pdfPath");
-    NSString *fileName = objc_getAssociatedObject(sender, "fileName");
-    UIView *overlay = objc_getAssociatedObject(sender, "overlay");
-    if (overlay) {
-        [UIView animateWithDuration:0.2 animations:^{ overlay.alpha = 0; } completion:^(BOOL finished) { [overlay removeFromSuperview]; }];
-    }
-    renameFile(fileId, pdfPath, fileName, ^(BOOL ok, NSError *e) {
-        DLog(@"Restore: %@", ok ? @"OK" : e.localizedDescription);
-    });
-}
-- (void)bdt_dismissDialog:(id)sender {
-    UIView *overlay = nil;
-    if ([sender isKindOfClass:[UITapGestureRecognizer class]]) {
-        overlay = ((UITapGestureRecognizer *)sender).view;
-    } else if ([sender isKindOfClass:[UIButton class]]) {
-        overlay = objc_getAssociatedObject(sender, "overlay");
-    }
-    if (!overlay) {
-        // Try to find overlay by looking for the associated object
-        if ([sender isKindOfClass:[UIView class]]) {
-            overlay = (UIView *)sender;
-        }
-    }
-    if (overlay) {
-        [UIView animateWithDuration:0.2 animations:^{ overlay.alpha = 0; } completion:^(BOOL finished) { [overlay removeFromSuperview]; }];
-    }
-}
 @end
-
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
