@@ -1,6 +1,7 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v8.0
-//  Workflow: Rename -> Get dlink -> Copy to clipboard -> Auto restore name
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v8.1
+//  UI: Removed "copy first link" button, link in scrollable text field with "copy again" button
+//  Toast: "直链已复制到剪贴板！"
 //  Hardcoded fallback token: 3eccd84d4fec365844c6a7dc6f37dca6
 //
 
@@ -291,7 +292,36 @@ static void copyToClipboard(NSString *text) {
     if (!text) return;
     UIPasteboard *pasteboard = [UIPasteboard generalPasteboard];
     pasteboard.string = text;
-    DLog(@"Copied to clipboard: %@", text);
+}
+
+static void showToast(NSString *msg) {
+    UIWindow *window = nil;
+    if (@available(iOS 13.0, *)) {
+        for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
+            if (scene.activationState == UISceneActivationStateForegroundActive) { window = scene.windows.firstObject; break; }
+        }
+    }
+    if (!window) window = [[UIApplication sharedApplication] keyWindow];
+    if (!window) return;
+    UILabel *toast = [[UILabel alloc] init];
+    toast.text = msg;
+    toast.textColor = [UIColor whiteColor];
+    toast.backgroundColor = [UIColor colorWithWhite:0 alpha:0.8];
+    toast.textAlignment = NSTextAlignmentCenter;
+    toast.font = [UIFont systemFontOfSize:14];
+    toast.layer.cornerRadius = 16;
+    toast.layer.masksToBounds = YES;
+    toast.numberOfLines = 0;
+    [toast sizeToFit];
+    CGFloat w = toast.bounds.size.width + 32;
+    CGFloat h = toast.bounds.size.height + 16;
+    toast.frame = CGRectMake((window.bounds.size.width - w) / 2, window.bounds.size.height - 120, w, h);
+    [window addSubview:toast];
+    toast.alpha = 0;
+    [UIView animateWithDuration:0.3 animations:^{ toast.alpha = 1; }];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [UIView animateWithDuration:0.3 animations:^{ toast.alpha = 0; } completion:^(BOOL finished) { [toast removeFromSuperview]; }];
+    });
 }
 
 static void forceRefreshFileList(void) {
@@ -319,7 +349,87 @@ static void forceRefreshFileList(void) {
     }
 }
 
-// ========== v8.0 核心流程：重命名 -> 获取直链 -> 复制 -> 自动恢复 ==========
+// ========== v8.1 核心流程 ==========
+
+static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId, NSString *pdfPath) {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"直链已复制" message:nil preferredStyle:UIAlertControllerStyleAlert];
+
+    // 创建自定义视图容器
+    UIView *customView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 270, 120)];
+
+    // 文件名标签
+    UILabel *nameLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 270, 20)];
+    nameLabel.text = [NSString stringWithFormat:@"%@ 的直链已成功复制到剪贴板。", fileName];
+    nameLabel.font = [UIFont systemFontOfSize:13];
+    nameLabel.textColor = [UIColor darkTextColor];
+    nameLabel.numberOfLines = 0;
+    [nameLabel sizeToFit];
+    CGRect nameFrame = nameLabel.frame;
+    nameFrame.size.width = 270;
+    nameLabel.frame = nameFrame;
+    [customView addSubview:nameLabel];
+
+    // 链接输入框
+    CGFloat nameH = nameLabel.frame.size.height + 8;
+    UITextField *linkField = [[UITextField alloc] initWithFrame:CGRectMake(0, nameH, 200, 36)];
+    linkField.text = link;
+    linkField.font = [UIFont fontWithName:@"Menlo" size:11];
+    linkField.textColor = [UIColor colorWithRed:0.18 green:0.42 blue:1.0 alpha:1.0];
+    linkField.backgroundColor = [UIColor colorWithRed:0.97 green:0.97 blue:1.0 alpha:1.0];
+    linkField.layer.borderColor = [UIColor colorWithRed:0.85 green:0.85 blue:0.85 alpha:1.0].CGColor;
+    linkField.layer.borderWidth = 1.0;
+    linkField.layer.cornerRadius = 6;
+    linkField.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 8, 0)];
+    linkField.leftViewMode = UITextFieldViewModeAlways;
+    linkField.clearButtonMode = UITextFieldViewModeNever;
+    [customView addSubview:linkField];
+
+    // 再次复制按钮
+    UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    copyBtn.frame = CGRectMake(210, nameH, 60, 36);
+    [copyBtn setTitle:@"再次复制" forState:UIControlStateNormal];
+    copyBtn.titleLabel.font = [UIFont systemFontOfSize:13];
+    [copyBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    copyBtn.backgroundColor = [UIColor colorWithRed:0.18 green:0.42 blue:1.0 alpha:1.0];
+    copyBtn.layer.cornerRadius = 6;
+    copyBtn.layer.masksToBounds = YES;
+    [copyBtn addTarget:copyBtn action:@selector(copyBtnTapped:) forControlEvents:UIControlEventTouchUpInside];
+    objc_setAssociatedObject(copyBtn, @"linkText", link, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    [customView addSubview:copyBtn];
+
+    // 提示文字
+    CGFloat hintY = nameH + 44;
+    UILabel *hintLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, hintY, 270, 20)];
+    hintLabel.text = @"提示：可使用 IDM、Aria2、Motrix 等工具粘贴下载";
+    hintLabel.font = [UIFont systemFontOfSize:12];
+    hintLabel.textColor = [UIColor grayColor];
+    [customView addSubview:hintLabel];
+
+    customView.frame = CGRectMake(0, 0, 270, hintY + 24);
+    [alert setValue:customView forKey:@"contentViewController"];
+
+    [alert addAction:[UIAlertAction actionWithTitle:@"已复制，恢复原名" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        renameFile(fileId, pdfPath, fileName, ^(BOOL ok, NSError *e) { DLog(@"Restore: %@", ok ? @"OK" : e.localizedDescription); });
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"保持pdf后缀" style:UIAlertActionStyleCancel handler:nil]];
+
+    UIViewController *vc = topViewController();
+    if (vc) [vc presentViewController:alert animated:YES completion:nil];
+}
+
+@interface UIButton (BaiduPanTroll)
+- (void)copyBtnTapped:(id)sender;
+@end
+
+@implementation UIButton (BaiduPanTroll)
+- (void)copyBtnTapped:(id)sender {
+    NSString *link = objc_getAssociatedObject(self, @"linkText");
+    if (link) {
+        copyToClipboard(link);
+        showToast(@"直链已复制到剪贴板！");
+    }
+}
+@end
 
 static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString *fileId) {
     NSString *pdfName = [fileName stringByAppendingString:@".pdf"];
@@ -329,7 +439,6 @@ static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString
     UIViewController *presentVC = topViewController();
     if (presentVC) [presentVC presentViewController:progressAlert animated:YES completion:nil];
 
-    // Step 1: 重命名
     renameFile(fileId, filePath, pdfName, ^(BOOL success, NSError *err) {
         if (!success) {
             [progressAlert dismissViewControllerAnimated:YES completion:^{
@@ -344,14 +453,12 @@ static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString
         progressAlert.message = @"2. 刷新文件列表...";
         forceRefreshFileList();
 
-        // Step 2: 等待刷新后获取直链
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             progressAlert.message = @"3. 获取直链...";
 
             fetchDirectLink(pdfPath, ^(NSString *link, NSError *err) {
                 [progressAlert dismissViewControllerAnimated:YES completion:^{
                     if (err || !link) {
-                        // 获取失败，尝试恢复原名
                         renameFile(fileId, pdfPath, fileName, ^(BOOL ok, NSError *e) {
                             DLog(@"Auto restore: %@", ok ? @"OK" : e.localizedDescription);
                         });
@@ -361,25 +468,9 @@ static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString
                         return;
                     }
 
-                    // 成功：复制直链
                     copyToClipboard(link);
-
-                    NSString *msg = [NSString stringWithFormat:@"文件名: %@\n\n直链已复制到剪贴板！\n\n%@", pdfName, link];
-                    if (gBDUSS) {
-                        msg = [NSString stringWithFormat:@"文件名: %@\n\n直链已复制到剪贴板！\n\n%@\n\n提示：若无法下载，在请求头中添加 Cookie: BDUSS=%@", pdfName, link, gBDUSS];
-                    }
-                    UIAlertController *succAlert = [UIAlertController alertControllerWithTitle:@"✅ 直链获取成功" message:msg preferredStyle:UIAlertControllerStyleAlert];
-
-                    [succAlert addAction:[UIAlertAction actionWithTitle:@"已复制，恢复原名" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-                        renameFile(fileId, pdfPath, fileName, ^(BOOL ok, NSError *e) {
-                            DLog(@"Restore name: %@", ok ? @"OK" : e.localizedDescription);
-                        });
-                    }]];
-
-                    [succAlert addAction:[UIAlertAction actionWithTitle:@"保持pdf后缀" style:UIAlertActionStyleCancel handler:nil]];
-
-                    UIViewController *vc = topViewController();
-                    if (vc) [vc presentViewController:succAlert animated:YES completion:nil];
+                    showToast(@"直链已复制到剪贴板！");
+                    showLinkDialog(link, fileName, fileId, pdfPath);
                 }];
             });
         });
@@ -447,30 +538,11 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 16 ? 16 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v8.0"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v8.1"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"📥 获取直链" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         triggerDownloadFlow();
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"🔗 复制首个直链" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        fetchFileList(^(NSArray *files, NSError *err) {
-            if (err || !files || files.count == 0) {
-                UIAlertController *errAlert = [UIAlertController alertControllerWithTitle:@"失败" message:@"无法获取文件列表" preferredStyle:UIAlertControllerStyleAlert];
-                [errAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-                UIViewController *vc = topViewController(); if (vc) [vc presentViewController:errAlert animated:YES completion:nil];
-                return;
-            }
-            for (NSDictionary *file in files) {
-                NSNumber *isdir = file[@"isdir"];
-                if (!isdir || [isdir integerValue] == 0) {
-                    NSString *path = file[@"path"];
-                    NSString *fname = file[@"server_filename"];
-                    runRenameAndGetLink(fname, path, [file[@"fs_id"] stringValue]);
-                    return;
-                }
-            }
-        });
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
     UIViewController *vc = topViewController();
@@ -522,7 +594,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v8.0 loaded");
+    DLog(@"BaiduPan Troll v8.1 loaded");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
