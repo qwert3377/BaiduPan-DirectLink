@@ -1,7 +1,6 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v5.0
-//  Features: auto path detect via NSURLSession hook + beautiful popup UI
-//  Reference: Tampermonkey script v3.5.0
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v5.1
+//  Fix: forward declarations + simplified popup UI
 //
 
 #import <UIKit/UIKit.h>
@@ -18,7 +17,28 @@ static NSString *gManualToken = nil;
 static NSString *gCurrentPath = nil;
 static BOOL gPathAutoDetected = NO;
 
-// ========== 工具函数 ==========
+// ========== 前向声明 ==========
+static UIViewController * topViewController(void);
+static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *headers, NSString *body, void (^handler)(id json, NSError *err));
+static NSString * getBdstoken(void);
+static NSString * getCurrentPath(void);
+static void showSuccessPopup(NSString *fileName, NSString *link);
+static void showErrorPopup(NSString *message);
+static void fetchFileList(NSString *path, void (^completion)(NSArray *files, NSError *err));
+static NSString * digOutDlink(id obj);
+static void fetchDlinkViaFilemetas(NSString *filePath, NSInteger retry, void (^completion)(NSString *dlink, NSError *err));
+static void fetchDlinkViaLocateDownload(NSString *filePath, NSInteger retry, void (^completion)(NSString *dlink, NSError *err));
+static void fetchDlinkPortal(NSString *filePath, void (^completion)(NSString *dlink, NSError *err));
+static void refreshFileMeta(NSString *filePath, void (^completion)(void));
+static void refreshFileListCache(NSString *path, void (^completion)(void));
+static void renameFile(NSString *fileId, NSString *path, NSString *newName, void (^completion)(BOOL success, NSError *err));
+static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentPath, NSInteger fileSize);
+static NSString * strictEncodeURIComponent(NSString *str);
+static NSString * extractPathFromViewController(UIViewController *vc);
+static NSString * getPathFromNavStack(void);
+static NSString * extractPathFromURL(NSString *urlString);
+
+// ========== 工具函数实现 ==========
 
 static UIViewController * topViewController(void) {
     UIWindow *window = nil;
@@ -40,6 +60,12 @@ static UIViewController * topViewController(void) {
         vc = [(UITabBarController *)vc selectedViewController];
     }
     return vc;
+}
+
+static NSString * strictEncodeURIComponent(NSString *str) {
+    NSMutableCharacterSet *allowed = [NSMutableCharacterSet alphanumericCharacterSet];
+    [allowed addCharactersInString:@"-_.!~*'()"];
+    return [str stringByAddingPercentEncodingWithAllowedCharacters:allowed];
 }
 
 static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *headers, NSString *body, void (^handler)(id json, NSError *err)) {
@@ -101,14 +127,10 @@ static NSString * getCurrentPath(void) {
     return @"/";
 }
 
-// ========== 【新增】NSURLSession Hook: 自动从百度网盘请求中提取路径 ==========
-
 static NSString * extractPathFromURL(NSString *urlString) {
     if (!urlString || urlString.length == 0) return nil;
     NSURL *url = [NSURL URLWithString:urlString];
     if (!url) return nil;
-
-    // 从 /api/list 的 dir 参数提取路径
     if ([url.path containsString:@"/api/list"]) {
         NSString *query = url.query;
         if (query) {
@@ -125,8 +147,6 @@ static NSString * extractPathFromURL(NSString *urlString) {
             }
         }
     }
-
-    // 从 /api/filemetas 的 path 参数提取路径
     if ([url.path containsString:@"/api/filemetas"]) {
         NSString *query = url.query;
         if (query) {
@@ -136,7 +156,6 @@ static NSString * extractPathFromURL(NSString *urlString) {
                 if (kv.count == 2 && [kv[0] isEqualToString:@"path"]) {
                     NSString *decoded = [kv[1] stringByRemovingPercentEncoding];
                     if (decoded && decoded.length > 0) {
-                        // 从文件路径提取目录路径
                         NSRange lastSlash = [decoded rangeOfString:@"/" options:NSBackwardsSearch];
                         if (lastSlash.location != NSNotFound && lastSlash.location > 0) {
                             NSString *dirPath = [decoded substringToIndex:lastSlash.location];
@@ -149,57 +168,8 @@ static NSString * extractPathFromURL(NSString *urlString) {
             }
         }
     }
-
     return nil;
 }
-
-@interface NSURLSession (HKCHook)
-@end
-
-@implementation NSURLSession (HKCHook)
-
-- (NSURLSessionDataTask *)hkc_dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
-    NSString *urlString = request.URL.absoluteString;
-    if ([urlString containsString:@"pan.baidu.com"]) {
-        NSString *path = extractPathFromURL(urlString);
-        if (path && path.length > 0) {
-            gCurrentPath = path;
-            gPathAutoDetected = YES;
-        }
-    }
-
-    // 包装 completion handler 来也从响应中提取
-    void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
-        if (completionHandler) {
-            completionHandler(data, response, error);
-        }
-    };
-
-    return [self hkc_dataTaskWithRequest:request completionHandler:wrappedHandler];
-}
-
-- (NSURLSessionDataTask *)hkc_dataTaskWithURL:(NSURL *)url completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
-    NSString *urlString = url.absoluteString;
-    if ([urlString containsString:@"pan.baidu.com"]) {
-        NSString *path = extractPathFromURL(urlString);
-        if (path && path.length > 0) {
-            gCurrentPath = path;
-            gPathAutoDetected = YES;
-        }
-    }
-
-    void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
-        if (completionHandler) {
-            completionHandler(data, response, error);
-        }
-    };
-
-    return [self hkc_dataTaskWithURL:url completionHandler:wrappedHandler];
-}
-
-@end
-
-// ========== 路径提取（ViewController 方式，作为备用） ==========
 
 static NSString * extractPathFromViewController(UIViewController *vc) {
     if (!vc) return nil;
@@ -232,13 +202,7 @@ static NSString * getPathFromNavStack(void) {
     return nil;
 }
 
-// ========== 核心 API ==========
-
-static NSString * strictEncodeURIComponent(NSString *str) {
-    NSMutableCharacterSet *allowed = [NSMutableCharacterSet alphanumericCharacterSet];
-    [allowed addCharactersInString:@"-_.!~*'()"];
-    return [str stringByAddingPercentEncodingWithAllowedCharacters:allowed];
-}
+// ========== 核心 API 实现 ==========
 
 static void fetchFileList(NSString *path, void (^completion)(NSArray *files, NSError *err)) {
     NSString *token = getBdstoken();
@@ -478,49 +442,31 @@ static void runPipeline(NSString *fileName, NSString *fileId, NSString *currentP
     }
 }
 
-// ========== 【新增】精美弹窗 UI ==========
+// ========== 弹窗 UI 实现 ==========
 
 static void showSuccessPopup(NSString *fileName, NSString *link) {
     UIViewController *vc = topViewController();
     if (!vc) return;
 
-    // 创建遮罩层
     UIView *overlay = [[UIView alloc] initWithFrame:vc.view.bounds];
     overlay.backgroundColor = [UIColor colorWithWhite:0 alpha:0.45];
     overlay.alpha = 0;
+    overlay.tag = 99999;
     [vc.view addSubview:overlay];
 
-    // 创建弹窗
     UIView *modal = [[UIView alloc] init];
     modal.backgroundColor = [UIColor whiteColor];
     modal.layer.cornerRadius = 12;
-    modal.layer.shadowColor = [UIColor blackColor].CGColor;
-    modal.layer.shadowOffset = CGSizeMake(0, 14);
-    modal.layer.shadowOpacity = 0.2;
-    modal.layer.shadowRadius = 40;
     modal.translatesAutoresizingMaskIntoConstraints = NO;
     [overlay addSubview:modal];
-
-    // 标题栏
-    UIView *header = [[UIView alloc] init];
-    header.translatesAutoresizingMaskIntoConstraints = NO;
-    [modal addSubview:header];
 
     UILabel *titleLabel = [[UILabel alloc] init];
     titleLabel.text = @"Link Copied";
     titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
     titleLabel.textColor = [UIColor colorWithRed:0.2 green:0.2 blue:0.2 alpha:1];
     titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [header addSubview:titleLabel];
+    [modal addSubview:titleLabel];
 
-    UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    [closeBtn setTitle:@"x" forState:UIControlStateNormal];
-    closeBtn.titleLabel.font = [UIFont systemFontOfSize:20];
-    closeBtn.tintColor = [UIColor colorWithRed:0.4 green:0.4 blue:0.4 alpha:1];
-    closeBtn.translatesAutoresizingMaskIntoConstraints = NO;
-    [header addSubview:closeBtn];
-
-    // 内容区
     UILabel *msgLabel = [[UILabel alloc] init];
     msgLabel.text = [NSString stringWithFormat:@"%@ link has been copied to clipboard.", fileName];
     msgLabel.font = [UIFont systemFontOfSize:14];
@@ -529,10 +475,9 @@ static void showSuccessPopup(NSString *fileName, NSString *link) {
     msgLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [modal addSubview:msgLabel];
 
-    // 链接输入框
     UITextField *linkInput = [[UITextField alloc] init];
     linkInput.text = link;
-    linkInput.font = [UIFont fontWithName:@"Menlo" size:11];
+    linkInput.font = [UIFont fontWithName:@"Menlo" size:11] ?: [UIFont systemFontOfSize:11];
     linkInput.textColor = [UIColor colorWithRed:0.18 green:0.42 blue:1 alpha:1];
     linkInput.backgroundColor = [UIColor colorWithRed:0.97 green:0.98 blue:1 alpha:1];
     linkInput.layer.borderColor = [UIColor colorWithRed:0.86 green:0.87 blue:0.88 alpha:1].CGColor;
@@ -546,7 +491,6 @@ static void showSuccessPopup(NSString *fileName, NSString *link) {
     linkInput.enabled = NO;
     [modal addSubview:linkInput];
 
-    // 再次复制按钮
     UIButton *copyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     [copyBtn setTitle:@"Copy Again" forState:UIControlStateNormal];
     copyBtn.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
@@ -556,7 +500,6 @@ static void showSuccessPopup(NSString *fileName, NSString *link) {
     copyBtn.translatesAutoresizingMaskIntoConstraints = NO;
     [modal addSubview:copyBtn];
 
-    // 提示文字
     UILabel *hintLabel = [[UILabel alloc] init];
     hintLabel.text = @"Tip: Use IDM, Aria2, Motrix to paste download";
     hintLabel.font = [UIFont systemFontOfSize:11];
@@ -564,27 +507,17 @@ static void showSuccessPopup(NSString *fileName, NSString *link) {
     hintLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [modal addSubview:hintLabel];
 
-    // 布局约束
     CGFloat modalWidth = MIN(420, vc.view.bounds.size.width * 0.92);
     [NSLayoutConstraint activateConstraints:@[
         [modal.centerXAnchor constraintEqualToAnchor:overlay.centerXAnchor],
         [modal.centerYAnchor constraintEqualToAnchor:overlay.centerYAnchor],
         [modal.widthAnchor constraintEqualToConstant:modalWidth],
 
-        [header.topAnchor constraintEqualToAnchor:modal.topAnchor constant:14],
-        [header.leadingAnchor constraintEqualToAnchor:modal.leadingAnchor constant:16],
-        [header.trailingAnchor constraintEqualToAnchor:modal.trailingAnchor constant:-16],
-        [header.heightAnchor constraintEqualToConstant:30],
+        [titleLabel.topAnchor constraintEqualToAnchor:modal.topAnchor constant:16],
+        [titleLabel.leadingAnchor constraintEqualToAnchor:modal.leadingAnchor constant:16],
+        [titleLabel.trailingAnchor constraintEqualToAnchor:modal.trailingAnchor constant:-16],
 
-        [titleLabel.leadingAnchor constraintEqualToAnchor:header.leadingAnchor],
-        [titleLabel.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
-
-        [closeBtn.trailingAnchor constraintEqualToAnchor:header.trailingAnchor],
-        [closeBtn.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
-        [closeBtn.widthAnchor constraintEqualToConstant:30],
-        [closeBtn.heightAnchor constraintEqualToConstant:30],
-
-        [msgLabel.topAnchor constraintEqualToAnchor:header.bottomAnchor constant:12],
+        [msgLabel.topAnchor constraintEqualToAnchor:titleLabel.bottomAnchor constant:12],
         [msgLabel.leadingAnchor constraintEqualToAnchor:modal.leadingAnchor constant:16],
         [msgLabel.trailingAnchor constraintEqualToAnchor:modal.trailingAnchor constant:-16],
 
@@ -602,41 +535,16 @@ static void showSuccessPopup(NSString *fileName, NSString *link) {
         [hintLabel.leadingAnchor constraintEqualToAnchor:modal.leadingAnchor constant:16],
         [hintLabel.trailingAnchor constraintEqualToAnchor:modal.trailingAnchor constant:-16],
         [hintLabel.bottomAnchor constraintEqualToAnchor:modal.bottomAnchor constant:-16]
-    ]];
+    ]]; 
 
-    // 动画显示
     [UIView animateWithDuration:0.2 animations:^{
         overlay.alpha = 1;
     }];
 
-    // 关闭事件
-    void (^closePopup)(void) = ^{
-        [UIView animateWithDuration:0.15 animations:^{
-            overlay.alpha = 0;
-        } completion:^(BOOL finished) {
-            [overlay removeFromSuperview];
-        }];
-    };
-
-    [closeBtn addTarget:copyBtn action:@selector(removeFromSuperview) forControlEvents:UIControlEventTouchUpInside];
-    // 用 tap gesture 关闭
+    [copyBtn addTarget:overlay action:@selector(removeFromSuperview) forControlEvents:UIControlEventTouchUpInside];
     UITapGestureRecognizer *tapOverlay = [[UITapGestureRecognizer alloc] initWithTarget:overlay action:@selector(removeFromSuperview)];
     tapOverlay.cancelsTouchesInView = NO;
     [overlay addGestureRecognizer:tapOverlay];
-
-    // 再次复制
-    [copyBtn addTarget:copyBtn action:@selector(removeFromSuperview) forControlEvents:UIControlEventTouchUpInside];
-    // 实际复制逻辑用 block
-    @try {
-        // 重新设置关闭按钮
-        [closeBtn removeTarget:nil action:NULL forControlEvents:UIControlEventAllEvents];
-        [closeBtn addTarget:overlay action:@selector(removeFromSuperview) forControlEvents:UIControlEventTouchUpInside];
-
-        [copyBtn removeTarget:nil action:NULL forControlEvents:UIControlEventAllEvents];
-        [copyBtn addTarget:overlay action:@selector(removeFromSuperview) forControlEvents:UIControlEventTouchUpInside];
-        // 复制到剪贴板
-        [[UIPasteboard generalPasteboard] setString:link];
-    } @catch (NSException *e) {}
 }
 
 static void showErrorPopup(NSString *message) {
@@ -646,15 +554,12 @@ static void showErrorPopup(NSString *message) {
     UIView *overlay = [[UIView alloc] initWithFrame:vc.view.bounds];
     overlay.backgroundColor = [UIColor colorWithWhite:0 alpha:0.45];
     overlay.alpha = 0;
+    overlay.tag = 99999;
     [vc.view addSubview:overlay];
 
     UIView *modal = [[UIView alloc] init];
     modal.backgroundColor = [UIColor whiteColor];
     modal.layer.cornerRadius = 12;
-    modal.layer.shadowColor = [UIColor blackColor].CGColor;
-    modal.layer.shadowOffset = CGSizeMake(0, 14);
-    modal.layer.shadowOpacity = 0.2;
-    modal.layer.shadowRadius = 40;
     modal.translatesAutoresizingMaskIntoConstraints = NO;
     [overlay addSubview:modal];
 
@@ -701,7 +606,7 @@ static void showErrorPopup(NSString *message) {
         [okBtn.widthAnchor constraintEqualToConstant:80],
         [okBtn.heightAnchor constraintEqualToConstant:36],
         [okBtn.bottomAnchor constraintEqualToAnchor:modal.bottomAnchor constant:-16]
-    ]];
+    ]]; 
 
     [UIView animateWithDuration:0.2 animations:^{
         overlay.alpha = 1;
@@ -712,6 +617,39 @@ static void showErrorPopup(NSString *message) {
     tapOverlay.cancelsTouchesInView = NO;
     [overlay addGestureRecognizer:tapOverlay];
 }
+
+// ========== NSURLSession Hook ==========
+
+@interface NSURLSession (HKCHook)
+@end
+
+@implementation NSURLSession (HKCHook)
+
+- (NSURLSessionDataTask *)hkc_dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
+    NSString *urlString = request.URL.absoluteString;
+    if ([urlString containsString:@"pan.baidu.com"]) {
+        NSString *path = extractPathFromURL(urlString);
+        if (path && path.length > 0) {
+            gCurrentPath = path;
+            gPathAutoDetected = YES;
+        }
+    }
+    return [self hkc_dataTaskWithRequest:request completionHandler:completionHandler];
+}
+
+- (NSURLSessionDataTask *)hkc_dataTaskWithURL:(NSURL *)url completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
+    NSString *urlString = url.absoluteString;
+    if ([urlString containsString:@"pan.baidu.com"]) {
+        NSString *path = extractPathFromURL(urlString);
+        if (path && path.length > 0) {
+            gCurrentPath = path;
+            gPathAutoDetected = YES;
+        }
+    }
+    return [self hkc_dataTaskWithURL:url completionHandler:completionHandler];
+}
+
+@end
 
 // ========== 悬浮按钮 ==========
 
@@ -788,7 +726,6 @@ static void showErrorPopup(NSString *message) {
         UIViewController *vc = topViewController();
         if (!vc) return;
 
-        // 尝试多种方式获取路径
         NSString *autoPath = getPathFromNavStack();
         if (autoPath) {
             gCurrentPath = autoPath;
@@ -934,9 +871,8 @@ static void swizzleInstanceMethod(Class cls, SEL originalSelector, SEL swizzledS
 @end
 
 __attribute__((constructor)) static void init() {
-    DLog(@"Loaded v5.0 (arm64)");
+    DLog(@"Loaded v5.1 (arm64)");
 
-    // Hook NSURLSession
     static dispatch_once_t sessionOnce;
     dispatch_once(&sessionOnce, ^{
         swizzleInstanceMethod([NSURLSession class], @selector(dataTaskWithRequest:completionHandler:), @selector(hkc_dataTaskWithRequest:completionHandler:));
@@ -944,7 +880,6 @@ __attribute__((constructor)) static void init() {
         DLog(@"NSURLSession hook registered");
     });
 
-    // Hook UIViewController
     static dispatch_once_t swizzleOnce;
     dispatch_once(&swizzleOnce, ^{
         swizzleInstanceMethod([UIViewController class], @selector(viewDidAppear:), @selector(hkc_viewDidAppear:));
