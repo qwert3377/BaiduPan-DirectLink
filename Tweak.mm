@@ -1,13 +1,15 @@
 //
 //  BaiduPan SVIP Direct Link Helper - TrollStore Edition v7.9
 //  Fixed: filemetas path param, locatedownload fallback, rename JSON format
+//  Fixed: DLog macro compilation errors with MIN() nested commas
 //  Hardcoded fallback token: 3eccd84d4fec365844c6a7dc6f37dca6
 //
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-#define DLog(fmt, ...) NSLog(("[BaiduPanTroll] " fmt), ##__VA_ARGS__)
+// 修复：DLog 宏避免 MIN() 逗号被 VA_ARGS 误解析
+#define DLog(fmt, ...) NSLog(@"[BaiduPanTroll] " fmt, ##__VA_ARGS__)
 
 // ========== 全局状态 ==========
 static NSString *gCurrentPath = nil;
@@ -129,7 +131,8 @@ static NSString * scanMemoryForBdstoken(void) {
                 NSRegularExpression *letterRegex = [NSRegularExpression regularExpressionWithPattern:@"[a-fA-F]" options:0 error:nil];
                 if ([letterRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, str.length)] > 0) {
                     if (str.length == 32) {
-                        DLog(@"Found 32-bit token in key '%@': %@...", key, [str substringToIndex:MIN(16, str.length)]);
+                        NSString *preview = [str substringToIndex:16];
+                        DLog(@"Found 32-bit token in key '%@': %@...", key, preview);
                         return str;
                     }
                     if (str.length == 16 && !bestToken) {
@@ -141,7 +144,8 @@ static NSString * scanMemoryForBdstoken(void) {
         }
     }
     if (bestToken) {
-        DLog(@"Only found 16-bit token in key '%@': %@...", bestKey, [bestToken substringToIndex:MIN(16, bestToken.length)]);
+        NSString *preview = [bestToken substringToIndex:16];
+        DLog(@"Only found 16-bit token in key '%@': %@...", bestKey, preview);
         return bestToken;
     }
     return nil;
@@ -234,10 +238,8 @@ static void autoDetectPathAndToken(void) {
     gCurrentPath = buildPathFromNavStack();
     if (!gCurrentPath) gCurrentPath = @"/";
 
-    DLog(@"Path: %@ | Token: %@ | BDUSS: %@", 
-         gCurrentPath, 
-         gBdstoken ? [gBdstoken substringToIndex:MIN(16, gBdstoken.length)] : @"missing", 
-         gBDUSS ? @"OK" : @"missing");
+    NSString *tokenPreview = gBdstoken ? [gBdstoken substringToIndex:MIN(16, gBdstoken.length)] : @"missing";
+    DLog(@"Path: %@ | Token: %@ | BDUSS: %@", gCurrentPath, tokenPreview, gBDUSS ? @"OK" : @"missing");
 }
 
 // ========== 文件列表获取 ==========
@@ -328,8 +330,9 @@ static void fetchDlinkViaFilemetas(NSString *filePath, NSInteger retryCount, voi
     }
 
     NSString *encodedPath = strictEncodeURIComponent(filePath);
-    NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/filemetas?bdstoken=%@&channel=chunlei&clienttype=0&web=1&app_id=250528&dlink=1&path=%@&t=%ld", 
-                     gBdstoken, encodedPath, (long)[[NSDate date] timeIntervalSince1970] * 1000];
+    long long ts = (long long)([[NSDate date] timeIntervalSince1970] * 1000);
+    NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/filemetas?bdstoken=%@&channel=chunlei&clienttype=0&web=1&app_id=250528&dlink=1&path=%@&t=%lld", 
+                     gBdstoken, encodedPath, ts];
 
     bdAsyncRequest(url, @"GET", @{@"X-Requested-With": @"XMLHttpRequest"}, nil, ^(id json, NSError *err) {
         if (err) { completion(nil, err); return; }
@@ -364,8 +367,9 @@ static void fetchDlinkViaLocatedownload(NSString *filePath, NSInteger retryCount
     }
 
     NSString *encodedPath = strictEncodeURIComponent(filePath);
-    NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/locatedownload?clienttype=0&app_id=250528&web=1&channel=chunlei&path=%@&origin=pdf&use=1&bdstoken=%@&t=%ld",
-                     encodedPath, gBdstoken, (long)[[NSDate date] timeIntervalSince1970] * 1000];
+    long long ts = (long long)([[NSDate date] timeIntervalSince1970] * 1000);
+    NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/locatedownload?clienttype=0&app_id=250528&web=1&channel=chunlei&path=%@&origin=pdf&use=1&bdstoken=%@&t=%lld",
+                     encodedPath, gBdstoken, ts];
 
     bdAsyncRequest(url, @"GET", @{@"X-Requested-With": @"XMLHttpRequest"}, nil, ^(id json, NSError *err) {
         if (err) { completion(nil, err); return; }
@@ -792,9 +796,11 @@ static void onFloatButtonTap(void) {
 
     NSString *tokenInfo = @"missing";
     if (gBdstoken) {
+        NSUInteger len = gBdstoken.length;
+        NSUInteger previewLen = len > 16 ? 16 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", 
-                     [gBdstoken substringToIndex:MIN(16, gBdstoken.length)], 
-                     (unsigned long)gBdstoken.length];
+                     [gBdstoken substringToIndex:previewLen], 
+                     (unsigned long)len];
     }
 
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v7.9"
