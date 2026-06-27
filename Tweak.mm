@@ -369,19 +369,11 @@ static NSString * formatFileSize(long long bytes) {
 
 // ========== v9.1 改进：更可靠的客户端下载触发 ==========
 
-// 格式化文件大小
-static NSString * formatFileSize(long long bytes) {
-    if (bytes < 1024) return [NSString stringWithFormat:@"%lld B", bytes];
-    if (bytes < 1024 * 1024) return [NSString stringWithFormat:@"%.1f KB", bytes / 1024.0];
-    if (bytes < 1024 * 1024 * 1024) return [NSString stringWithFormat:@"%.1f MB", bytes / (1024.0 * 1024.0)];
-    return [NSString stringWithFormat:@"%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0)];
-}
-
 // 收集视图树中的所有子视图（用于调试）
 static void dumpViewHierarchy(UIView *view, int depth) {
     if (depth > 5) return; // 限制深度
     NSString *indent = [@"" stringByPaddingToLength:depth*2 withString:@" " startingAtIndex:0];
-    NSString *cls = view.class.description;
+    NSString *cls = NSStringFromClass([view class]);
     CGRect frame = view.frame;
     DLog(@"%@[%@] frame=%@ alpha=%.1f hidden=%d", indent, cls, NSStringFromCGRect(frame), view.alpha, view.hidden);
     for (UIView *sub in view.subviews) {
@@ -456,7 +448,7 @@ static void tryTapFileCell(NSString *fileName) {
     // 向上查找 cell 或行容器
     UIView *cell = nameLabel;
     while (cell && cell != window) {
-        NSString *cls = cell.class.description;
+        NSString *cls = NSStringFromClass([cell class]);
         if ([cls containsString:@"Cell"] || [cls containsString:@"Item"] || 
             [cls isEqualToString:@"UITableViewCell"] || [cls isEqualToString:@"UICollectionViewCell"] ||
             [cls containsString:@"Row"] || [cls containsString:@"List"]) {
@@ -468,7 +460,7 @@ static void tryTapFileCell(NSString *fileName) {
 
     if (!cell || cell == window) {
         cell = nameLabel.superview;
-        DLog(@"Using superview: %@", cell.class.description);
+        DLog(@"Using superview: %@", NSStringFromClass([cell class]));
     }
 
     // 在 cell 及其兄弟视图中查找按钮
@@ -482,7 +474,7 @@ static void tryTapFileCell(NSString *fileName) {
 
     // 打印所有按钮信息
     for (UIButton *btn in allButtons) {
-        NSString *cls = btn.class.description;
+        NSString *cls = NSStringFromClass([btn class]);
         NSString *title = btn.currentTitle ?: @"";
         DLog(@"  Button: %@ | title: '%@' | frame: %@ | enabled: %d", cls, title, NSStringFromCGRect(btn.frame), btn.enabled);
     }
@@ -490,7 +482,7 @@ static void tryTapFileCell(NSString *fileName) {
     // 策略1: 找类名包含 Download/Action 的按钮
     UIButton *downloadBtn = nil;
     for (UIButton *btn in allButtons) {
-        NSString *cls = btn.class.description;
+        NSString *cls = NSStringFromClass([btn class]);
         if ([cls containsString:@"Download"] || [cls containsString:@"Action"] ||
             [cls containsString:@"More"] || [cls containsString:@"Menu"]) {
             downloadBtn = btn;
@@ -523,7 +515,7 @@ static void tryTapFileCell(NSString *fileName) {
     }
 
     if (downloadBtn) {
-        DLog(@"Tapping button: %@", downloadBtn.class.description);
+        DLog(@"Tapping button: %@", NSStringFromClass([downloadBtn class]));
         [downloadBtn sendActionsForControlEvents:UIControlEventTouchUpInside];
         showToast(@"已尝试触发下载！");
     } else {
