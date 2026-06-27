@@ -196,7 +196,7 @@ static NSString * __attribute__((unused)) getAppUID(void) {
 
 // ========== 自动获取当前路径 ==========
 
-static NSString * __attribute__((unused)) extractPathFromViewController() {
+static NSString * __attribute__((unused)) extractPathFromViewController(UIViewController *vc) \{
     if (!vc) return nil;
 
     NSString *path = nil;
@@ -346,7 +346,7 @@ static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *header
     [task resume];
 }
 
-static NSString * __attribute__((unused)) strictEncodeURIComponent() {
+static NSString * __attribute__((unused)) strictEncodeURIComponent(NSString *str) \{
     if (!str) return @"";
     NSMutableCharacterSet *cs = [NSMutableCharacterSet alphanumericCharacterSet];
     [cs addCharactersInString:@"-_.!~*'()"];
@@ -386,7 +386,7 @@ static void fetchFileList(NSString *path, void (^completion)(NSArray *files, NSE
 
 // ========== 直链获取（多种方式） ==========
 
-static NSString * __attribute__((unused)) digOutDlink() {
+static NSString * __attribute__((unused)) digOutDlink(id obj) \{
     if (!obj) return nil;
 
     if ([obj isKindOfClass:[NSString class]]) {
@@ -582,7 +582,7 @@ static void refreshFileListCache(NSString *path, void (^completion)(void)) {
 
 // ========== 模拟点击触发客户端下载 ==========
 
-static void __attribute__((unused)) simulateTapFileNamed() {
+static void __attribute__((unused)) simulateTapFileNamed(NSString *fileName) {
     DLog(@"👆 Simulating tap on file: %@", fileName);
 
     UIViewController *vc = topViewController();
@@ -674,7 +674,7 @@ static void __attribute__((unused)) simulateTapFileNamed() {
 
 // ========== 触发客户端下载流程 ==========
 
-static void __attribute__((unused)) triggerClientDownload() {
+static void __attribute__((unused)) triggerClientDownload(NSString *fileId, NSString *path, NSString *fileName) {
     DLog(@"🚀 Triggering client download flow for: %@", fileName);
 
     NSString *pdfName = [fileName stringByAppendingString:@".pdf"];
