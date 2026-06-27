@@ -366,158 +366,255 @@ static NSString * formatFileSize(long long bytes) {
     return [NSString stringWithFormat:@"%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0)];
 }
 
-// 在视图中查找并触发下载按钮（递归）
-static void findAndTriggerDownloadButtonInView(UIView *view, NSString *targetFileName);
 
-// 尝试调用客户端内部下载方法
-static void triggerInternalDownload(NSString *filePath, NSString *fileName, NSString *fileId, long long fileSize) {
-    DLog(@"Triggering internal download for: %@ (size: %@)", fileName, formatFileSize(fileSize));
+// ========== v9.1 改进：更可靠的客户端下载触发 ==========
 
-    // 方案1: 尝试发送内部通知触发下载
-    @try {
-        NSArray *possibleNotifs = @[
-            @"BDPanFileDownloadStartNotification",
-            @"BDPanDownloadTaskAddNotification",
-            @"netdisk.download.start",
-            @"com.baidu.netdisk.download.start",
-            @"BDPanDownloadAddTask",
-        ];
-
-        NSMutableDictionary *userInfo = [@{
-            @"path": filePath ?: @"",
-            @"fileName": fileName ?: @"",
-            @"fs_id": fileId ?: @"",
-            @"size": @(fileSize),
-            @"isInternal": @YES
-        } mutableCopy];
-
-        if (gBdstoken) userInfo[@"bdstoken"] = gBdstoken;
-        if (gBDUSS) userInfo[@"BDUSS"] = gBDUSS;
-
-        for (NSString *notifName in possibleNotifs) {
-            [[NSNotificationCenter defaultCenter] postNotificationName:notifName object:nil userInfo:userInfo];
-        }
-        DLog(@"Posted internal download notifications");
-    } @catch (NSException *e) {
-        DLog(@"Notification post failed: %@", e);
-    }
-
-    // 方案2: 尝试通过 performSelector 调用 AppDelegate 或下载管理器的方法
-    @try {
-        id appDelegate = [[UIApplication sharedApplication] delegate];
-        NSArray *possibleSelectors = @[
-            @"startDownloadFile:",
-            @"addDownloadTask:",
-            @"downloadFileWithPath:",
-            @"startDownloadWithInfo:",
-            @"bdpan_startDownload:",
-        ];
-
-        for (NSString *selName in possibleSelectors) {
-            SEL sel = NSSelectorFromString(selName);
-            if ([appDelegate respondsToSelector:sel]) {
-                DLog(@"Found download selector on AppDelegate: %@", selName);
-                #pragma clang diagnostic push
-                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                [appDelegate performSelector:sel withObject:@{@"path": filePath, @"fileName": fileName, @"fs_id": fileId}];
-                #pragma clang diagnostic pop
-                showToast(@"已触发客户端下载！");
-                return;
-            }
-        }
-    } @catch (NSException *e) {
-        DLog(@"AppDelegate download trigger failed: %@", e);
-    }
-
-    // 方案3: 尝试查找 BDPanDownloadManager 或类似类
-    @try {
-        NSArray *possibleClasses = @[@"BDPanDownloadManager", @"BDPanDownloadTaskManager", @"NetdiskDownloadManager", @"BDFileDownloadManager"];
-        for (NSString *className in possibleClasses) {
-            Class mgrClass = NSClassFromString(className);
-            if (mgrClass) {
-                DLog(@"Found download manager class: %@", className);
-                id sharedInstance = nil;
-                if ([mgrClass respondsToSelector:@selector(sharedManager)]) {
-                    sharedInstance = [mgrClass performSelector:@selector(sharedManager)];
-                } else if ([mgrClass respondsToSelector:@selector(sharedInstance)]) {
-                    sharedInstance = [mgrClass performSelector:@selector(sharedInstance)];
-                } else if ([mgrClass respondsToSelector:@selector(defaultManager)]) {
-                    sharedInstance = [mgrClass performSelector:@selector(defaultManager)];
-                }
-
-                if (sharedInstance) {
-                    NSArray *possibleMethods = @[
-                        @"addDownloadTask:",
-                        @"startDownload:",
-                        @"downloadFile:",
-                        @"addTaskWithPath:",
-                    ];
-                    for (NSString *methodName in possibleMethods) {
-                        SEL sel = NSSelectorFromString(methodName);
-                        if ([sharedInstance respondsToSelector:sel]) {
-                            DLog(@"Calling %@.%@", className, methodName);
-                            #pragma clang diagnostic push
-                            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                            [sharedInstance performSelector:sel withObject:@{@"path": filePath, @"fileName": fileName}];
-                            #pragma clang diagnostic pop
-                            showToast(@"已触发客户端下载！");
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-    } @catch (NSException *e) {
-        DLog(@"Download manager trigger failed: %@", e);
-    }
-
-    // 方案4: 尝试通过 UI 模拟点击下载按钮
-    @try {
-        UIViewController *vc = topViewController();
-        if (vc) {
-            findAndTriggerDownloadButtonInView(vc.view, fileName);
-        }
-    } @catch (NSException *e) {
-        DLog(@"UI simulation failed: %@", e);
-    }
-
-    showToast(@"已尝试触发客户端下载，请检查下载列表");
+// 格式化文件大小
+static NSString * formatFileSize(long long bytes) {
+    if (bytes < 1024) return [NSString stringWithFormat:@"%lld B", bytes];
+    if (bytes < 1024 * 1024) return [NSString stringWithFormat:@"%.1f KB", bytes / 1024.0];
+    if (bytes < 1024 * 1024 * 1024) return [NSString stringWithFormat:@"%.1f MB", bytes / (1024.0 * 1024.0)];
+    return [NSString stringWithFormat:@"%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0)];
 }
 
-// 在视图中查找并触发下载按钮
-static void findAndTriggerDownloadButtonInView(UIView *view, NSString *targetFileName) {
-    for (UIView *subview in view.subviews) {
-        if ([subview isKindOfClass:[UILabel class]]) {
-            UILabel *label = (UILabel *)subview;
-            if (label.text && [label.text containsString:targetFileName]) {
-                UIView *parent = label.superview;
-                while (parent && parent != view) {
-                    for (UIView *sibling in parent.subviews) {
-                        if ([sibling isKindOfClass:[UIButton class]]) {
-                            UIButton *btn = (UIButton *)sibling;
-                            [btn sendActionsForControlEvents:UIControlEventTouchUpInside];
-                            DLog(@"Triggered download button for %@", targetFileName);
-                            return;
-                        }
-                    }
-                    parent = parent.superview;
-                }
-            }
-        }
-        findAndTriggerDownloadButtonInView(subview, targetFileName);
+// 收集视图树中的所有子视图（用于调试）
+static void dumpViewHierarchy(UIView *view, int depth) {
+    if (depth > 5) return; // 限制深度
+    NSString *indent = [@"" stringByPaddingToLength:depth*2 withString:@" " startingAtIndex:0];
+    NSString *cls = view.class.description;
+    CGRect frame = view.frame;
+    DLog(@"%@[%@] frame=%@ alpha=%.1f hidden=%d", indent, cls, NSStringFromCGRect(frame), view.alpha, view.hidden);
+    for (UIView *sub in view.subviews) {
+        dumpViewHierarchy(sub, depth + 1);
     }
 }
 
-// 恢复文件名并触发内部下载
+// 在视图树中查找包含特定文本的 UILabel
+static UILabel * findLabelWithText(UIView *rootView, NSString *text) {
+    for (UIView *sub in rootView.subviews) {
+        if ([sub isKindOfClass:[UILabel class]]) {
+            UILabel *label = (UILabel *)sub;
+            if (label.text && [label.text isEqualToString:text]) {
+                return label;
+            }
+        }
+        UILabel *found = findLabelWithText(sub, text);
+        if (found) return found;
+    }
+    return nil;
+}
+
+// 在视图树中查找所有 UIButton
+static NSArray * findAllButtons(UIView *rootView) {
+    NSMutableArray *buttons = [NSMutableArray array];
+    for (UIView *sub in rootView.subviews) {
+        if ([sub isKindOfClass:[UIButton class]]) {
+            [buttons addObject:sub];
+        }
+        [buttons addObjectsFromArray:findAllButtons(sub)];
+    }
+    return buttons;
+}
+
+// 在视图树中查找所有可交互的视图
+static NSArray * findAllInteractiveViews(UIView *rootView) {
+    NSMutableArray *views = [NSMutableArray array];
+    for (UIView *sub in rootView.subviews) {
+        if (sub.userInteractionEnabled && !sub.hidden && sub.alpha > 0.1) {
+            [views addObject:sub];
+        }
+        [views addObjectsFromArray:findAllInteractiveViews(sub)];
+    }
+    return views;
+}
+
+// 尝试触发文件 cell 的点击（打开文件详情或操作菜单）
+static void tryTapFileCell(NSString *fileName) {
+    UIWindow *window = nil;
+    if (@available(iOS 13.0, *)) {
+        for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
+            if (scene.activationState == UISceneActivationStateForegroundActive) {
+                window = scene.windows.firstObject;
+                break;
+            }
+        }
+    }
+    if (!window) window = [[UIApplication sharedApplication] keyWindow];
+    if (!window) return;
+
+    DLog(@"=== Searching for file: %@ ===", fileName);
+
+    // 查找包含文件名的 label
+    UILabel *nameLabel = findLabelWithText(window, fileName);
+    if (!nameLabel) {
+        DLog(@"Label with filename '%@' not found!", fileName);
+        return;
+    }
+
+    DLog(@"Found label: %@ at %@", nameLabel.text, NSStringFromCGRect(nameLabel.frame));
+
+    // 向上查找 cell 或行容器
+    UIView *cell = nameLabel;
+    while (cell && cell != window) {
+        NSString *cls = cell.class.description;
+        if ([cls containsString:@"Cell"] || [cls containsString:@"Item"] || 
+            [cls isEqualToString:@"UITableViewCell"] || [cls isEqualToString:@"UICollectionViewCell"] ||
+            [cls containsString:@"Row"] || [cls containsString:@"List"]) {
+            DLog(@"Found container: %@", cls);
+            break;
+        }
+        cell = cell.superview;
+    }
+
+    if (!cell || cell == window) {
+        cell = nameLabel.superview;
+        DLog(@"Using superview: %@", cell.class.description);
+    }
+
+    // 在 cell 及其兄弟视图中查找按钮
+    NSMutableArray *allButtons = [NSMutableArray array];
+    [allButtons addObjectsFromArray:findAllButtons(cell)];
+    if (allButtons.count == 0 && cell.superview) {
+        [allButtons addObjectsFromArray:findAllButtons(cell.superview)];
+    }
+
+    DLog(@"Found %lu buttons", (unsigned long)allButtons.count);
+
+    // 打印所有按钮信息
+    for (UIButton *btn in allButtons) {
+        NSString *cls = btn.class.description;
+        NSString *title = btn.currentTitle ?: @"";
+        DLog(@"  Button: %@ | title: '%@' | frame: %@ | enabled: %d", cls, title, NSStringFromCGRect(btn.frame), btn.enabled);
+    }
+
+    // 策略1: 找类名包含 Download/Action 的按钮
+    UIButton *downloadBtn = nil;
+    for (UIButton *btn in allButtons) {
+        NSString *cls = btn.class.description;
+        if ([cls containsString:@"Download"] || [cls containsString:@"Action"] ||
+            [cls containsString:@"More"] || [cls containsString:@"Menu"]) {
+            downloadBtn = btn;
+            DLog(@"Selected by class name: %@", cls);
+            break;
+        }
+    }
+
+    // 策略2: 找尺寸较小且在右侧的按钮
+    if (!downloadBtn) {
+        for (UIButton *btn in allButtons) {
+            if (btn.frame.size.width < 60 && btn.frame.size.height < 60 &&
+                btn.frame.origin.x > cell.frame.size.width * 0.5) {
+                downloadBtn = btn;
+                DLog(@"Selected by position (right side, small)");
+                break;
+            }
+        }
+    }
+
+    // 策略3: 找非全屏的、启用的按钮
+    if (!downloadBtn && allButtons.count > 0) {
+        for (UIButton *btn in allButtons) {
+            if (btn.enabled && btn.frame.size.width < 200) {
+                downloadBtn = btn;
+                DLog(@"Selected first enabled small button");
+                break;
+            }
+        }
+    }
+
+    if (downloadBtn) {
+        DLog(@"Tapping button: %@", downloadBtn.class.description);
+        [downloadBtn sendActionsForControlEvents:UIControlEventTouchUpInside];
+        showToast(@"已尝试触发下载！");
+    } else {
+        DLog(@"No suitable button found");
+    }
+}
+
+// 尝试调用下载管理器（更全面的类名探测）
+static void tryDownloadManager(NSString *filePath, NSString *fileName) {
+    NSArray *possibleClasses = @[
+        @"BDPanDownloadManager", @"BDPanDownloadTaskManager", 
+        @"NetdiskDownloadManager", @"BDFileDownloadManager",
+        @"BaiduNetdiskDownloadManager", @"PanDownloadManager",
+        @"BDNDownloadManager", @"BNDownloadManager",
+        @"FileDownloadManager", @"DownloadManager",
+    ];
+
+    NSArray *possibleMethods = @[
+        @"addDownloadTask:", @"startDownload:", @"downloadFile:",
+        @"addTaskWithPath:", @"downloadWithPath:", @"startTask:",
+        @"addDownloadItem:", @"createDownloadTask:",
+    ];
+
+    for (NSString *className in possibleClasses) {
+        Class mgrClass = NSClassFromString(className);
+        if (!mgrClass) continue;
+
+        DLog(@"Found class: %@", className);
+
+        id shared = nil;
+        if ([mgrClass respondsToSelector:@selector(sharedManager)]) {
+            shared = [mgrClass performSelector:@selector(sharedManager)];
+        } else if ([mgrClass respondsToSelector:@selector(sharedInstance)]) {
+            shared = [mgrClass performSelector:@selector(sharedInstance)];
+        } else if ([mgrClass respondsToSelector:@selector(defaultManager)]) {
+            shared = [mgrClass performSelector:@selector(defaultManager)];
+        } else if ([mgrClass respondsToSelector:@selector(currentManager)]) {
+            shared = [mgrClass performSelector:@selector(currentManager)];
+        }
+
+        if (!shared) {
+            // 尝试 alloc init
+            @try { shared = [[mgrClass alloc] init]; } @catch (NSException *e) {}
+        }
+
+        if (shared) {
+            DLog(@"Got instance of %@", className);
+            for (NSString *methodName in possibleMethods) {
+                SEL sel = NSSelectorFromString(methodName);
+                if ([shared respondsToSelector:sel]) {
+                    DLog(@"Calling %@.%@", className, methodName);
+                    NSDictionary *info = @{
+                        @"path": filePath ?: @"",
+                        @"fileName": fileName ?: @"",
+                    };
+                    #pragma clang diagnostic push
+                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                    [shared performSelector:sel withObject:info];
+                    #pragma clang diagnostic pop
+                    showToast(@"已触发下载管理器！");
+                    return;
+                }
+            }
+        }
+    }
+
+    DLog(@"No download manager found");
+}
+
+// 恢复文件名并触发下载（改进版）
 static void restoreNameAndTriggerDownload(NSString *fileId, NSString *pdfPath, NSString *originalName) {
     renameFile(fileId, pdfPath, originalName, ^(BOOL ok, NSError *e) {
         if (ok) {
-            DLog(@"Restored name to %@, triggering internal download...", originalName);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                forceRefreshFileList();
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            DLog(@"Restored name to %@", originalName);
+            showToast(@"已恢复文件名，刷新中...");
+
+            forceRefreshFileList();
+
+            // 等待列表刷新后尝试自动触发
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                DLog(@"Trying auto-trigger for %@", originalName);
+                tryTapFileCell(originalName);
+
+                // 无论自动触发是否成功，都提示用户手动操作
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    UIAlertController *hint = [UIAlertController alertControllerWithTitle:@"请手动下载" 
+                                                                                   message:[NSString stringWithFormat:@"如果自动下载未触发，请手动长按 "%@" 文件，选择下载。", originalName]
+                                                                            preferredStyle:UIAlertControllerStyleAlert];
+                    [hint addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleDefault handler:nil]];
                     UIViewController *vc = topViewController();
-                    if (vc) findAndTriggerDownloadButtonInView(vc.view, originalName);
+                    if (vc) [vc presentViewController:hint animated:YES completion:nil];
                 });
             });
         } else {
@@ -527,6 +624,49 @@ static void restoreNameAndTriggerDownload(NSString *fileId, NSString *pdfPath, N
     });
 }
 
+// 直接触发内部下载（改进版）
+static void triggerInternalDownload(NSString *filePath, NSString *fileName, NSString *fileId, long long fileSize) {
+    DLog(@"Triggering internal download for: %@ (%@)", fileName, formatFileSize(fileSize));
+
+    // 方案1: 通知
+    @try {
+        NSArray *notifs = @[
+            @"BDPanFileDownloadStartNotification", @"BDPanDownloadTaskAddNotification",
+            @"netdisk.download.start", @"com.baidu.netdisk.download.start",
+            @"BDPanDownloadAddTask", @"BDFileDownloadStart",
+            @"kBaiduNetdiskDownloadStartNotification",
+        ];
+        NSMutableDictionary *info = [@{@"path": filePath, @"fileName": fileName, @"fs_id": fileId, @"size": @(fileSize)} mutableCopy];
+        if (gBdstoken) info[@"bdstoken"] = gBdstoken;
+        for (NSString *name in notifs) {
+            [[NSNotificationCenter defaultCenter] postNotificationName:name object:nil userInfo:info];
+        }
+    } @catch (NSException *e) {}
+
+    // 方案2: AppDelegate
+    @try {
+        id delegate = [[UIApplication sharedApplication] delegate];
+        NSArray *sels = @[@"startDownloadFile:", @"addDownloadTask:", @"downloadFileWithPath:", @"startDownloadWithInfo:", @"bdpan_startDownload:", @"handleDownloadRequest:"];
+        for (NSString *selName in sels) {
+            SEL sel = NSSelectorFromString(selName);
+            if ([delegate respondsToSelector:sel]) {
+                NSDictionary *info = @{@"path": filePath, @"fileName": fileName};
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                [delegate performSelector:sel withObject:info];
+                #pragma clang diagnostic pop
+                showToast(@"已触发下载！");
+                return;
+            }
+        }
+    } @catch (NSException *e) {}
+
+    // 方案3: 下载管理器
+    tryDownloadManager(filePath, fileName);
+
+    // 方案4: UI 模拟
+    tryTapFileCell(fileName);
+}
 // ========== v9.0 UI Dialog ==========
 
 static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId, NSString *pdfPath, BOOL needsRestore, long long fileSize) {
