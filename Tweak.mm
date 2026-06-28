@@ -759,8 +759,20 @@ static void scrollToFileLocation(NSString *fileName) {
     if (tableView) {
         DLog(@"Found tableView, searching rows for: %@", fileName);
 
+        // Fix iOS 11+ estimated height issue
+        @try {
+            tableView.estimatedRowHeight = 0;
+            tableView.estimatedSectionHeaderHeight = 0;
+            tableView.estimatedSectionFooterHeight = 0;
+        } @catch (NSException *e) {}
+
+        // Ensure layout is complete before searching
+        [tableView layoutIfNeeded];
+
         NSInteger totalSections = 1;
         @try { totalSections = [tableView numberOfSections]; } @catch (NSException *e) {}
+
+        NSIndexPath *foundIndexPath = nil;
 
         for (NSInteger section = 0; section < totalSections; section++) {
             NSInteger rows = 0;
@@ -769,25 +781,28 @@ static void scrollToFileLocation(NSString *fileName) {
             for (NSInteger row = 0; row < rows; row++) {
                 NSIndexPath *ip = [NSIndexPath indexPathForRow:row inSection:section];
                 @try {
+                    // Force cell creation/visibility before checking
                     UITableViewCell *cell = [tableView cellForRowAtIndexPath:ip];
                     if (!cell) continue;
                     if (viewContainsText(cell, fileName)) {
-                        DLog(@"Found cell at row %ld, scrolling to top", (long)row);
-                        // Use scrollToRow with NONE to minimize movement, then set contentOffset directly
-                        [tableView scrollToRowAtIndexPath:ip atScrollPosition:UITableViewScrollPositionNone animated:NO];
-
-                        // After scroll, adjust to put cell at top
-                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                            CGRect cellRect = [tableView rectForRowAtIndexPath:ip];
-                            CGFloat targetY = cellRect.origin.y - tableView.contentInset.top;
-                            targetY = MAX(-tableView.contentInset.top, targetY);
-                            [tableView setContentOffset:CGPointMake(0, targetY) animated:YES];
-                            DLog(@"Adjusted scroll to y=%.1f", targetY);
-                        });
-                        return;
+                        foundIndexPath = ip;
+                        DLog(@"Found cell at row %ld, section %ld", (long)row, (long)section);
+                        break;
                     }
                 } @catch (NSException *e) {}
             }
+            if (foundIndexPath) break;
+        }
+
+        if (foundIndexPath) {
+            // Method A: Use rectForRowAtIndexPath + setContentOffset (most reliable)
+            CGRect cellRect = [tableView rectForRowAtIndexPath:foundIndexPath];
+            CGFloat targetY = cellRect.origin.y - tableView.contentInset.top - 20;
+            targetY = MAX(-tableView.contentInset.top, targetY);
+
+            DLog(@"Scrolling to cell rect: %@, targetY: %.1f", NSStringFromCGRect(cellRect), targetY);
+            [tableView setContentOffset:CGPointMake(0, targetY) animated:YES];
+            return;
         }
         DLog(@"Cell not found in tableView rows");
     }
@@ -796,7 +811,8 @@ static void scrollToFileLocation(NSString *fileName) {
     UIScrollView *scrollView = (UIScrollView *)findViewRecursively(vc.view, [UIScrollView class]);
     if (scrollView) {
         DLog(@"Trying direct scrollView manipulation");
-        // Search all subviews for the file name
+        [scrollView layoutIfNeeded];
+
         for (UIView *sub in scrollView.subviews) {
             if (viewContainsText(sub, fileName)) {
                 CGRect frame = [sub convertRect:sub.bounds toView:scrollView];
@@ -837,6 +853,7 @@ static void scrollToFileLocation(NSString *fileName) {
     if (targetLabel) {
         UIScrollView *sv = findParentScrollView(targetLabel);
         if (sv) {
+            [sv layoutIfNeeded];
             CGRect labelFrame = [targetLabel convertRect:targetLabel.bounds toView:sv];
             CGFloat targetY = labelFrame.origin.y - 100;
             targetY = MAX(-sv.contentInset.top, MIN(targetY, sv.contentSize.height - sv.bounds.size.height));
