@@ -873,7 +873,7 @@ static void autoClickRenamedFile(NSString *ipaName) {
     __block NSInteger attemptCount = 0;
     __block NSInteger maxAttempts = 15;
 
-    void (^stepSearch)(void) = ^{
+    __block void (^stepSearch)(void) = ^{
         attemptCount++;
         DLog(@"Step search attempt %ld/%ld", (long)attemptCount, (long)maxAttempts);
 
