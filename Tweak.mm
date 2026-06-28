@@ -49,7 +49,7 @@ static void triggerDownloadFlow(void);
 static void onFloatButtonTap(void);
 static void showFloatButton(void);
 
-// ========== v10.11 Auto-click helpers ==========
+// ========== v10.13 Auto-click helpers ==========
 static UIView * findViewRecursively(UIView *root, Class targetClass);
 static void sendTouchToView(UIView *targetView, CGPoint point) {
     if (!targetView) return;
@@ -759,7 +759,7 @@ static void scrollToFileLocation(NSString *fileName) {
     }
 }
 
-// ========== v10.11 Auto-click helpers ==========
+// ========== v10.13 Auto-click helpers ==========
 
 static UIView * findViewRecursively(UIView *root, Class targetClass) {
     if (!root) return nil;
@@ -771,7 +771,7 @@ static UIView * findViewRecursively(UIView *root, Class targetClass) {
     return nil;
 }
 
-// ========== v10.11 CORE: Auto-click renamed file (rebuilt) ==========
+// ========== v10.13 CORE: Auto-click renamed file (rebuilt) ==========
 
 // Helper: search for file in currently visible cells, scanning from bottom-up
 static NSIndexPath * searchFileInTableView(NSString *targetName, UITableView *tv) {
@@ -802,7 +802,7 @@ static NSIndexPath * searchFileInTableView(NSString *targetName, UITableView *tv
 // Helper: search for file in currently visible UITableView cells, scanning from bottom-up
 static void autoClickRenamedFile(NSString *ipaName) {
     if (!ipaName) return;
-    DLog(@"v10.11 Auto-clicking: %@", ipaName);
+    DLog(@"v10.13 Auto-clicking: %@", ipaName);
 
     UIViewController *vc = topViewController();
     if (!vc) {
@@ -817,7 +817,7 @@ static void autoClickRenamedFile(NSString *ipaName) {
         return;
     }
 
-    DLog(@"Found tableView, searching for: %@ (files are always below all folders)", ipaName);
+    DLog(@"Found tableView, searching for: %@", ipaName);
 
     // Fix iOS 11+ estimated height issue
     @try {
@@ -833,12 +833,10 @@ static void autoClickRenamedFile(NSString *ipaName) {
     if (foundPath) {
         DLog(@"File found immediately, scrolling to visible...");
 
-        // Method 1: scrollRectToVisible
         CGRect cellRect = [tableView rectForRowAtIndexPath:foundPath];
         CGRect visibleRect = CGRectMake(0, cellRect.origin.y - 100, tableView.bounds.size.width, cellRect.size.height + 200);
         [tableView scrollRectToVisible:visibleRect animated:YES];
 
-        // Method 2: Also try scrollToRowAtIndexPath as fallback
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [tableView scrollToRowAtIndexPath:foundPath atScrollPosition:UITableViewScrollPositionMiddle animated:YES];
         });
@@ -862,94 +860,71 @@ static void autoClickRenamedFile(NSString *ipaName) {
         return;
     }
 
-    // File not found, try scrolling down step by step
-    DLog(@"File not in visible area, starting step scroll...");
-    showToast(@"开始向下查找文件...");
+    // File not found. Try clicking sort button to show latest files first.
+    DLog(@"File not found, trying to click sort button...");
+    showToast(@"正在切换排序方式...");
 
-    __block NSInteger attemptCount = 0;
-    NSInteger maxAttempts = 20;
+    // Find and click the sort button ("按修改时间" or similar)
+    UIView *sortButton = findViewWithText(vc.view, @"按修改时间");
+    if (!sortButton) {
+        sortButton = findViewWithText(vc.view, @"时间");
+    }
+    if (!sortButton) {
+        sortButton = findViewWithText(vc.view, @"排序");
+    }
 
-    NSTimer *searchTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
-                                                              target:[NSBlockOperation blockOperationWithBlock:^{
-        attemptCount++;
-        DLog(@"Step search attempt %ld/%ld", (long)attemptCount, (long)maxAttempts);
+    if (sortButton) {
+        DLog(@"Found sort button, clicking...");
+        CGPoint center = CGPointMake(CGRectGetMidX(sortButton.bounds), CGRectGetMidY(sortButton.bounds));
+        sendTouchToView(sortButton, center);
 
-        [tableView layoutIfNeeded];
-        NSIndexPath *path = searchFileInTableView(ipaName, tableView);
+        // Wait for sort menu to appear, then click "修改时间" option
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            // Try to find "修改时间" option in the dropdown
+            UIView *timeOption = findViewWithText(vc.view, @"修改时间");
+            if (timeOption) {
+                CGPoint optCenter = CGPointMake(CGRectGetMidX(timeOption.bounds), CGRectGetMidY(timeOption.bounds));
+                sendTouchToView(timeOption, optCenter);
+                DLog(@"Clicked 修改时间 sort option");
+            }
 
-        if (path) {
-            DLog(@"File found on attempt %ld!", (long)attemptCount);
-
-            CGRect cellRect = [tableView rectForRowAtIndexPath:path];
-            CGRect visibleRect = CGRectMake(0, cellRect.origin.y - 100, tableView.bounds.size.width, cellRect.size.height + 200);
-            [tableView scrollRectToVisible:visibleRect animated:YES];
-
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                [tableView scrollToRowAtIndexPath:path atScrollPosition:UITableViewScrollPositionMiddle animated:YES];
-            });
-
-            showToast(@"正在滚动到文件...");
-
+            // Wait for list to refresh with new sort order
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                NSIndexPath *finalPath = searchFileInTableView(ipaName, tableView);
-                if (finalPath) {
-                    UITableViewCell *cell = [tableView cellForRowAtIndexPath:finalPath];
-                    if (cell) {
-                        executeClickOnCell(cell, finalPath, tableView);
-                    } else {
-                        showToast(@"文件未显示，请手动点击");
-                    }
+                [tableView layoutIfNeeded];
+                NSIndexPath *sortedPath = searchFileInTableView(ipaName, tableView);
+
+                if (sortedPath) {
+                    DLog(@"File found after sorting!");
+
+                    CGRect cellRect = [tableView rectForRowAtIndexPath:sortedPath];
+                    CGRect visibleRect = CGRectMake(0, cellRect.origin.y - 100, tableView.bounds.size.width, cellRect.size.height + 200);
+                    [tableView scrollRectToVisible:visibleRect animated:YES];
+
+                    showToast(@"找到文件，正在滚动...");
+
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        NSIndexPath *finalPath = searchFileInTableView(ipaName, tableView);
+                        if (finalPath) {
+                            UITableViewCell *cell = [tableView cellForRowAtIndexPath:finalPath];
+                            if (cell) {
+                                executeClickOnCell(cell, finalPath, tableView);
+                            } else {
+                                showToast(@"文件未显示，请手动点击");
+                            }
+                        } else {
+                            showToast(@"文件未显示，请手动点击");
+                        }
+                    });
                 } else {
-                    showToast(@"文件未显示，请手动点击");
+                    DLog(@"File still not found after sorting");
+                    showToast(@"未找到文件，请手动查找");
                 }
             });
-            return;
-        }
-
-        if (attemptCount >= maxAttempts) {
-            DLog(@"Max attempts reached");
-            showToast(@"未找到文件，请手动点击");
-            return;
-        }
-
-        // Try multiple scroll methods
-        // Method 1: scrollToRowAtIndexPath with last row
-        NSInteger totalSections = 1;
-        @try { totalSections = [tableView numberOfSections]; } @catch (NSException *e) {}
-        NSInteger lastSection = totalSections > 0 ? totalSections - 1 : 0;
-        NSInteger lastRow = 0;
-        @try { lastRow = [tableView numberOfRowsInSection:lastSection] - 1; } @catch (NSException *e) {}
-
-        if (lastRow >= 0) {
-            NSIndexPath *bottomPath = [NSIndexPath indexPathForRow:lastRow inSection:lastSection];
-            [tableView scrollToRowAtIndexPath:bottomPath atScrollPosition:UITableViewScrollPositionBottom animated:YES];
-            DLog(@"Scrolled to bottom row %ld", (long)lastRow);
-        }
-
-        // Method 2: Also try setContentOffset on parent scroll views
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            // Find all scroll views in hierarchy and scroll them
-            void (^scrollAllScrollViews)(UIView *) = ^(UIView *view) {
-                if ([view isKindOfClass:[UIScrollView class]]) {
-                    UIScrollView *sv = (UIScrollView *)view;
-                    CGFloat maxOffset = sv.contentSize.height - sv.bounds.size.height;
-                    if (maxOffset > sv.contentOffset.y) {
-                        [sv setContentOffset:CGPointMake(0, maxOffset) animated:YES];
-                        DLog(@"Scrolled UIScrollView %@ to offset %.0f", NSStringFromClass([sv class]), maxOffset);
-                    }
-                }
-                for (UIView *sub in view.subviews) {
-                    scrollAllScrollViews(sub);
-                }
-            };
-            scrollAllScrollViews(vc.view);
         });
-
-        showToast([NSString stringWithFormat:@"正在向下查找... (%ld/%ld)", (long)attemptCount, (long)maxAttempts]);
-    }]
-                                                            selector:@selector(main)
-                                                            userInfo:nil
-                                                             repeats:YES];
+    } else {
+        DLog(@"No sort button found");
+        showToast(@"未找到排序按钮，请手动滚动查找");
+    }
 }
 
 // ========== Tap Detection ==========
@@ -1187,7 +1162,7 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 8 ? 8 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.11"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.13"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n智能流程：改名->刷新2次->自动点击->检测打开->自动恢复", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件"
@@ -1249,7 +1224,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v10.11 loaded - Auto-Click Edition");
+    DLog(@"BaiduPan Troll v10.13 loaded - Auto-Click Edition");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
