@@ -716,37 +716,6 @@ static void forceRefreshFileList(void) {
     triggerNotificationFallback();
 }
 
-static UIView * findLabelWithText(UIView *view, NSString *text, NSInteger depth) {
-    if (!view || !text || depth > 30) return nil;
-
-    if ([view isKindOfClass:[UILabel class]]) {
-        UILabel *lbl = (UILabel *)view;
-        if (lbl.text && [lbl.text containsString:text]) {
-            DLog(@"Found label at depth %ld: %@", (long)depth, lbl.text);
-            return view;
-        }
-    }
-
-    for (UIView *sub in view.subviews) {
-        UIView *found = findLabelWithText(sub, text, depth + 1);
-        if (found) return found;
-    }
-    return nil;
-}
-
-static UIScrollView * findParentScrollView(UIView *view) {
-    UIView *parent = view.superview;
-    NSInteger maxDepth = 0;
-    while (parent && maxDepth < 20) {
-        if ([parent isKindOfClass:[UIScrollView class]]) {
-            return (UIScrollView *)parent;
-        }
-        parent = parent.superview;
-        maxDepth++;
-    }
-    return nil;
-}
-
 static BOOL viewContainsText(UIView *view, NSString *text) {
     if (!view || !text) return NO;
     if ([view isKindOfClass:[UILabel class]]) {
