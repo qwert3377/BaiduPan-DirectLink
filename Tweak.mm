@@ -938,7 +938,7 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
         return;
     }
 
-    NSString *ppName = [[fileName stringByAppendingString:@"88888888888888"]];
+    NSString *ppName = [fileName stringByAppendingString:@".8888888888888888"];
     NSString *ppPath = [[filePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:ppName];
 
     showToast(@"1. 重命名...");
