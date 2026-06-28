@@ -67,10 +67,7 @@ static void executeClickOnCollectionCell(UICollectionViewCell *cell, NSIndexPath
 static NSIndexPath * searchFileInTableView(NSString *targetName, UITableView *tv);
 static NSIndexPath * searchFileInCollectionView(NSString *targetName, UICollectionView *cv);
 static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInteger attempt, NSInteger maxAttempts, CGFloat scrollStep);
-static void autoClickRenamedFile(NSString *ppName);
 static void scrollToRenamedFile(NSString *ppName);
-static void simulateBackButtonTap(void);
-static UIView * findBackButtonInView(UIView *view, UIWindow *window, UIView **outButton);
 static NSString * topVCClassName(void);
 static NSString * topVCTitle(void);
 
@@ -911,65 +908,14 @@ static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInt
     });
 }
 
-static void autoClickRenamedFile(NSString *ppName) {
-    if (!ppName) return;
-    DLog(@"v10.18 Auto-clicking: %@", ppName);
-
-    UIScrollView *listView = findListViewGlobally();
-    if (!listView) {
-        DLog(@"No list view found globally");
-        showToast(@"未找到文件列表");
-        return;
-    }
-    DLog(@"Found list view: %@", NSStringFromClass([listView class]));
-
-    NSIndexPath *foundPath = nil;
-    if ([listView isKindOfClass:[UITableView class]]) {
-        foundPath = searchFileInTableView(ppName, (UITableView *)listView);
-    } else if ([listView isKindOfClass:[UICollectionView class]]) {
-        foundPath = searchFileInCollectionView(ppName, (UICollectionView *)listView);
-    }
-
-    if (foundPath) {
-        DLog(@"File found immediately, clicking...");
-        if ([listView isKindOfClass:[UITableView class]]) {
-            UITableViewCell *cell = [(UITableView *)listView cellForRowAtIndexPath:foundPath];
-            if (cell) {
-                executeClickOnCell(cell, foundPath, (UITableView *)listView);
-            } else {
-                showToast(@"文件未显示，请手动点击");
-            }
-        } else if ([listView isKindOfClass:[UICollectionView class]]) {
-            UICollectionViewCell *cell = [(UICollectionView *)listView cellForItemAtIndexPath:foundPath];
-            if (cell) {
-                executeClickOnCollectionCell(cell, foundPath, (UICollectionView *)listView);
-            } else {
-                showToast(@"文件未显示，请手动点击");
-            }
-        }
-        return;
-    }
-
-    DLog(@"File not visible, starting scroll search...");
-    showToast(@"正在查找文件...");
-
-    [listView setContentOffset:CGPointZero animated:YES];
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        CGFloat scrollStep = listView.bounds.size.height * 0.7;
-        if (scrollStep < 100) scrollStep = 100;
-        performScrollAttempt(ppName, listView, 0, 15, scrollStep);
-    });
-}
-
 
 // ========== v10.18: Back button finder (no recursive block) ==========
 
-// ========== v10.24: Scroll to file and wait for user tap ==========
+// ========== v10.25: Scroll to file and wait for user tap ==========
 
 static void scrollToRenamedFile(NSString *ppName) {
     if (!ppName) return;
-    DLog(@"v10.24 Scrolling to file: %@", ppName);
+    DLog(@"v10.25 Scrolling to file: %@", ppName);
 
     UIScrollView *listView = findListViewGlobally();
     if (!listView) {
@@ -1007,186 +953,6 @@ static void scrollToRenamedFile(NSString *ppName) {
         if (scrollStep < 100) scrollStep = 100;
         performScrollAttempt(ppName, listView, 0, 15, scrollStep);
     });
-}
-
-
-static UIView * findBackButtonInView(UIView *view, UIWindow *window, UIView **outButton) {
-    if (*outButton) return *outButton;
-
-    NSString *clsName = NSStringFromClass([view class]);
-
-    if ([clsName containsString:@"BackButton"] || [clsName containsString:@"backButton"] ||
-        [clsName containsString:@"ReturnButton"] || [clsName containsString:@"NavBack"] ||
-        [clsName containsString:@"UINavigationBarButton"]) {
-        *outButton = view;
-        return view;
-    }
-
-    if ([view isKindOfClass:[UIControl class]] || view.userInteractionEnabled) {
-        CGPoint absOrigin = [view convertPoint:CGPointZero toView:window];
-        if (absOrigin.x < 70 && absOrigin.y < 120 &&
-            view.bounds.size.width > 20 && view.bounds.size.height > 20 &&
-            view.bounds.size.width < 100 && view.bounds.size.height < 80) {
-            if ([view isKindOfClass:[UIButton class]]) {
-                UIButton *btn = (UIButton *)view;
-                NSString *title = btn.currentTitle ?: @"";
-                if ([title containsString:@"<"] || [title containsString:@"返回"] || [title containsString:@"Back"]) {
-                    *outButton = view;
-                    return view;
-                }
-            }
-            if (absOrigin.x < 50 && absOrigin.y > 20 && absOrigin.y < 100) {
-                *outButton = view;
-                return view;
-            }
-        }
-    }
-
-    for (UIView *sub in view.subviews) {
-        UIView *found = findBackButtonInView(sub, window, outButton);
-        if (found) return found;
-    }
-
-    return nil;
-}
-
-// ========== v10.18: Enhanced back button simulation ==========
-
-static void simulateBackButtonTap(void) {
-    DLog(@"Simulating back button tap...");
-
-    UIViewController *vc = topViewController();
-    if (!vc) {
-        DLog(@"No top VC found");
-        return;
-    }
-
-    // Method 1: Navigation pop (most reliable for push transitions)
-    if (vc.navigationController && vc.navigationController.viewControllers.count > 1) {
-        DLog(@"Method 1: popViewControllerAnimated");
-        [vc.navigationController popViewControllerAnimated:YES];
-        return;
-    }
-
-    // Method 2: Dismiss presented view controller
-    if (vc.presentingViewController) {
-        DLog(@"Method 2: dismissViewController");
-        [vc dismissViewControllerAnimated:YES completion:nil];
-        return;
-    }
-
-    // Method 3: Find and trigger leftBarButtonItem
-    if (vc.navigationItem.leftBarButtonItem) {
-        UIBarButtonItem *item = vc.navigationItem.leftBarButtonItem;
-        if (item.target && item.action) {
-            DLog(@"Method 3: Triggering leftBarButtonItem action");
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            [item.target performSelector:item.action withObject:item];
-            #pragma clang diagnostic pop
-            return;
-        }
-    }
-
-    // Method 4: Search navigation bar for back button views
-    UINavigationBar *navBar = nil;
-    if (vc.navigationController) {
-        navBar = vc.navigationController.navigationBar;
-    } else {
-        UIWindow *window = nil;
-        if (@available(iOS 13.0, *)) {
-            for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
-                if (scene.activationState == UISceneActivationStateForegroundActive) {
-                    window = scene.windows.firstObject;
-                    break;
-                }
-            }
-        }
-        if (!window) window = [[UIApplication sharedApplication] keyWindow];
-        if (window && window.rootViewController) {
-            UIViewController *root = window.rootViewController;
-            while (root.presentedViewController) root = root.presentedViewController;
-            if ([root isKindOfClass:[UINavigationController class]]) {
-                navBar = [(UINavigationController *)root navigationBar];
-            }
-        }
-    }
-
-    if (navBar) {
-        DLog(@"Method 4: Searching navBar subviews...");
-
-        UIView *backButtonView = nil;
-        @try {
-            backButtonView = [navBar valueForKey:@"_backButtonView"];
-        } @catch (NSException *e) {}
-
-        if (backButtonView) {
-            DLog(@"Found _backButtonView, tapping...");
-            sendTouchToView(backButtonView, CGPointMake(backButtonView.bounds.size.width/2, backButtonView.bounds.size.height/2));
-            return;
-        }
-
-        for (UIView *sub in navBar.subviews) {
-            DLog(@"  navBar subview: %@ frame=%@", NSStringFromClass([sub class]), NSStringFromCGRect(sub.frame));
-
-            if ([sub isKindOfClass:[UIButton class]]) {
-                UIButton *btn = (UIButton *)sub;
-                DLog(@"  Found UIButton: title=%@", btn.currentTitle ?: @"nil");
-                sendTouchToView(btn, CGPointMake(btn.bounds.size.width/2, btn.bounds.size.height/2));
-                return;
-            }
-
-            if ([sub isKindOfClass:[UIImageView class]] && sub.userInteractionEnabled && sub.frame.origin.x < 60) {
-                DLog(@"  Found interactive UIImageView at left");
-                sendTouchToView(sub, CGPointMake(sub.bounds.size.width/2, sub.bounds.size.height/2));
-                return;
-            }
-
-            for (UIView *sub2 in sub.subviews) {
-                if ([sub2 isKindOfClass:[UIButton class]]) {
-                    DLog(@"  Found nested UIButton");
-                    sendTouchToView(sub2, CGPointMake(sub2.bounds.size.width/2, sub2.bounds.size.height/2));
-                    return;
-                }
-                if ([sub2 isKindOfClass:[UIImageView class]] && sub2.userInteractionEnabled && sub2.frame.origin.x < 60) {
-                    DLog(@"  Found nested interactive UIImageView at left");
-                    sendTouchToView(sub2, CGPointMake(sub2.bounds.size.width/2, sub2.bounds.size.height/2));
-                    return;
-                }
-            }
-        }
-    }
-
-    // Method 5: Global search for any back button in window hierarchy
-    UIWindow *window = nil;
-    if (@available(iOS 13.0, *)) {
-        for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
-            if (scene.activationState == UISceneActivationStateForegroundActive) {
-                window = scene.windows.firstObject;
-                break;
-            }
-        }
-    }
-    if (!window) window = [[UIApplication sharedApplication] keyWindow];
-
-    if (window) {
-        DLog(@"Method 5: Global back button search...");
-        UIView *backButton = nil;
-        findBackButtonInView(window, window, &backButton);
-
-        if (backButton) {
-            DLog(@"Found global back button: %@ frame=%@", NSStringFromClass([backButton class]), NSStringFromCGRect([backButton convertRect:backButton.bounds toView:window]));
-            sendTouchToView(backButton, CGPointMake(backButton.bounds.size.width/2, backButton.bounds.size.height/2));
-            return;
-        }
-
-        // Method 6: Direct screen coordinate tap at top-left
-        DLog(@"Method 6: Tapping top-left corner of screen");
-        CGPoint backPoint = CGPointMake(25, 55);
-        sendTouchToView(window, backPoint);
-    }
-
-    DLog(@"All back button methods exhausted");
 }
 
 // ========== Tap Detection (Two-Phase) ==========
