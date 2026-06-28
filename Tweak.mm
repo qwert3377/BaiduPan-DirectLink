@@ -1021,6 +1021,18 @@ static NSString * topVCTitle(void) {
     return title ?: @"nil";
 }
 
+static BOOL viewHierarchyContainsText(NSString *text) {
+    UIWindow *window = nil;
+    if (@available(iOS 13.0, *)) {
+        for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
+            if (scene.activationState == UISceneActivationStateForegroundActive) { window = scene.windows.firstObject; break; }
+        }
+    }
+    if (!window) window = [[UIApplication sharedApplication] keyWindow];
+    if (!window) return NO;
+    return viewContainsText(window, text);
+}
+
 static void checkIfFileOpened(void) {
     if (!gIsWaitingForTap) return;
 
@@ -1064,6 +1076,27 @@ static void checkIfFileOpened(void) {
         executeRestore();
         return;
     }
+
+    // Detect file preview screen by UI text (BaiduPan shows "暂不支持打开此类文件" for unsupported files)
+    if (viewHierarchyContainsText(@"暂不支持打开此类文件") || viewHierarchyContainsText(@"暂停加载") || viewHierarchyContainsText(@"加载完成后")) {
+        DLog(@"File opened detected (preview UI text)! Restoring...");
+        stopTapDetection();
+        showToast(@"检测到文件已打开，正在恢复原名...");
+        executeRestore();
+        return;
+    }
+
+    // Detect if current title contains the renamed .ipa file (file opened in preview)
+    if (gPendingRestoreOriginalName) {
+        NSString *ipaName = [gPendingRestoreOriginalName stringByAppendingString:@".ipa"];
+        if (currentTitle && [currentTitle containsString:ipaName]) {
+            DLog(@"File opened detected (title matches renamed .ipa file)! Restoring...");
+            stopTapDetection();
+            showToast(@"检测到文件已打开，正在恢复原名...");
+            executeRestore();
+            return;
+        }
+    }
 }
 
 static void startTapDetection(void) {
@@ -1074,7 +1107,7 @@ static void startTapDetection(void) {
     gInitialTopVCTitle = topVCTitle();
     DLog(@"Started tap detection, nav=%ld class=%@ title=%@", (long)gNavStackCount, gInitialTopVCClass, gInitialTopVCTitle);
 
-    gTapDetectionTimer = [NSTimer scheduledTimerWithTimeInterval:0.5
+    gTapDetectionTimer = [NSTimer scheduledTimerWithTimeInterval:0.3
                                                             target:[NSBlockOperation blockOperationWithBlock:^{
                                                                 checkIfFileOpened();
                                                             }]
@@ -1131,13 +1164,13 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
                 showToast(@"4. 滚动到文件位置...");
                 scrollToFileLocation(ipaName);
 
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     showToast(@"5. 自动点击文件...");
+                    startTapDetection();  // Start detection BEFORE clicking, so we capture pre-click state
                     autoClickRenamedFile(ipaName);
 
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                         showToast(@"已尝试自动点击，如未打开请手动点击");
-                        startTapDetection();
                     });
                 });
             });
