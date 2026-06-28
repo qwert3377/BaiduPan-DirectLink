@@ -49,7 +49,7 @@ static void triggerDownloadFlow(void);
 static void onFloatButtonTap(void);
 static void showFloatButton(void);
 
-// ========== v10.7 Auto-click helpers ==========
+// ========== v10.8 Auto-click helpers ==========
 static UIView * findViewRecursively(UIView *root, Class targetClass);
 static void sendTouchToView(UIView *targetView, CGPoint point) {
     if (!targetView) return;
@@ -759,7 +759,7 @@ static void scrollToFileLocation(NSString *fileName) {
     }
 }
 
-// ========== v10.7 Auto-click helpers ==========
+// ========== v10.8 Auto-click helpers ==========
 
 static UIView * findViewRecursively(UIView *root, Class targetClass) {
     if (!root) return nil;
@@ -771,11 +771,37 @@ static UIView * findViewRecursively(UIView *root, Class targetClass) {
     return nil;
 }
 
-// ========== v10.7 CORE: Auto-click renamed file (rebuilt) ==========
+// ========== v10.8 CORE: Auto-click renamed file (rebuilt) ==========
+
+// Helper: search for file in currently visible cells, scanning from bottom-up
+static NSIndexPath * searchFileInTableView(NSString *targetName, UITableView *tv) {
+    if (!targetName || !tv) return nil;
+    NSInteger totalSections = 1;
+    @try { totalSections = [tv numberOfSections]; } @catch (NSException *e) {}
+
+    for (NSInteger section = 0; section < totalSections; section++) {
+        NSInteger rows = 0;
+        @try { rows = [tv numberOfRowsInSection:section]; } @catch (NSException *e) {}
+
+        // Search from bottom to top: files are sorted below folders in BaiduPan
+        for (NSInteger row = rows - 1; row >= 0; row--) {
+            NSIndexPath *ip = [NSIndexPath indexPathForRow:row inSection:section];
+            @try {
+                UITableViewCell *cell = [tv cellForRowAtIndexPath:ip];
+                if (!cell) continue;
+                if (viewContainsText(cell, targetName)) {
+                    DLog(@"Found cell at row %ld, section %ld", (long)row, (long)section);
+                    return ip;
+                }
+            } @catch (NSException *e) {}
+        }
+    }
+    return nil;
+}
 
 static void autoClickRenamedFile(NSString *ipaName) {
     if (!ipaName) return;
-    DLog(@"v10.7 Auto-clicking: %@", ipaName);
+    DLog(@"v10.8 Auto-clicking: %@", ipaName);
 
     UIViewController *vc = topViewController();
     if (!vc) {
@@ -800,31 +826,6 @@ static void autoClickRenamedFile(NSString *ipaName) {
     } @catch (NSException *e) {}
 
     [tableView layoutIfNeeded];
-
-    // Helper: search for file in currently visible cells, scanning from bottom-up
-    NSIndexPath * searchFileInTableView(NSString *targetName, UITableView *tv) {
-        NSInteger totalSections = 1;
-        @try { totalSections = [tv numberOfSections]; } @catch (NSException *e) {}
-
-        for (NSInteger section = 0; section < totalSections; section++) {
-            NSInteger rows = 0;
-            @try { rows = [tv numberOfRowsInSection:section]; } @catch (NSException *e) {}
-
-            // Search from bottom to top: files are sorted below folders in BaiduPan
-            for (NSInteger row = rows - 1; row >= 0; row--) {
-                NSIndexPath *ip = [NSIndexPath indexPathForRow:row inSection:section];
-                @try {
-                    UITableViewCell *cell = [tv cellForRowAtIndexPath:ip];
-                    if (!cell) continue;
-                    if (viewContainsText(cell, targetName)) {
-                        DLog(@"Found cell at row %ld, section %ld", (long)row, (long)section);
-                        return ip;
-                    }
-                } @catch (NSException *e) {}
-            }
-        }
-        return nil;
-    }
 
     NSIndexPath *foundPath = searchFileInTableView(ipaName, tableView);
 
@@ -867,10 +868,6 @@ static void autoClickRenamedFile(NSString *ipaName) {
 
         if (path) {
             DLog(@"File found on attempt %ld!", (long)attemptCount);
-            // Invalidate timer first
-            [[NSRunLoop mainRunLoop] performBlock:^{
-                // Find and invalidate the timer - use a different approach
-            }];
 
             // Center the cell on screen
             CGRect cellRect = [tableView rectForRowAtIndexPath:path];
@@ -1158,7 +1155,7 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 8 ? 8 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.7"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.8"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n智能流程：改名->刷新2次->自动点击->检测打开->自动恢复", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件"
@@ -1220,7 +1217,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v10.7 loaded - Auto-Click Edition");
+    DLog(@"BaiduPan Troll v10.8 loaded - Auto-Click Edition");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
