@@ -51,6 +51,33 @@ static void showFloatButton(void);
 
 // ========== v10.2 Auto-click helpers ==========
 static UIView * findViewRecursively(UIView *root, Class targetClass);
+static void executeClickOnCell(UITableViewCell *cell, NSIndexPath *ip, UITableView *tableView) {
+    if (!cell || !ip || !tableView) return;
+    DLog(@"Executing click on cell at %@", ip);
+
+    CGPoint center = CGPointMake(cell.bounds.size.width / 2, cell.bounds.size.height / 2);
+
+    // Layer 1: contentView
+    if (cell.contentView) {
+        DLog(@"Touch layer 1: contentView");
+        sendTouchToView(cell.contentView, center);
+    }
+
+    // Layer 2: cell itself
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        DLog(@"Touch layer 2: cell");
+        sendTouchToView(cell, center);
+
+        // Layer 3: delegate + gestures
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            DLog(@"Touch layer 3: delegate + gestures");
+            callSelectOnTableView(tableView, ip);
+            triggerGestureRecognizers(cell);
+            showToast(@"已自动点击文件");
+        });
+    });
+}
+
 static void autoClickRenamedFile(NSString *ipaName);
 
 // ========== Implementations ==========
@@ -683,33 +710,6 @@ static UIView * findViewRecursively(UIView *root, Class targetClass) {
         if (found) return found;
     }
     return nil;
-}
-
-static void executeClickOnCell(UITableViewCell *cell, NSIndexPath *ip, UITableView *tableView) {
-    if (!cell || !ip || !tableView) return;
-    DLog(@"Executing click on cell at %@", ip);
-
-    CGPoint center = CGPointMake(cell.bounds.size.width / 2, cell.bounds.size.height / 2);
-
-    // Layer 1: contentView
-    if (cell.contentView) {
-        DLog(@"Touch layer 1: contentView");
-        sendTouchToView(cell.contentView, center);
-    }
-
-    // Layer 2: cell itself
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        DLog(@"Touch layer 2: cell");
-        sendTouchToView(cell, center);
-
-        // Layer 3: delegate + gestures
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            DLog(@"Touch layer 3: delegate + gestures");
-            callSelectOnTableView(tableView, ip);
-            triggerGestureRecognizers(cell);
-            showToast(@"已自动点击文件");
-        });
-    });
 }
 
 // ========== v10.2 CORE: Auto-click renamed file (rebuilt) ==========
