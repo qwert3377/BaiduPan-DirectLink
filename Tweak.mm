@@ -585,12 +585,54 @@ static void forceRefreshFileList(void) {
     triggerNotificationFallback();
 }
 
+static UITableView * findTableViewInView(UIView *view) {
+    if ([view isKindOfClass:[UITableView class]]) return (UITableView *)view;
+    for (UIView *sub in view.subviews) {
+        UITableView *found = findTableViewInView(sub);
+        if (found) return found;
+    }
+    return nil;
+}
+
+static UICollectionView * findCollectionViewInView(UIView *view) {
+    if ([view isKindOfClass:[UICollectionView class]]) return (UICollectionView *)view;
+    for (UIView *sub in view.subviews) {
+        UICollectionView *found = findCollectionViewInView(sub);
+        if (found) return found;
+    }
+    return nil;
+}
+
 static void scrollToTopInVC(UIViewController *vc) {
     if (!vc) return;
+
+    // Method 1: Direct UITableView
+    UITableView *tv = findTableViewInView(vc.view);
+    if (tv) {
+        [tv reloadData];
+        [tv setContentOffset:CGPointZero animated:YES];
+        [tv scrollToRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:0] atScrollPosition:UITableViewScrollPositionTop animated:YES];
+        DLog(@"Scrolled UITableView to top");
+        return;
+    }
+
+    // Method 2: Direct UICollectionView
+    UICollectionView *cv = findCollectionViewInView(vc.view);
+    if (cv) {
+        [cv reloadData];
+        [cv setContentOffset:CGPointZero animated:YES];
+        if ([cv numberOfItemsInSection:0] > 0) {
+            [cv scrollToItemAtIndexPath:[NSIndexPath indexPathForItem:0 inSection:0] atScrollPosition:UICollectionViewScrollPositionTop animated:YES];
+        }
+        DLog(@"Scrolled UICollectionView to top");
+        return;
+    }
+
+    // Method 3: Generic UIScrollView
     UIScrollView *sv = findScrollViewInView(vc.view);
     if (sv) {
         [sv setContentOffset:CGPointMake(0, -sv.contentInset.top) animated:YES];
-        DLog(@"Scrolled to top");
+        DLog(@"Scrolled UIScrollView to top");
     }
 }
 
