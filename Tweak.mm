@@ -499,7 +499,7 @@ static void simulatePullToRefreshOnScrollView(UIScrollView *scrollView) {
             [scrollView.delegate performSelector:didEndDecelerating withObject:scrollView];
             #pragma clang diagnostic pop
         }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [UIView animateWithDuration:0.3 animations:^{
                 scrollView.contentOffset = originalOffset;
             }];
@@ -725,11 +725,11 @@ static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInt
         return;
     }
 
-    [UIView animateWithDuration:0.4 animations:^{
+    [UIView animateWithDuration:0.2 animations:^{
         listView.contentOffset = CGPointMake(0, targetY);
     }];
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         NSIndexPath *foundPath = nil;
         if ([listView isKindOfClass:[UITableView class]]) {
             foundPath = searchFileInTableView(ppName, (UITableView *)listView);
@@ -798,7 +798,7 @@ static void scrollToRenamedFile(NSString *ppName) {
 
     [listView setContentOffset:CGPointZero animated:YES];
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         CGFloat scrollStep = listView.bounds.size.height * 0.7;
         if (scrollStep < 100) scrollStep = 100;
         performScrollAttempt(ppName, listView, 0, 15, scrollStep);
@@ -904,7 +904,7 @@ static void startTapDetection(void) {
     gInitialTopVCTitle = topVCTitle();
     DLog(@"Started tap detection, nav=%ld class=%@ title=%@", (long)gNavStackCount, gInitialTopVCClass, gInitialTopVCTitle);
 
-    gTapDetectionTimer = [NSTimer scheduledTimerWithTimeInterval:0.3
+    gTapDetectionTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
                                                             target:[NSBlockOperation blockOperationWithBlock:^{
                                                                 checkIfFileOpened();
                                                             }]
@@ -912,7 +912,7 @@ static void startTapDetection(void) {
                                                           userInfo:nil
                                                            repeats:YES];
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (gIsWaitingForTap) {
             DLog(@"Tap detection timeout, forcing restore");
             stopTapDetection();
@@ -957,7 +957,7 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
             showToast(@"3. 刷新第2次...");
             forceRefreshFileList();
 
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 showToast(@"请找到带88888888888888后缀的文件并点击进入");
                 startTapDetection();
                 scrollToRenamedFile(ppName);
@@ -1095,7 +1095,7 @@ static void showFloatButton(void) {
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
     DLog(@"BaiduPan Troll v10.18 loaded - PP Edition");
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
     });
