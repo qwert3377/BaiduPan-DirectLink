@@ -544,7 +544,7 @@ static void tryRefreshOnScrollView(UIScrollView *scrollView) {
         [UIView animateWithDuration:0.25 animations:^{
             scrollView.contentOffset = CGPointMake(offset.x, -scrollView.refreshControl.frame.size.height);
         }];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [scrollView.refreshControl endRefreshing];
         });
         return;
@@ -683,7 +683,9 @@ static void pollForFileExistence(NSString *expectedPath, NSString *fileId, NSStr
                 NSString *path = file[@"path"];
                 if ([path isEqualToString:expectedPath]) {
                     DLog(@"pollForFileExistence: found %@", expectedPath);
-                    completion(YES, nil);
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        completion(YES, nil);
+                    });
                     return;
                 }
             }
@@ -839,7 +841,7 @@ static void simulateTapOnView(UIView *targetView) {
 }
 
 static void autoFindAndTapFileCell(NSString *fileName, NSInteger retryCount, void (^completion)(BOOL success, NSError *err)) {
-    if (retryCount > 15) {
+    if (retryCount > 40) {
         completion(NO, [NSError errorWithDomain:@"BaiduPanTroll" code:-11 userInfo:@{NSLocalizedDescriptionKey: @"无法找到重命名后的文件Cell"}]);
         return;
     }
@@ -850,6 +852,19 @@ static void autoFindAndTapFileCell(NSString *fileName, NSInteger retryCount, voi
     if (!vc) {
         completion(NO, [NSError errorWithDomain:@"BaiduPanTroll" code:-12 userInfo:@{NSLocalizedDescriptionKey: @"无法获取当前视图控制器"}]);
         return;
+    }
+
+    // Force reload table/collection view to ensure data is rendered
+    UITableView *tv = findTableViewInHierarchy(vc.view);
+    if (tv) {
+        [tv reloadData];
+        DLog(@"Forced UITableView reloadData before cell search");
+    } else {
+        UICollectionView *cv = findCollectionViewInHierarchy(vc.view);
+        if (cv) {
+            [cv reloadData];
+            DLog(@"Forced UICollectionView reloadData before cell search");
+        }
     }
 
     // First try to find cell by exact file name
@@ -863,8 +878,8 @@ static void autoFindAndTapFileCell(NSString *fileName, NSInteger retryCount, voi
     }
 
     // Not found yet, maybe list hasn't updated, retry after delay
-    DLog(@"Cell not found yet, retrying in 0.5s...");
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    DLog(@"Cell not found yet, retrying in 0.8s...");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         autoFindAndTapFileCell(fileName, retryCount + 1, completion);
     });
 }
