@@ -923,6 +923,9 @@ static void autoClickRenamedFile(NSString *ipaName) {
         return;
     }
 
+    __block UITableViewCell *targetCell = nil;
+    __block NSIndexPath *targetIndexPath = nil;
+
     // Strategy 1: Find UITableView and match by visible cells
     UITableView *tableView = (UITableView *)findViewRecursively(vc.view, [UITableView class]);
     if (tableView) {
@@ -938,8 +941,8 @@ static void autoClickRenamedFile(NSString *ipaName) {
             NSArray *visibleCells = tableView.visibleCells;
             DLog(@"Visible cells: %lu", (unsigned long)visibleCells.count);
 
-            UITableViewCell *targetCell = nil;
-            NSIndexPath *targetIndexPath = nil;
+            targetCell = nil;
+            targetIndexPath = nil;
 
             for (UITableViewCell *cell in visibleCells) {
                 if (viewContainsText(cell, ipaName)) {
