@@ -1,6 +1,6 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.16
-//  Flow: select -> rename to .ipa -> refresh x2 -> AUTO CLICK renamed file
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.17
+//  Flow: select -> rename to .pp -> refresh x2 -> AUTO CLICK renamed file
 //        -> detect preview opened -> auto back -> wait 1s -> re-click -> restore name
 //
 
@@ -57,7 +57,7 @@ static void triggerDownloadFlow(void);
 static void onFloatButtonTap(void);
 static void showFloatButton(void);
 
-// v10.16 Auto-click helpers
+// v10.17 Auto-click helpers
 static UIScrollView * findListViewInHierarchy(UIView *root);
 static UIScrollView * findListViewGlobally(void);
 static void sendTouchToView(UIView *targetView, CGPoint point);
@@ -67,8 +67,8 @@ static void executeClickOnCell(UITableViewCell *cell, NSIndexPath *ip, UITableVi
 static void executeClickOnCollectionCell(UICollectionViewCell *cell, NSIndexPath *ip, UICollectionView *collectionView);
 static NSIndexPath * searchFileInTableView(NSString *targetName, UITableView *tv);
 static NSIndexPath * searchFileInCollectionView(NSString *targetName, UICollectionView *cv);
-static void performScrollAttempt(NSString *ipaName, UIScrollView *listView, NSInteger attempt, NSInteger maxAttempts, CGFloat scrollStep);
-static void autoClickRenamedFile(NSString *ipaName);
+static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInteger attempt, NSInteger maxAttempts, CGFloat scrollStep);
+static void autoClickRenamedFile(NSString *ppName);
 static void simulateBackButtonTap(void);
 static NSString * topVCClassName(void);
 static NSString * topVCTitle(void);
@@ -624,7 +624,7 @@ static BOOL viewContainsText(UIView *view, NSString *text) {
     return NO;
 }
 
-// ========== v10.16 Auto-click helpers ==========
+// ========== v10.17 Auto-click helpers ==========
 
 static UIScrollView * findListViewInHierarchy(UIView *root) {
     if (!root) return nil;
@@ -797,7 +797,7 @@ static void executeClickOnCollectionCell(UICollectionViewCell *cell, NSIndexPath
     });
 }
 
-// ========== v10.16 CORE: Auto-click renamed file ==========
+// ========== v10.17 CORE: Auto-click renamed file ==========
 
 static NSIndexPath * searchFileInTableView(NSString *targetName, UITableView *tv) {
     if (!targetName || !tv) return nil;
@@ -847,7 +847,7 @@ static NSIndexPath * searchFileInCollectionView(NSString *targetName, UICollecti
     return nil;
 }
 
-static void performScrollAttempt(NSString *ipaName, UIScrollView *listView, NSInteger attempt, NSInteger maxAttempts, CGFloat scrollStep) {
+static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInteger attempt, NSInteger maxAttempts, CGFloat scrollStep) {
     if (attempt >= maxAttempts) {
         DLog(@"Max scroll attempts reached");
         showToast(@"未找到文件，请手动查找");
@@ -875,9 +875,9 @@ static void performScrollAttempt(NSString *ipaName, UIScrollView *listView, NSIn
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         NSIndexPath *foundPath = nil;
         if ([listView isKindOfClass:[UITableView class]]) {
-            foundPath = searchFileInTableView(ipaName, (UITableView *)listView);
+            foundPath = searchFileInTableView(ppName, (UITableView *)listView);
         } else if ([listView isKindOfClass:[UICollectionView class]]) {
-            foundPath = searchFileInCollectionView(ipaName, (UICollectionView *)listView);
+            foundPath = searchFileInCollectionView(ppName, (UICollectionView *)listView);
         }
 
         if (foundPath) {
@@ -906,13 +906,13 @@ static void performScrollAttempt(NSString *ipaName, UIScrollView *listView, NSIn
         }
 
         showToast([NSString stringWithFormat:@"继续查找... (%ld/%ld)", (long)(attempt + 1), (long)maxAttempts]);
-        performScrollAttempt(ipaName, listView, attempt + 1, maxAttempts, scrollStep);
+        performScrollAttempt(ppName, listView, attempt + 1, maxAttempts, scrollStep);
     });
 }
 
-static void autoClickRenamedFile(NSString *ipaName) {
-    if (!ipaName) return;
-    DLog(@"v10.16 Auto-clicking: %@", ipaName);
+static void autoClickRenamedFile(NSString *ppName) {
+    if (!ppName) return;
+    DLog(@"v10.17 Auto-clicking: %@", ppName);
 
     UIScrollView *listView = findListViewGlobally();
     if (!listView) {
@@ -924,9 +924,9 @@ static void autoClickRenamedFile(NSString *ipaName) {
 
     NSIndexPath *foundPath = nil;
     if ([listView isKindOfClass:[UITableView class]]) {
-        foundPath = searchFileInTableView(ipaName, (UITableView *)listView);
+        foundPath = searchFileInTableView(ppName, (UITableView *)listView);
     } else if ([listView isKindOfClass:[UICollectionView class]]) {
-        foundPath = searchFileInCollectionView(ipaName, (UICollectionView *)listView);
+        foundPath = searchFileInCollectionView(ppName, (UICollectionView *)listView);
     }
 
     if (foundPath) {
@@ -957,11 +957,11 @@ static void autoClickRenamedFile(NSString *ipaName) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         CGFloat scrollStep = listView.bounds.size.height * 0.7;
         if (scrollStep < 100) scrollStep = 100;
-        performScrollAttempt(ipaName, listView, 0, 15, scrollStep);
+        performScrollAttempt(ppName, listView, 0, 15, scrollStep);
     });
 }
 
-// ========== v10.16: Enhanced back button simulation ==========
+// ========== v10.17: Enhanced back button simulation ==========
 
 static void simulateBackButtonTap(void) {
     DLog(@"Simulating back button tap...");
@@ -1084,7 +1084,7 @@ static void simulateBackButtonTap(void) {
         DLog(@"Method 5: Global back button search...");
         __block UIView *backButton = nil;
 
-        void (^searchBackButton)(UIView *) = ^(UIView *view) {
+        __block void (^searchBackButton)(UIView *) = ^(UIView *view) {
             if (backButton) return;
 
             NSString *clsName = NSStringFromClass([view class]);
@@ -1253,8 +1253,8 @@ static void checkIfFileOpened(void) {
             }
 
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                NSString *ipaName = [gPendingRestoreOriginalName stringByAppendingString:@".ipa"];
-                autoClickRenamedFile(ipaName);
+                NSString *ppName = [gPendingRestoreOriginalName stringByAppendingString:@".pp"];
+                autoClickRenamedFile(ppName);
 
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     showToast(@"正在恢复原名...");
@@ -1303,23 +1303,23 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
     gPendingRestoreOriginalName = nil;
 
     NSString *ext = fileName.pathExtension.lowercaseString;
-    if ([ext isEqualToString:@"ipa"]) {
-        showToast(@"文件已是IPA，无需处理");
+    if ([ext isEqualToString:@"pp"]) {
+        showToast(@"文件已是PP，无需处理");
         return;
     }
 
-    NSString *ipaName = [fileName stringByAppendingString:@".ipa"];
-    NSString *ipaPath = [[filePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:ipaName];
+    NSString *ppName = [fileName stringByAppendingString:@".pp"];
+    NSString *ppPath = [[filePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:ppName];
 
     showToast(@"1. 重命名...");
-    renameFile(fileId, filePath, ipaName, ^(BOOL success, NSError *err) {
+    renameFile(fileId, filePath, ppName, ^(BOOL success, NSError *err) {
         if (!success) {
             showToast([NSString stringWithFormat:@"重命名失败: %@", err.localizedDescription]);
             return;
         }
 
         gPendingRestoreFileId = fileId;
-        gPendingRestorePdfPath = ipaPath;
+        gPendingRestorePdfPath = ppPath;
         gPendingRestoreOriginalName = fileName;
 
         showToast(@"2. 刷新第1次...");
@@ -1332,7 +1332,7 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 showToast(@"4. 尝试点击...");
                 startTapDetection();
-                autoClickRenamedFile(ipaName);
+                autoClickRenamedFile(ppName);
             });
         });
     });
@@ -1360,7 +1360,7 @@ static void triggerDownloadFlow(void) {
             return;
         }
         UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"选择文件"
-                                                                       message:@"选择后自动重命名为.ipa并刷新，自动点击文件打开后自动退出并重新点击，最后恢复原名"
+                                                                       message:@"选择后自动重命名为.pp并刷新，自动点击文件打开后自动退出并重新点击，最后恢复原名"
                                                                 preferredStyle:UIAlertControllerStyleActionSheet];
         for (NSDictionary *file in fileItems) {
             NSString *name = file[@"server_filename"];
@@ -1404,8 +1404,8 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 8 ? 8 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.16"
-                                                                   message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n智能流程：改名->刷新2次->自动点击->检测打开->自动退出->等待1秒->再次点击->恢复原名", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.17"
+                                                                   message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n智能流程：改名->.pp->刷新2次->自动点击->检测打开->自动退出->等待1秒->再次点击->恢复原名", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件"
                                                              style:UIAlertActionStyleDefault
@@ -1466,7 +1466,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v10.16 loaded - Two-Phase Edition");
+    DLog(@"BaiduPan Troll v10.17 loaded - PP Edition");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
