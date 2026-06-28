@@ -59,11 +59,7 @@ static void showFloatButton(void);
 // v10.18 Auto-click helpers
 static UIScrollView * findListViewInHierarchy(UIView *root);
 static UIScrollView * findListViewGlobally(void);
-static void sendTouchToView(UIView *targetView, CGPoint point);
 static void triggerGestureRecognizers(UIView *view);
-static void callSelectOnTableView(UITableView *tv, NSIndexPath *ip);
-static void executeClickOnCell(UITableViewCell *cell, NSIndexPath *ip, UITableView *tableView);
-static void executeClickOnCollectionCell(UICollectionViewCell *cell, NSIndexPath *ip, UICollectionView *collectionView);
 static NSIndexPath * searchFileInTableView(NSString *targetName, UITableView *tv);
 static NSIndexPath * searchFileInCollectionView(NSString *targetName, UICollectionView *cv);
 static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInteger attempt, NSInteger maxAttempts, CGFloat scrollStep);
@@ -649,34 +645,6 @@ static UIScrollView * findListViewGlobally(void) {
     return nil;
 }
 
-static void sendTouchToView(UIView *targetView, CGPoint point) {
-    if (!targetView) return;
-    @try {
-        UITouch *touch = [[UITouch alloc] init];
-        [touch setValue:@(UITouchPhaseBegan) forKey:@"phase"];
-        [touch setValue:@(1) forKey:@"tapCount"];
-        [touch setValue:targetView forKey:@"view"];
-        [touch setValue:targetView.window forKey:@"window"];
-
-        CGPoint loc = [targetView convertPoint:point toView:targetView.window];
-        NSValue *locValue = [NSValue valueWithCGPoint:loc];
-        [touch setValue:locValue forKey:@"locationInWindow"];
-
-        UIEvent *event = [[UIEvent alloc] init];
-        [event setValue:touch forKey:@"_firstTouchForView"];
-        [event setValue:[NSSet setWithObject:touch] forKey:@"_allTouches"];
-
-        [targetView touchesBegan:[NSSet setWithObject:touch] withEvent:event];
-
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.08 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [touch setValue:@(UITouchPhaseEnded) forKey:@"phase"];
-            [targetView touchesEnded:[NSSet setWithObject:touch] withEvent:event];
-        });
-    } @catch (NSException *e) {
-        DLog(@"Touch send failed: %@", e.reason);
-    }
-}
-
 static void triggerGestureRecognizers(UIView *view) {
     if (!view) return;
     @try {
@@ -692,107 +660,6 @@ static void triggerGestureRecognizers(UIView *view) {
             triggerGestureRecognizers(sub);
         }
     } @catch (NSException *e) {}
-}
-
-static void callSelectOnTableView(UITableView *tv, NSIndexPath *ip) {
-    if (!tv || !ip) return;
-    @try {
-        id delegate = tv.delegate;
-        if (delegate && [delegate respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) {
-            DLog(@"Calling delegate didSelectRowAtIndexPath:");
-            NSMethodSignature *sig = [delegate methodSignatureForSelector:@selector(tableView:didSelectRowAtIndexPath:)];
-            if (sig) {
-                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                [inv setSelector:@selector(tableView:didSelectRowAtIndexPath:)];
-                [inv setTarget:delegate];
-                id tvArg = tv;
-                id ipArg = ip;
-                [inv setArgument:&tvArg atIndex:2];
-                [inv setArgument:&ipArg atIndex:3];
-                [inv invoke];
-            }
-        }
-
-        SEL selectSel = NSSelectorFromString(@"_selectRowAtIndexPath:animated:scrollPosition:notifyDelegate:");
-        if ([tv respondsToSelector:selectSel]) {
-            DLog(@"Calling _selectRowAtIndexPath:animated:scrollPosition:notifyDelegate:");
-            NSMethodSignature *sig = [tv methodSignatureForSelector:selectSel];
-            if (sig) {
-                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                [inv setSelector:selectSel];
-                [inv setTarget:tv];
-                id ipArg = ip;
-                BOOL animated = YES;
-                NSInteger scrollPos = UITableViewScrollPositionNone;
-                BOOL notify = YES;
-                [inv setArgument:&ipArg atIndex:2];
-                [inv setArgument:&animated atIndex:3];
-                [inv setArgument:&scrollPos atIndex:4];
-                [inv setArgument:&notify atIndex:5];
-                [inv invoke];
-            }
-        }
-
-        [tv selectRowAtIndexPath:ip animated:YES scrollPosition:UITableViewScrollPositionNone];
-
-    } @catch (NSException *e) {
-        DLog(@"TableView select failed: %@", e.reason);
-    }
-}
-
-static void executeClickOnCell(UITableViewCell *cell, NSIndexPath *ip, UITableView *tableView) {
-    if (!cell || !ip || !tableView) return;
-    DLog(@"Executing click on cell at %@", ip);
-
-    CGPoint center = CGPointMake(cell.bounds.size.width / 2, cell.bounds.size.height / 2);
-
-    if (cell.contentView) {
-        DLog(@"Touch layer 1: contentView");
-        sendTouchToView(cell.contentView, center);
-    }
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        DLog(@"Touch layer 2: cell");
-        sendTouchToView(cell, center);
-
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            DLog(@"Touch layer 3: delegate + gestures");
-            callSelectOnTableView(tableView, ip);
-            triggerGestureRecognizers(cell);
-            showToast(@"已自动点击文件");
-        });
-    });
-}
-
-static void executeClickOnCollectionCell(UICollectionViewCell *cell, NSIndexPath *ip, UICollectionView *collectionView) {
-    if (!cell || !ip || !collectionView) return;
-    DLog(@"Executing click on collection cell at %@", ip);
-    CGPoint center = CGPointMake(cell.bounds.size.width / 2, cell.bounds.size.height / 2);
-    if (cell.contentView) {
-        sendTouchToView(cell.contentView, center);
-    }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        sendTouchToView(cell, center);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            id delegate = collectionView.delegate;
-            if (delegate && [delegate respondsToSelector:@selector(collectionView:didSelectItemAtIndexPath:)]) {
-                NSMethodSignature *sig = [delegate methodSignatureForSelector:@selector(collectionView:didSelectItemAtIndexPath:)];
-                if (sig) {
-                    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                    [inv setSelector:@selector(collectionView:didSelectItemAtIndexPath:)];
-                    [inv setTarget:delegate];
-                    id cvArg = collectionView;
-                    id ipArg = ip;
-                    [inv setArgument:&cvArg atIndex:2];
-                    [inv setArgument:&ipArg atIndex:3];
-                    [inv invoke];
-                }
-            }
-            [collectionView selectItemAtIndexPath:ip animated:YES scrollPosition:UICollectionViewScrollPositionNone];
-            triggerGestureRecognizers(cell);
-            showToast(@"已自动点击文件");
-        });
-    });
 }
 
 // ========== v10.18 CORE: Auto-click renamed file ==========
@@ -902,11 +769,11 @@ static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInt
 
 // ========== v10.18: Back button finder (no recursive block) ==========
 
-// ========== v10.26: Scroll to file and wait for user tap ==========
+// ========== v10.27: Scroll to file and wait for user tap ==========
 
 static void scrollToRenamedFile(NSString *ppName) {
     if (!ppName) return;
-    DLog(@"v10.26 Scrolling to file: %@", ppName);
+    DLog(@"v10.27 Scrolling to file: %@", ppName);
 
     UIScrollView *listView = findListViewGlobally();
     if (!listView) {
