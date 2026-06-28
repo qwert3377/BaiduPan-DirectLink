@@ -1,9 +1,8 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v8.5
-//  Fix: forceRefreshFileList now supports BaiduPan-specific refresh components
-//       (MJRefreshHeader, EGORefreshTableHeaderView, BDPanRefreshBackNormalFooter)
-//  Fix: Replaced fixed 4s delay with polling-based file existence check after rename
-//  Fix: Added recursive scrollView discovery and notification broadcast fallback
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v8.5.1
+//  Fix: Removed goto (ARC forbids jumping over __strong var init)
+//  Fix: Extracted notification fallback into separate function
+//  Fix: Verified all parentheses matching
 //
 
 #import <UIKit/UIKit.h>
@@ -324,7 +323,7 @@ static void showToast(NSString *msg) {
     });
 }
 
-// ========== v8.5 刷新修复 ==========
+// ========== v8.5.1 刷新修复 (无goto) ==========
 
 static UIScrollView * findScrollViewInView(UIView *view) {
     if ([view isKindOfClass:[UIScrollView class]]) return (UIScrollView *)view;
@@ -350,6 +349,49 @@ static void triggerMJRefresh(id headerOrFooter) {
         #pragma clang diagnostic push
         #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
         [headerOrFooter performSelector:executeSel];
+        #pragma clang diagnostic pop
+    }
+}
+
+static void triggerNotificationFallback(void) {
+    DLog(@"Falling back to notification broadcast");
+    NSArray *notifNames = @[
+        @"BDPanRefreshFileListNotification",
+        @"BDPanReloadFileListNotification",
+        @"kRefreshFileListNotification",
+        @"kReloadDataNotification",
+        @"RefreshFileListNotification",
+        @"com.baidu.pan.refreshFileList"
+    ];
+    for (NSString *name in notifNames) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:name object:nil userInfo:@{@"path": gCurrentPath ?: @"/"}];
+    }
+}
+
+static void triggerEGORefresh(UIView *subview, UIScrollView *scrollView) {
+    SEL egoScrollSel = NSSelectorFromString(@"egoRefreshScrollViewDidScroll:");
+    SEL egoDragSel = NSSelectorFromString(@"egoRefreshScrollViewDidEndDragging:");
+    if ([subview respondsToSelector:egoScrollSel]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        [subview performSelector:egoScrollSel withObject:scrollView];
+        if ([subview respondsToSelector:egoDragSel]) {
+            [subview performSelector:egoDragSel withObject:scrollView];
+        }
+        #pragma clang diagnostic pop
+    }
+}
+
+static void triggerBDWalletRefresh(UIView *subview, UIScrollView *scrollView) {
+    SEL bdScrollSel = NSSelectorFromString(@"BDWalletRefreshScrollViewDidScroll:");
+    SEL bdDragSel = NSSelectorFromString(@"BDWalletRefreshScrollViewDidEndDragging:");
+    if ([subview respondsToSelector:bdScrollSel]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        [subview performSelector:bdScrollSel withObject:scrollView];
+        if ([subview respondsToSelector:bdDragSel]) {
+            [subview performSelector:bdDragSel withObject:scrollView];
+        }
         #pragma clang diagnostic pop
     }
 }
@@ -382,7 +424,8 @@ static void forceRefreshFileList(void) {
     UIScrollView *scrollView = findScrollViewInView(vc.view);
     if (!scrollView) {
         DLog(@"No scrollView found in VC, trying notification fallback");
-        goto NOTIFICATION_FALLBACK;
+        triggerNotificationFallback();
+        return;
     }
 
     // 2.1 标准UIRefreshControl
@@ -430,52 +473,20 @@ static void forceRefreshFileList(void) {
             }
 
             // 尝试 EGO 协议方法
-            SEL egoScrollSel = NSSelectorFromString(@"egoRefreshScrollViewDidScroll:");
-            SEL egoDragSel = NSSelectorFromString(@"egoRefreshScrollViewDidEndDragging:");
-            if ([subview respondsToSelector:egoScrollSel]) {
-                #pragma clang diagnostic push
-                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                [subview performSelector:egoScrollSel withObject:scrollView];
-                if ([subview respondsToSelector:egoDragSel]) {
-                    [subview performSelector:egoDragSel withObject:scrollView];
-                }
-                #pragma clang diagnostic pop
-                return;
-            }
+            triggerEGORefresh(subview, scrollView);
+            if ([className containsString:@"EGORefresh"]) return;
 
             // 尝试 BDWallet 协议方法
-            SEL bdScrollSel = NSSelectorFromString(@"BDWalletRefreshScrollViewDidScroll:");
-            SEL bdDragSel = NSSelectorFromString(@"BDWalletRefreshScrollViewDidEndDragging:");
-            if ([subview respondsToSelector:bdScrollSel]) {
-                #pragma clang diagnostic push
-                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                [subview performSelector:bdScrollSel withObject:scrollView];
-                if ([subview respondsToSelector:bdDragSel]) {
-                    [subview performSelector:bdDragSel withObject:scrollView];
-                }
-                #pragma clang diagnostic pop
-                return;
-            }
+            triggerBDWalletRefresh(subview, scrollView);
+            if ([className containsString:@"BDWalletRefresh"]) return;
         }
     }
 
-NOTIFICATION_FALLBACK:
-    // 3. 广播通知（部分版本通过通知触发刷新）
-    DLog(@"Falling back to notification broadcast");
-    NSArray *notifNames = @[
-        @"BDPanRefreshFileListNotification",
-        @"BDPanReloadFileListNotification",
-        @"kRefreshFileListNotification",
-        @"kReloadDataNotification",
-        @"RefreshFileListNotification",
-        @"com.baidu.pan.refreshFileList"
-    ];
-    for (NSString *name in notifNames) {
-        [[NSNotificationCenter defaultCenter] postNotificationName:name object:nil userInfo:@{@"path": gCurrentPath ?: @"/"}];
-    }
+    // 3. 通知兜底
+    triggerNotificationFallback();
 }
 
-// ========== v8.5 轮询确认文件存在 ==========
+// ========== v8.5.1 轮询确认文件存在 ==========
 
 static void pollForFileExistence(NSString *expectedPath, NSString *fileId, NSString *originalName, NSInteger attempt, void (^completion)(BOOL found, NSError *err)) {
     if (attempt > 15) {
@@ -501,14 +512,13 @@ static void pollForFileExistence(NSString *expectedPath, NSString *fileId, NSStr
                 }
             }
         }
-        // 未找到，继续轮询
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             pollForFileExistence(expectedPath, fileId, originalName, attempt + 1, completion);
         });
     });
 }
 
-// ========== v8.4/v8.5 UI Dialog ==========
+// ========== v8.5.1 UI Dialog ==========
 
 static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId, NSString *pdfPath, BOOL needsRestore) {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"直链已复制"
@@ -601,7 +611,6 @@ static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString
         weakProgress.message = @"2. 刷新文件列表...";
         forceRefreshFileList();
 
-        // v8.5: 使用轮询代替固定 4 秒等待
         weakProgress.message = @"3. 等待文件列表同步...";
         pollForFileExistence(pdfPath, fileId, fileName, 0, ^(BOOL found, NSError *pollErr) {
             if (!found) {
@@ -699,7 +708,7 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 16 ? 16 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v8.5"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v8.5.1"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"📥 获取直链" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
@@ -755,7 +764,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v8.5 loaded");
+    DLog(@"BaiduPan Troll v8.5.1 loaded");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
