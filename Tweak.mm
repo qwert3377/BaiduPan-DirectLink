@@ -59,7 +59,6 @@ static void showFloatButton(void);
 // v10.18 Auto-click helpers
 static UIScrollView * findListViewInHierarchy(UIView *root);
 static UIScrollView * findListViewGlobally(void);
-static void triggerGestureRecognizers(UIView *view);
 static NSIndexPath * searchFileInTableView(NSString *targetName, UITableView *tv);
 static NSIndexPath * searchFileInCollectionView(NSString *targetName, UICollectionView *cv);
 static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInteger attempt, NSInteger maxAttempts, CGFloat scrollStep);
@@ -645,22 +644,6 @@ static UIScrollView * findListViewGlobally(void) {
     return nil;
 }
 
-static void triggerGestureRecognizers(UIView *view) {
-    if (!view) return;
-    @try {
-        NSArray *gestures = view.gestureRecognizers;
-        for (UIGestureRecognizer *gr in gestures) {
-            if ([gr isKindOfClass:[UITapGestureRecognizer class]]) {
-                DLog(@"Triggering tap gesture on view");
-                gr.enabled = YES;
-                [gr setValue:@(UIGestureRecognizerStateEnded) forKey:@"state"];
-            }
-        }
-        for (UIView *sub in view.subviews) {
-            triggerGestureRecognizers(sub);
-        }
-    } @catch (NSException *e) {}
-}
 
 // ========== v10.18 CORE: Auto-click renamed file ==========
 
