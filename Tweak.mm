@@ -49,7 +49,7 @@ static void triggerDownloadFlow(void);
 static void onFloatButtonTap(void);
 static void showFloatButton(void);
 
-// ========== v10.13 Auto-click helpers ==========
+// ========== v10.14 Auto-click helpers ==========
 static UIView * findViewRecursively(UIView *root, Class targetClass);
 static void sendTouchToView(UIView *targetView, CGPoint point) {
     if (!targetView) return;
@@ -759,7 +759,7 @@ static void scrollToFileLocation(NSString *fileName) {
     }
 }
 
-// ========== v10.13 Auto-click helpers ==========
+// ========== v10.14 Auto-click helpers ==========
 
 static UIView * findViewRecursively(UIView *root, Class targetClass) {
     if (!root) return nil;
@@ -771,7 +771,7 @@ static UIView * findViewRecursively(UIView *root, Class targetClass) {
     return nil;
 }
 
-// ========== v10.13 CORE: Auto-click renamed file (rebuilt) ==========
+// ========== v10.14 CORE: Auto-click renamed file (rebuilt) ==========
 
 // Helper: search for file in currently visible cells, scanning from bottom-up
 static NSIndexPath * searchFileInTableView(NSString *targetName, UITableView *tv) {
@@ -802,7 +802,7 @@ static NSIndexPath * searchFileInTableView(NSString *targetName, UITableView *tv
 // Helper: search for file in currently visible UITableView cells, scanning from bottom-up
 static void autoClickRenamedFile(NSString *ipaName) {
     if (!ipaName) return;
-    DLog(@"v10.13 Auto-clicking: %@", ipaName);
+    DLog(@"v10.14 Auto-clicking: %@", ipaName);
 
     UIViewController *vc = topViewController();
     if (!vc) {
@@ -831,100 +831,160 @@ static void autoClickRenamedFile(NSString *ipaName) {
     NSIndexPath *foundPath = searchFileInTableView(ipaName, tableView);
 
     if (foundPath) {
-        DLog(@"File found immediately, scrolling to visible...");
-
-        CGRect cellRect = [tableView rectForRowAtIndexPath:foundPath];
-        CGRect visibleRect = CGRectMake(0, cellRect.origin.y - 100, tableView.bounds.size.width, cellRect.size.height + 200);
-        [tableView scrollRectToVisible:visibleRect animated:YES];
-
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [tableView scrollToRowAtIndexPath:foundPath atScrollPosition:UITableViewScrollPositionMiddle animated:YES];
-        });
-
-        showToast(@"正在滚动到文件...");
-
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            NSIndexPath *finalPath = searchFileInTableView(ipaName, tableView);
-            if (finalPath) {
-                UITableViewCell *cell = [tableView cellForRowAtIndexPath:finalPath];
-                if (cell) {
-                    executeClickOnCell(cell, finalPath, tableView);
-                } else {
-                    DLog(@"Cell became nil after scroll");
-                    showToast(@"文件未显示，请手动点击");
-                }
-            } else {
-                showToast(@"文件未显示，请手动点击");
-            }
-        });
+        DLog(@"File found immediately, clicking...");
+        UITableViewCell *cell = [tableView cellForRowAtIndexPath:foundPath];
+        if (cell) {
+            executeClickOnCell(cell, foundPath, tableView);
+        } else {
+            showToast(@"文件未显示，请手动点击");
+        }
         return;
     }
 
-    // File not found. Try clicking sort button to show latest files first.
-    DLog(@"File not found, trying to click sort button...");
-    showToast(@"正在切换排序方式...");
+    // File not found. Simulate swipe gesture to scroll down and reveal more content.
+    DLog(@"File not found, simulating swipe to scroll down...");
+    showToast(@"正在向下滚动查找文件...");
 
-    // Find and click the sort button ("按修改时间" or similar)
-    UIView *sortButton = findViewWithText(vc.view, @"按修改时间");
-    if (!sortButton) {
-        sortButton = findViewWithText(vc.view, @"时间");
-    }
-    if (!sortButton) {
-        sortButton = findViewWithText(vc.view, @"排序");
-    }
+    __block NSInteger swipeCount = 0;
+    NSInteger maxSwipes = 20;
 
-    if (sortButton) {
-        DLog(@"Found sort button, clicking...");
-        CGPoint center = CGPointMake(CGRectGetMidX(sortButton.bounds), CGRectGetMidY(sortButton.bounds));
-        sendTouchToView(sortButton, center);
+    // Simulate swipe gesture on the table view
+    void (^simulateSwipeDown)(UIView *) = ^(UIView *targetView) {
+        if (!targetView) return;
 
-        // Wait for sort menu to appear, then click "修改时间" option
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            // Try to find "修改时间" option in the dropdown
-            UIView *timeOption = findViewWithText(vc.view, @"修改时间");
-            if (timeOption) {
-                CGPoint optCenter = CGPointMake(CGRectGetMidX(timeOption.bounds), CGRectGetMidY(timeOption.bounds));
-                sendTouchToView(timeOption, optCenter);
-                DLog(@"Clicked 修改时间 sort option");
+        CGPoint startPoint = CGPointMake(targetView.bounds.size.width / 2, targetView.bounds.size.height * 0.7);
+        CGPoint endPoint = CGPointMake(targetView.bounds.size.width / 2, targetView.bounds.size.height * 0.3);
+
+        // Create touch
+        UITouch *touch = [[UITouch alloc] init];
+        // Use KVC to set properties since init is not the designated initializer
+        [touch setValue:[NSValue valueWithCGPoint:startPoint] forKey:@"windowPos"];
+        [touch setValue:targetView.window forKey:@"window"];
+        [touch setValue:@(0) forKey:@"phase"];
+        [touch setValue:@(1) forKey:@"tapCount"];
+        [touch setValue:[NSDate date] forKey:@"timestamp"];
+
+        // Create event
+        UIEvent *event = [[UIEvent alloc] init];
+        [event setValue:@(0) forKey:@"type"];
+        [event setValue:@(0) forKey:@"subtype"];
+
+        // Send touches began
+        [targetView touchesBegan:[NSSet setWithObject:touch] withEvent:event];
+
+        // Move touch
+        [touch setValue:@(1) forKey:@"phase"]; // UITouchPhaseMoved
+        [touch setValue:[NSValue valueWithCGPoint:endPoint] forKey:@"windowPos"];
+        [targetView touchesMoved:[NSSet setWithObject:touch] withEvent:event];
+
+        // End touch
+        [touch setValue:@(3) forKey:@"phase"]; // UITouchPhaseEnded
+        [targetView touchesEnded:[NSSet setWithObject:touch] withEvent:event];
+
+        DLog(@"Simulated swipe from (%.0f, %.0f) to (%.0f, %.0f)", startPoint.x, startPoint.y, endPoint.x, endPoint.y);
+    };
+
+    // Alternative: use pan gesture recognizer if available
+    void (^triggerPanGesture)(UIView *) = ^(UIView *targetView) {
+        if (!targetView) return;
+        for (UIGestureRecognizer *gesture in targetView.gestureRecognizers) {
+            if ([gesture isKindOfClass:[UIPanGestureRecognizer class]]) {
+                UIPanGestureRecognizer *pan = (UIPanGestureRecognizer *)gesture;
+                // Simulate pan by setting translation
+                CGPoint translation = CGPointMake(0, -targetView.bounds.size.height * 0.5);
+                [pan setTranslation:translation inView:targetView];
+                DLog(@"Triggered pan gesture on %@", NSStringFromClass([targetView class]));
+                break;
             }
+        }
+    };
 
-            // Wait for list to refresh with new sort order
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                [tableView layoutIfNeeded];
-                NSIndexPath *sortedPath = searchFileInTableView(ipaName, tableView);
+    // Try both methods
+    simulateSwipeDown(tableView);
+    triggerPanGesture(tableView);
 
-                if (sortedPath) {
-                    DLog(@"File found after sorting!");
-
-                    CGRect cellRect = [tableView rectForRowAtIndexPath:sortedPath];
-                    CGRect visibleRect = CGRectMake(0, cellRect.origin.y - 100, tableView.bounds.size.width, cellRect.size.height + 200);
-                    [tableView scrollRectToVisible:visibleRect animated:YES];
-
-                    showToast(@"找到文件，正在滚动...");
-
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                        NSIndexPath *finalPath = searchFileInTableView(ipaName, tableView);
-                        if (finalPath) {
-                            UITableViewCell *cell = [tableView cellForRowAtIndexPath:finalPath];
-                            if (cell) {
-                                executeClickOnCell(cell, finalPath, tableView);
-                            } else {
-                                showToast(@"文件未显示，请手动点击");
-                            }
-                        } else {
-                            showToast(@"文件未显示，请手动点击");
-                        }
-                    });
-                } else {
-                    DLog(@"File still not found after sorting");
-                    showToast(@"未找到文件，请手动查找");
-                }
-            });
-        });
-    } else {
-        DLog(@"No sort button found");
-        showToast(@"未找到排序按钮，请手动滚动查找");
+    // Also try on parent scroll view
+    UIView *parent = tableView.superview;
+    while (parent) {
+        if ([parent isKindOfClass:[UIScrollView class]]) {
+            simulateSwipeDown(parent);
+            triggerPanGesture(parent);
+            break;
+        }
+        parent = parent.superview;
     }
+
+    // Check if file is now visible after swipe
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [tableView layoutIfNeeded];
+        NSIndexPath *path = searchFileInTableView(ipaName, tableView);
+
+        if (path) {
+            DLog(@"File found after swipe!");
+            UITableViewCell *cell = [tableView cellForRowAtIndexPath:path];
+            if (cell) {
+                executeClickOnCell(cell, path, tableView);
+            } else {
+                showToast(@"文件未显示，请手动点击");
+            }
+            return;
+        }
+
+        // Continue swiping
+        swipeCount++;
+        if (swipeCount >= maxSwipes) {
+            DLog(@"Max swipes reached");
+            showToast(@"未找到文件，请手动滚动查找");
+            return;
+        }
+
+        showToast([NSString stringWithFormat:@"继续向下滚动... (%ld/%ld)", (long)swipeCount, (long)maxSwipes]);
+
+        // Schedule next swipe
+        simulateSwipeDown(tableView);
+        triggerPanGesture(tableView);
+
+        // Recursively check again
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [tableView layoutIfNeeded];
+            NSIndexPath *retryPath = searchFileInTableView(ipaName, tableView);
+            if (retryPath) {
+                UITableViewCell *cell = [tableView cellForRowAtIndexPath:retryPath];
+                if (cell) {
+                    executeClickOnCell(cell, retryPath, tableView);
+                } else {
+                    showToast(@"文件未显示，请手动点击");
+                }
+            } else if (swipeCount < maxSwipes) {
+                // Trigger another swipe via timer
+                NSTimer *swipeTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
+                                                                           target:[NSBlockOperation blockOperationWithBlock:^{
+                    simulateSwipeDown(tableView);
+                    triggerPanGesture(tableView);
+                    swipeCount++;
+                    if (swipeCount >= maxSwipes) {
+                        showToast(@"未找到文件，请手动滚动查找");
+                        return;
+                    }
+                    [tableView layoutIfNeeded];
+                    NSIndexPath *timerPath = searchFileInTableView(ipaName, tableView);
+                    if (timerPath) {
+                        UITableViewCell *cell = [tableView cellForRowAtIndexPath:timerPath];
+                        if (cell) {
+                            executeClickOnCell(cell, timerPath, tableView);
+                        }
+                    } else {
+                        showToast([NSString stringWithFormat:@"继续向下滚动... (%ld/%ld)", (long)swipeCount, (long)maxSwipes]);
+                    }
+                }]
+                                                                           selector:@selector(main)
+                                                                           userInfo:nil
+                                                                            repeats:YES];
+            } else {
+                showToast(@"未找到文件，请手动滚动查找");
+            }
+        });
+    });
 }
 
 // ========== Tap Detection ==========
@@ -1162,7 +1222,7 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 8 ? 8 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.13"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.14"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n智能流程：改名->刷新2次->自动点击->检测打开->自动恢复", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件"
@@ -1224,7 +1284,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v10.13 loaded - Auto-Click Edition");
+    DLog(@"BaiduPan Troll v10.14 loaded - Auto-Click Edition");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
