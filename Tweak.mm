@@ -929,7 +929,7 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
         return;
     }
 
-    NSString *ppName = [fileName stringByAppendingString:@".pp"];
+    NSString *ppName = [@"🔴 " stringByAppendingString:[fileName stringByAppendingString:@".pp"]];
     NSString *ppPath = [[filePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:ppName];
 
     showToast(@"1. 重命名...");
@@ -951,7 +951,7 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
             forceRefreshFileList();
 
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                showToast(@"4. 滚动到文件位置，请手动点击");
+                showToast(@"🔴 请找到红色标记的文件并点击进入");
                 startTapDetection();
                 scrollToRenamedFile(ppName);
             });
