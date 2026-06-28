@@ -1004,43 +1004,63 @@ static void checkIfFileOpened(void) {
     NSString *currentClass = topVCClassName();
     NSString *currentTitle = topVCTitle();
 
-    DLog(@"Tap detection: nav=%ld->%ld class=[%@]->[%@] title=[%@]->[%@]", 
+    DLog(@"Tap detection: nav=%ld->%ld class=[%@]->[%@] title=[%@]->[%@] hasOpened=%d", 
          (long)gNavStackCount, (long)currentCount,
          gInitialTopVCClass, currentClass,
-         gInitialTopVCTitle, currentTitle);
+         gInitialTopVCTitle, currentTitle, gHasOpenedFile);
 
-    if (currentCount > gNavStackCount) {
-        DLog(@"File opened detected (nav stack increased)! Restoring...");
-        stopTapDetection();
-        showToast(@"检测到文件已打开，正在恢复原名...");
-        executeRestore();
-        return;
+    // Phase 1: Detect file opened (nav stack increased or VC changed to preview)
+    if (!gHasOpenedFile) {
+        if (currentCount > gNavStackCount) {
+            DLog(@"Phase 1: File opened (nav stack increased)!");
+            gHasOpenedFile = YES;
+            showToast(@"文件已打开，退出后将继续...");
+            return;
+        }
+
+        if (gInitialTopVCClass && ![gInitialTopVCClass isEqualToString:currentClass]) {
+            DLog(@"Phase 1: File opened (VC class changed)!");
+            gHasOpenedFile = YES;
+            showToast(@"文件已打开，退出后将继续...");
+            return;
+        }
+
+        if (gPendingRestoreOriginalName && currentTitle && [currentTitle containsString:gPendingRestoreOriginalName]) {
+            DLog(@"Phase 1: File opened (title matches file name)!");
+            gHasOpenedFile = YES;
+            showToast(@"文件已打开，退出后将继续...");
+            return;
+        }
+
+        if (currentTitle && ([currentTitle containsString:@"预览"] || [currentTitle containsString:@"下载"] || [currentTitle containsString:@"文件详情"])) {
+            DLog(@"Phase 1: File opened (preview title)!");
+            gHasOpenedFile = YES;
+            showToast(@"文件已打开，退出后将继续...");
+            return;
+        }
     }
+    // Phase 2: User exited preview, re-click then restore
+    else {
+        BOOL navBack = (currentCount == gNavStackCount);
+        BOOL classBack = (gInitialTopVCClass && [gInitialTopVCClass isEqualToString:currentClass]);
 
-    if (gInitialTopVCClass && ![gInitialTopVCClass isEqualToString:currentClass]) {
-        DLog(@"File opened detected (VC class changed)! Restoring...");
-        stopTapDetection();
-        showToast(@"检测到文件已打开，正在恢复原名...");
-        executeRestore();
-        return;
+        DLog(@"Phase 2 check: navBack=%d classBack=%d", navBack, classBack);
+
+        if (navBack && classBack) {
+            DLog(@"Phase 2: User exited, re-clicking...");
+            showToast(@"检测到已退出，重新点击...");
+
+            NSString *ipaName = [gPendingRestoreOriginalName stringByAppendingString:@".ipa"];
+            autoClickRenamedFile(ipaName);
+
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                stopTapDetection();
+                showToast(@"正在恢复原名...");
+                executeRestore();
+            });
+            return;
+        }
     }
-
-    if (gPendingRestoreOriginalName && currentTitle && [currentTitle containsString:gPendingRestoreOriginalName]) {
-        DLog(@"File opened detected (title matches file name)! Restoring...");
-        stopTapDetection();
-        showToast(@"检测到文件已打开，正在恢复原名...");
-        executeRestore();
-        return;
-    }
-
-    if (currentTitle && ([currentTitle containsString:@"预览"] || [currentTitle containsString:@"下载"] || [currentTitle containsString:@"文件详情"])) {
-        DLog(@"File opened detected (preview title)! Restoring...");
-        stopTapDetection();
-        showToast(@"检测到文件已打开，正在恢复原名...");
-        executeRestore();
-        return;
-    }
-
 }
 
 static void startTapDetection(void) {
