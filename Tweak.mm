@@ -51,7 +51,7 @@ static void startTapDetection(void);
 static void stopTapDetection(void);
 static void checkIfFileOpened(void);
 static void executeRestore(void);
-static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileId);
+static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileId, NSNumber *fileSize);
 static void triggerDownloadFlow(void);
 static void onFloatButtonTap(void);
 static void showFloatButton(void);
@@ -924,7 +924,7 @@ static void startTapDetection(void) {
 
 // ========== Smart Flow ==========
 
-static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileId) {
+static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileId, NSNumber *fileSize) {
     stopTapDetection();
     gPendingRestoreFileId = nil;
     gPendingRestorePdfPath = nil;
@@ -1003,7 +1003,7 @@ static void triggerDownloadFlow(void) {
             UIAlertAction *action = [UIAlertAction actionWithTitle:title
                                                                style:UIAlertActionStyleDefault
                                                              handler:^(UIAlertAction *action) {
-                runSmartFlow(name, path, fid);
+                runSmartFlow(name, path, fid, size);
             }];
             [sheet addAction:action];
         }
