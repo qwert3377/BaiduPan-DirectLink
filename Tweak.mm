@@ -925,6 +925,10 @@ static void startTapDetection(void) {
 // ========== Smart Flow ==========
 
 static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileId, NSNumber *fileSize) {
+    if (fileSize && [fileSize doubleValue] >= 300.0 * 1024.0 * 1024.0) {
+        showToast(@"⚠️ 该文件超过300MB，无法下载");
+        return;
+    }
     stopTapDetection();
     gPendingRestoreFileId = nil;
     gPendingRestorePdfPath = nil;
@@ -1000,11 +1004,19 @@ static void triggerDownloadFlow(void) {
                 double mb = [size doubleValue] / (1024.0 * 1024.0);
                 title = [NSString stringWithFormat:@"%@ (%.1f MB)", name, mb];
             }
+            BOOL isTooLarge = (size && [size doubleValue] >= 300.0 * 1024.0 * 1024.0);
             UIAlertAction *action = [UIAlertAction actionWithTitle:title
                                                                style:UIAlertActionStyleDefault
                                                              handler:^(UIAlertAction *action) {
+                if (isTooLarge) {
+                    showToast(@"⚠️ 该文件超过300MB，无法下载");
+                    return;
+                }
                 runSmartFlow(name, path, fid, size);
             }];
+            if (isTooLarge) {
+                [action setValue:@NO forKey:@"enabled"];
+            }
             [sheet addAction:action];
         }
         UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:@"取消"
