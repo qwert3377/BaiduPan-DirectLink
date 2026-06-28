@@ -1,8 +1,8 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v8.5.1
-//  Fix: Removed goto (ARC forbids jumping over __strong var init)
-//  Fix: Extracted notification fallback into separate function
-//  Fix: Verified all parentheses matching
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v8.5.2
+//  Fix: Bracket mismatch in showLinkDialog / runRenameAndGetLink
+//  Fix: Removed goto, extracted refresh fallbacks into separate functions
+//  Fix: Polling-based file existence check instead of fixed delay
 //
 
 #import <UIKit/UIKit.h>
@@ -14,6 +14,32 @@ static NSString *gCurrentPath = nil;
 static NSString *gBdstoken = nil;
 static NSString *gBDUSS = nil;
 static UIButton *gFloatButton = nil;
+
+// ========== Forward declarations ==========
+static UIViewController * topViewController(void);
+static NSString * strictEncodeURIComponent(NSString *str);
+static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *headers, NSString *body, void (^handler)(id json, NSError *err));
+static NSString * scanMemoryForBdstoken(void);
+static NSString * extractPathFromVC(UIViewController *vc);
+static NSString * buildPathFromNavStack(void);
+static void autoDetectPathAndToken(void);
+static void fetchFileList(void (^completion)(NSArray *files, NSError *err));
+static void renameFile(NSString *fileId, NSString *path, NSString *newName, void (^completion)(BOOL success, NSError *err));
+static NSString * digOutDlink(id obj);
+static void fetchDlinkViaFilemetas(NSString *filePath, NSInteger retryCount, void (^completion)(NSString *link, NSError *err));
+static void fetchDlinkViaLocatedownload(NSString *filePath, NSInteger retryCount, void (^completion)(NSString *link, NSError *err));
+static void fetchDirectLink(NSString *filePath, void (^completion)(NSString *link, NSError *err));
+static void copyToClipboard(NSString *text);
+static void showToast(NSString *msg);
+static void forceRefreshFileList(void);
+static void pollForFileExistence(NSString *expectedPath, NSString *fileId, NSString *originalName, NSInteger attempt, void (^completion)(BOOL found, NSError *err));
+static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId, NSString *pdfPath, BOOL needsRestore);
+static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString *fileId);
+static void triggerDownloadFlow(void);
+static void onFloatButtonTap(void);
+static void showFloatButton(void);
+
+// ========== Implementations ==========
 
 static UIViewController * topViewController(void) {
     UIWindow *window = nil;
@@ -323,7 +349,7 @@ static void showToast(NSString *msg) {
     });
 }
 
-// ========== v8.5.1 刷新修复 (无goto) ==========
+// ========== Refresh mechanism ==========
 
 static UIScrollView * findScrollViewInView(UIView *view) {
     if ([view isKindOfClass:[UIScrollView class]]) return (UIScrollView *)view;
@@ -400,7 +426,6 @@ static void forceRefreshFileList(void) {
     UIViewController *vc = topViewController();
     if (!vc) { DLog(@"No top VC for refresh"); return; }
 
-    // 1. 尝试调用百度网盘特定的刷新方法（无参数）
     NSArray *baiduSelectors = @[
         @"refreshFileList", @"reloadFileList", @"updateFileList",
         @"refreshData", @"reloadData", @"updateData",
@@ -420,7 +445,6 @@ static void forceRefreshFileList(void) {
         }
     }
 
-    // 2. 尝试找到UIScrollView并触发其刷新控件
     UIScrollView *scrollView = findScrollViewInView(vc.view);
     if (!scrollView) {
         DLog(@"No scrollView found in VC, trying notification fallback");
@@ -428,7 +452,6 @@ static void forceRefreshFileList(void) {
         return;
     }
 
-    // 2.1 标准UIRefreshControl
     if (scrollView.refreshControl) {
         DLog(@"Triggering UIRefreshControl");
         [scrollView.refreshControl beginRefreshing];
@@ -442,7 +465,6 @@ static void forceRefreshFileList(void) {
         return;
     }
 
-    // 2.2 MJRefreshHeader / MJRefreshFooter (KVC)
     id mjHeader = nil;
     id mjFooter = nil;
     @try {
@@ -452,7 +474,6 @@ static void forceRefreshFileList(void) {
     if (mjHeader) { triggerMJRefresh(mjHeader); return; }
     if (mjFooter) { triggerMJRefresh(mjFooter); return; }
 
-    // 2.3 EGORefreshTableHeaderView / BDPanRefresh / BDWalletRefresh
     for (UIView *subview in scrollView.subviews) {
         NSString *className = NSStringFromClass([subview class]);
         if ([className containsString:@"RefreshHeader"] ||
@@ -463,7 +484,6 @@ static void forceRefreshFileList(void) {
             [className containsString:@"DimeCircleRefresh"]) {
             DLog(@"Found refresh component: %@", className);
 
-            // 尝试 beginRefreshing
             if ([subview respondsToSelector:@selector(beginRefreshing)]) {
                 #pragma clang diagnostic push
                 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
@@ -472,21 +492,18 @@ static void forceRefreshFileList(void) {
                 return;
             }
 
-            // 尝试 EGO 协议方法
             triggerEGORefresh(subview, scrollView);
             if ([className containsString:@"EGORefresh"]) return;
 
-            // 尝试 BDWallet 协议方法
             triggerBDWalletRefresh(subview, scrollView);
             if ([className containsString:@"BDWalletRefresh"]) return;
         }
     }
 
-    // 3. 通知兜底
     triggerNotificationFallback();
 }
 
-// ========== v8.5.1 轮询确认文件存在 ==========
+// ========== Polling ==========
 
 static void pollForFileExistence(NSString *expectedPath, NSString *fileId, NSString *originalName, NSInteger attempt, void (^completion)(BOOL found, NSError *err)) {
     if (attempt > 15) {
@@ -518,7 +535,7 @@ static void pollForFileExistence(NSString *expectedPath, NSString *fileId, NSStr
     });
 }
 
-// ========== v8.5.1 UI Dialog ==========
+// ========== UI Dialog ==========
 
 static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId, NSString *pdfPath, BOOL needsRestore) {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"直链已复制"
@@ -540,20 +557,34 @@ static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId,
     }];
 
     if (needsRestore) {
-        [alert addAction:[UIAlertAction actionWithTitle:@"📋 再次复制并恢复原名" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        UIAlertAction *copyRestoreAction = [UIAlertAction actionWithTitle:@"再次复制并恢复原名"
+                                                                    style:UIAlertActionStyleDefault
+                                                                  handler:^(UIAlertAction *a) {
             copyToClipboard(link);
             showToast(@"直链已再次复制！");
             renameFile(fileId, pdfPath, fileName, ^(BOOL ok, NSError *e) {
                 DLog(@"Restore: %@", ok ? @"OK" : e.localizedDescription);
             });
-        }]];
-        [alert addAction:[UIAlertAction actionWithTitle:@"保持pdf后缀" style:UIAlertActionStyleCancel handler:nil]];
+        }];
+        [alert addAction:copyRestoreAction];
+
+        UIAlertAction *keepPdfAction = [UIAlertAction actionWithTitle:@"保持pdf后缀"
+                                                                style:UIAlertActionStyleCancel
+                                                              handler:nil];
+        [alert addAction:keepPdfAction];
     } else {
-        [alert addAction:[UIAlertAction actionWithTitle:@"📋 再次复制" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        UIAlertAction *copyAgainAction = [UIAlertAction actionWithTitle:@"再次复制"
+                                                                    style:UIAlertActionStyleDefault
+                                                                  handler:^(UIAlertAction *a) {
             copyToClipboard(link);
             showToast(@"直链已再次复制！");
-        }]];
-        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+        }];
+        [alert addAction:copyAgainAction];
+
+        UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"OK"
+                                                           style:UIAlertActionStyleCancel
+                                                         handler:nil];
+        [alert addAction:okAction];
     }
 
     UIViewController *vc = topViewController();
@@ -566,7 +597,9 @@ static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString
 
     if (isAlreadyPDF) {
         DLog(@"File is already PDF, skipping rename...");
-        UIAlertController *progressAlert = [UIAlertController alertControllerWithTitle:@"处理中..." message:@"获取直链..." preferredStyle:UIAlertControllerStyleAlert];
+        UIAlertController *progressAlert = [UIAlertController alertControllerWithTitle:@"处理中..."
+                                                                               message:@"获取直链..."
+                                                                        preferredStyle:UIAlertControllerStyleAlert];
         UIViewController *presentVC = topViewController();
         if (presentVC) [presentVC presentViewController:progressAlert animated:YES completion:nil];
 
@@ -575,23 +608,28 @@ static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString
         fetchDirectLink(filePath, ^(NSString *link, NSError *err) {
             [weakProgress dismissViewControllerAnimated:YES completion:^{
                 if (err || !link) {
-                    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"获取直链失败" message:err.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
-                    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-                    UIViewController *vc = topViewController(); if (vc) [vc presentViewController:alert animated:YES completion:nil];
+                    UIAlertController *failAlert = [UIAlertController alertControllerWithTitle:@"获取直链失败"
+                                                                                       message:err.localizedDescription
+                                                                                preferredStyle:UIAlertControllerStyleAlert];
+                    [failAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                    UIViewController *vc = topViewController();
+                    if (vc) [vc presentViewController:failAlert animated:YES completion:nil];
                     return;
                 }
                 copyToClipboard(link);
                 showToast(@"直链已复制到剪贴板！");
                 showLinkDialog(link, fileName, fileId, filePath, NO);
             }];
-        }];
+        });
         return;
     }
 
     NSString *pdfName = [fileName stringByAppendingString:@".pdf"];
     NSString *pdfPath = [[filePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:pdfName];
 
-    UIAlertController *progressAlert = [UIAlertController alertControllerWithTitle:@"处理中..." message:@"1. 重命名文件" preferredStyle:UIAlertControllerStyleAlert];
+    UIAlertController *progressAlert = [UIAlertController alertControllerWithTitle:@"处理中..."
+                                                                           message:@"1. 重命名文件"
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
     UIViewController *presentVC = topViewController();
     if (presentVC) [presentVC presentViewController:progressAlert animated:YES completion:nil];
 
@@ -600,9 +638,12 @@ static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString
     renameFile(fileId, filePath, pdfName, ^(BOOL success, NSError *err) {
         if (!success) {
             [weakProgress dismissViewControllerAnimated:YES completion:^{
-                UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"重命名失败" message:err.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
-                [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-                UIViewController *vc = topViewController(); if (vc) [vc presentViewController:alert animated:YES completion:nil];
+                UIAlertController *failAlert = [UIAlertController alertControllerWithTitle:@"重命名失败"
+                                                                                   message:err.localizedDescription
+                                                                            preferredStyle:UIAlertControllerStyleAlert];
+                [failAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                UIViewController *vc = topViewController();
+                if (vc) [vc presentViewController:failAlert animated:YES completion:nil];
             }];
             return;
         }
@@ -618,9 +659,12 @@ static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString
                     renameFile(fileId, pdfPath, fileName, ^(BOOL ok, NSError *e) {
                         DLog(@"Auto restore (poll failed): %@", ok ? @"OK" : e.localizedDescription);
                     });
-                    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"同步失败" message:pollErr.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
-                    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-                    UIViewController *vc = topViewController(); if (vc) [vc presentViewController:alert animated:YES completion:nil];
+                    UIAlertController *failAlert = [UIAlertController alertControllerWithTitle:@"同步失败"
+                                                                                       message:pollErr.localizedDescription
+                                                                                preferredStyle:UIAlertControllerStyleAlert];
+                    [failAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                    UIViewController *vc = topViewController();
+                    if (vc) [vc presentViewController:failAlert animated:YES completion:nil];
                 }];
                 return;
             }
@@ -632,9 +676,12 @@ static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString
                         renameFile(fileId, pdfPath, fileName, ^(BOOL ok, NSError *e) {
                             DLog(@"Auto restore: %@", ok ? @"OK" : e.localizedDescription);
                         });
-                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"获取直链失败" message:err.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
-                        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-                        UIViewController *vc = topViewController(); if (vc) [vc presentViewController:alert animated:YES completion:nil];
+                        UIAlertController *failAlert = [UIAlertController alertControllerWithTitle:@"获取直链失败"
+                                                                                           message:err.localizedDescription
+                                                                                    preferredStyle:UIAlertControllerStyleAlert];
+                        [failAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                        UIViewController *vc = topViewController();
+                        if (vc) [vc presentViewController:failAlert animated:YES completion:nil];
                         return;
                     }
 
@@ -652,9 +699,12 @@ static void triggerDownloadFlow(void) {
     fetchFileList(^(NSArray *files, NSError *err) {
         if (err || !files || files.count == 0) {
             DLog(@"Failed to get file list: %@", err ? err.localizedDescription : @"No files");
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"获取文件列表失败" message:err ? err.localizedDescription : @"文件夹为空" preferredStyle:UIAlertControllerStyleAlert];
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"获取文件列表失败"
+                                                                           message:err ? err.localizedDescription : @"文件夹为空"
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-            UIViewController *vc = topViewController(); if (vc) [vc presentViewController:alert animated:YES completion:nil];
+            UIViewController *vc = topViewController();
+            if (vc) [vc presentViewController:alert animated:YES completion:nil];
             return;
         }
 
@@ -665,28 +715,40 @@ static void triggerDownloadFlow(void) {
         }
 
         if (fileItems.count == 0) {
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"没有文件" message:@"当前文件夹没有可下载的文件" preferredStyle:UIAlertControllerStyleAlert];
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"没有文件"
+                                                                           message:@"当前文件夹没有可下载的文件"
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-            UIViewController *vc = topViewController(); if (vc) [vc presentViewController:alert animated:YES completion:nil];
+            UIViewController *vc = topViewController();
+            if (vc) [vc presentViewController:alert animated:YES completion:nil];
             return;
         }
 
-        UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"选择文件获取直链" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+        UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"选择文件获取直链"
+                                                                       message:nil
+                                                                preferredStyle:UIAlertControllerStyleActionSheet];
         for (NSDictionary *file in fileItems) {
             NSString *name = file[@"server_filename"];
             NSNumber *size = file[@"size"];
-            NSString *fileId = [file[@"fs_id"] stringValue];
+            NSString *fid = [file[@"fs_id"] stringValue];
             NSString *path = file[@"path"];
             NSString *title = name;
             if (size) {
                 double mb = [size doubleValue] / (1024.0 * 1024.0);
                 title = [NSString stringWithFormat:@"%@ (%.1f MB)", name, mb];
             }
-            [sheet addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                runRenameAndGetLink(name, path, fileId);
-            }]];
+            UIAlertAction *action = [UIAlertAction actionWithTitle:title
+                                                               style:UIAlertActionStyleDefault
+                                                             handler:^(UIAlertAction *action) {
+                runRenameAndGetLink(name, path, fid);
+            }];
+            [sheet addAction:action];
         }
-        [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+        UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:@"取消"
+                                                               style:UIAlertActionStyleCancel
+                                                             handler:nil];
+        [sheet addAction:cancelAction];
+
         UIViewController *vc = topViewController();
         if (vc) {
             if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
@@ -698,7 +760,7 @@ static void triggerDownloadFlow(void) {
     });
 }
 
-// ========== 浮游按钮 ==========
+// ========== Float button ==========
 
 static void onFloatButtonTap(void) {
     autoDetectPathAndToken();
@@ -708,13 +770,21 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 16 ? 16 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v8.5.1"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v8.5.2"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"📥 获取直链" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+    UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"获取直链"
+                                                             style:UIAlertActionStyleDefault
+                                                           handler:^(UIAlertAction *action) {
         triggerDownloadFlow();
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+    }];
+    [alert addAction:downloadAction];
+
+    UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"OK"
+                                                       style:UIAlertActionStyleCancel
+                                                     handler:nil];
+    [alert addAction:okAction];
+
     UIViewController *vc = topViewController();
     if (vc) [vc presentViewController:alert animated:YES completion:nil];
 }
@@ -764,7 +834,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v8.5.1 loaded");
+    DLog(@"BaiduPan Troll v8.5.2 loaded");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
