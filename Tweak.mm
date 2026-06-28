@@ -602,35 +602,85 @@ static UICollectionView * findCollectionViewInView(UIView *view) {
     return nil;
 }
 
-static UIView * findCellWithText(UIView *view, NSString *text) {
-    if (!view || !text) return nil;
-    // Check if this view is a cell containing the text
-    if ([view isKindOfClass:[UITableViewCell class]] || [view isKindOfClass:[UICollectionViewCell class]]) {
-        for (UIView *sub in view.subviews) {
-            if ([sub isKindOfClass:[UILabel class]]) {
-                UILabel *lbl = (UILabel *)sub;
-                if (lbl.text && [lbl.text containsString:text]) return view;
-            }
-            for (UIView *ss in sub.subviews) {
-                if ([ss isKindOfClass:[UILabel class]]) {
-                    UILabel *lbl = (UILabel *)ss;
-                    if (lbl.text && [lbl.text containsString:text]) return view;
-                }
-            }
+static UIView * findViewWithText(UIView *view, NSString *text, NSInteger depth) {
+    if (!view || !text || depth > 20) return nil;
+
+    // Check UILabel
+    if ([view isKindOfClass:[UILabel class]]) {
+        UILabel *lbl = (UILabel *)view;
+        if (lbl.text && [lbl.text containsString:text]) {
+            DLog(@"Found text in UILabel at depth %ld: %@", (long)depth, lbl.text);
+            return view;
         }
     }
-    // Also check buttons (some cells use UIButton)
+
+    // Check UIButton title
     if ([view isKindOfClass:[UIButton class]]) {
         UIButton *btn = (UIButton *)view;
         NSString *btnTitle = [btn titleForState:UIControlStateNormal];
-        if (btnTitle && [btnTitle containsString:text]) return view;
+        if (btnTitle && [btnTitle containsString:text]) {
+            DLog(@"Found text in UIButton at depth %ld", (long)depth);
+            return view;
+        }
     }
+
+    // Check UITextView
+    if ([view isKindOfClass:[UITextView class]]) {
+        UITextView *tv = (UITextView *)view;
+        if (tv.text && [tv.text containsString:text]) {
+            DLog(@"Found text in UITextView at depth %ld", (long)depth);
+            return view;
+        }
+    }
+
+    // Check any view's accessibilityLabel
+    if (view.accessibilityLabel && [view.accessibilityLabel containsString:text]) {
+        DLog(@"Found text in accessibilityLabel at depth %ld: %@", (long)depth, view.accessibilityLabel);
+        return view;
+    }
+
     // Recurse
     for (UIView *sub in view.subviews) {
-        UIView *found = findCellWithText(sub, text);
+        UIView *found = findViewWithText(sub, text, depth + 1);
         if (found) return found;
     }
     return nil;
+}
+
+static UIView * findCellWithText(UIView *view, NSString *text) {
+    if (!view || !text) return nil;
+    DLog(@"Searching for text: %@ in view hierarchy", text);
+
+    // First pass: find the UILabel containing the text
+    UIView *labelView = findViewWithText(view, text, 0);
+    if (!labelView) {
+        DLog(@"No label found with text: %@", text);
+        return nil;
+    }
+
+    // Walk up to find the cell or clickable container
+    UIView *container = labelView;
+    NSInteger walkUp = 0;
+    while (container && walkUp < 10) {
+        DLog(@"Walk up %ld: %@", (long)walkUp, NSStringFromClass([container class]));
+        if ([container isKindOfClass:[UITableViewCell class]] || 
+            [container isKindOfClass:[UICollectionViewCell class]] ||
+            [container isKindOfClass:[UIButton class]]) {
+            DLog(@"Found clickable container: %@", NSStringFromClass([container class]));
+            return container;
+        }
+        // Also accept if the view has gesture recognizers (likely clickable)
+        if (container.gestureRecognizers.count > 0 && walkUp >= 2) {
+            DLog(@"Found container with gestures: %@", NSStringFromClass([container class]));
+            return container;
+        }
+        container = container.superview;
+        walkUp++;
+    }
+
+    // Fallback: return the label's superview if nothing better found
+    DLog(@"Using label superview as fallback: %@", NSStringFromClass([labelView.superview class]));
+    return labelView.superview ?: labelView;
 }
 
 static void simulateTapOnCell(UIView *cell) {
@@ -706,6 +756,7 @@ static void simulateTapOnCell(UIView *cell) {
 
 static void autoTapFileCell(NSString *fileName, NSInteger retryCount, void (^completion)(BOOL success)) {
     if (retryCount > 30) {
+        DLog(@"Auto-tap giving up after 30 retries");
         completion(NO);
         return;
     }
@@ -724,18 +775,25 @@ static void autoTapFileCell(NSString *fileName, NSInteger retryCount, void (^com
     UICollectionView *cv = findCollectionViewInView(vc.view);
     if (cv) [cv reloadData];
 
-    // Find cell containing the file name
-    NSString *searchText = fileName;
-    UIView *cell = findCellWithText(vc.view, searchText);
+    // Try multiple search variants
+    NSArray *searchTexts = @[
+        fileName,
+        [fileName stringByDeletingPathExtension],
+        [fileName stringByReplacingOccurrencesOfString:@".pdf" withString:@""],
+    ];
 
-    if (!cell && [searchText hasSuffix:@".pdf"]) {
-        // Try without .pdf suffix
-        NSString *baseName = [searchText stringByDeletingPathExtension];
-        cell = findCellWithText(vc.view, baseName);
+    UIView *cell = nil;
+    for (NSString *text in searchTexts) {
+        if (text.length == 0) continue;
+        cell = findCellWithText(vc.view, text);
+        if (cell) {
+            DLog(@"Found cell using search text: %@", text);
+            break;
+        }
     }
 
     if (cell) {
-        DLog(@"Found cell for %@, auto-tapping...", fileName);
+        DLog(@"Auto-tapping cell: %@", NSStringFromClass([cell class]));
         simulateTapOnCell(cell);
         completion(YES);
         return;
