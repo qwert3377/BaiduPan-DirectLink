@@ -49,7 +49,7 @@ static void triggerDownloadFlow(void);
 static void onFloatButtonTap(void);
 static void showFloatButton(void);
 
-// ========== v10.10 Auto-click helpers ==========
+// ========== v10.11 Auto-click helpers ==========
 static UIView * findViewRecursively(UIView *root, Class targetClass);
 static void sendTouchToView(UIView *targetView, CGPoint point) {
     if (!targetView) return;
@@ -759,7 +759,7 @@ static void scrollToFileLocation(NSString *fileName) {
     }
 }
 
-// ========== v10.10 Auto-click helpers ==========
+// ========== v10.11 Auto-click helpers ==========
 
 static UIView * findViewRecursively(UIView *root, Class targetClass) {
     if (!root) return nil;
@@ -771,7 +771,7 @@ static UIView * findViewRecursively(UIView *root, Class targetClass) {
     return nil;
 }
 
-// ========== v10.10 CORE: Auto-click renamed file (rebuilt) ==========
+// ========== v10.11 CORE: Auto-click renamed file (rebuilt) ==========
 
 // Helper: search for file in currently visible cells, scanning from bottom-up
 static NSIndexPath * searchFileInTableView(NSString *targetName, UITableView *tv) {
@@ -802,7 +802,7 @@ static NSIndexPath * searchFileInTableView(NSString *targetName, UITableView *tv
 // Helper: search for file in currently visible UITableView cells, scanning from bottom-up
 static void autoClickRenamedFile(NSString *ipaName) {
     if (!ipaName) return;
-    DLog(@"v10.10 Auto-clicking: %@", ipaName);
+    DLog(@"v10.11 Auto-clicking: %@", ipaName);
 
     UIViewController *vc = topViewController();
     if (!vc) {
@@ -831,10 +831,18 @@ static void autoClickRenamedFile(NSString *ipaName) {
     NSIndexPath *foundPath = searchFileInTableView(ipaName, tableView);
 
     if (foundPath) {
-        // Use scrollRectToVisible which is more reliable than scrollToRowAtIndexPath
+        DLog(@"File found immediately, scrolling to visible...");
+
+        // Method 1: scrollRectToVisible
         CGRect cellRect = [tableView rectForRowAtIndexPath:foundPath];
         CGRect visibleRect = CGRectMake(0, cellRect.origin.y - 100, tableView.bounds.size.width, cellRect.size.height + 200);
         [tableView scrollRectToVisible:visibleRect animated:YES];
+
+        // Method 2: Also try scrollToRowAtIndexPath as fallback
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [tableView scrollToRowAtIndexPath:foundPath atScrollPosition:UITableViewScrollPositionMiddle animated:YES];
+        });
+
         showToast(@"正在滚动到文件...");
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -854,7 +862,7 @@ static void autoClickRenamedFile(NSString *ipaName) {
         return;
     }
 
-    // File not found, start step-by-step scrolling using NSTimer
+    // File not found, try scrolling down step by step
     DLog(@"File not in visible area, starting step scroll...");
     showToast(@"开始向下查找文件...");
 
@@ -875,6 +883,11 @@ static void autoClickRenamedFile(NSString *ipaName) {
             CGRect cellRect = [tableView rectForRowAtIndexPath:path];
             CGRect visibleRect = CGRectMake(0, cellRect.origin.y - 100, tableView.bounds.size.width, cellRect.size.height + 200);
             [tableView scrollRectToVisible:visibleRect animated:YES];
+
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [tableView scrollToRowAtIndexPath:path atScrollPosition:UITableViewScrollPositionMiddle animated:YES];
+            });
+
             showToast(@"正在滚动到文件...");
 
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -899,39 +912,40 @@ static void autoClickRenamedFile(NSString *ipaName) {
             return;
         }
 
-        // Scroll down by moving the last visible row to the top
-        // This forces UITableView to load new cells
-        NSArray *visibleIndexPaths = [tableView indexPathsForVisibleRows];
-        if (visibleIndexPaths && visibleIndexPaths.count > 0) {
-            NSIndexPath *lastVisible = visibleIndexPaths.lastObject;
-            CGRect lastRect = [tableView rectForRowAtIndexPath:lastVisible];
-            CGFloat newOffset = lastRect.origin.y;
-            CGFloat maxOffset = tableView.contentSize.height - tableView.bounds.size.height;
+        // Try multiple scroll methods
+        // Method 1: scrollToRowAtIndexPath with last row
+        NSInteger totalSections = 1;
+        @try { totalSections = [tableView numberOfSections]; } @catch (NSException *e) {}
+        NSInteger lastSection = totalSections > 0 ? totalSections - 1 : 0;
+        NSInteger lastRow = 0;
+        @try { lastRow = [tableView numberOfRowsInSection:lastSection] - 1; } @catch (NSException *e) {}
 
-            if (newOffset > maxOffset) {
-                newOffset = maxOffset;
-            }
-
-            if (newOffset > tableView.contentOffset.y) {
-                showToast([NSString stringWithFormat:@"正在向下查找... (%ld/%ld)", (long)attemptCount, (long)maxAttempts]);
-                [tableView setContentOffset:CGPointMake(0, newOffset) animated:YES];
-                DLog(@"Scrolled to last visible row at offset %.0f", newOffset);
-            } else {
-                DLog(@"Already at or near bottom");
-                showToast(@"已到达底部，未找到文件");
-            }
-        } else {
-            // No visible rows, try scrolling by screen height
-            CGFloat newOffset = tableView.contentOffset.y + tableView.bounds.size.height * 0.7;
-            CGFloat maxOffset = tableView.contentSize.height - tableView.bounds.size.height;
-            if (newOffset > maxOffset) newOffset = maxOffset;
-
-            if (newOffset > tableView.contentOffset.y) {
-                [tableView setContentOffset:CGPointMake(0, newOffset) animated:YES];
-            } else {
-                showToast(@"已到达底部，未找到文件");
-            }
+        if (lastRow >= 0) {
+            NSIndexPath *bottomPath = [NSIndexPath indexPathForRow:lastRow inSection:lastSection];
+            [tableView scrollToRowAtIndexPath:bottomPath atScrollPosition:UITableViewScrollPositionBottom animated:YES];
+            DLog(@"Scrolled to bottom row %ld", (long)lastRow);
         }
+
+        // Method 2: Also try setContentOffset on parent scroll views
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            // Find all scroll views in hierarchy and scroll them
+            void (^scrollAllScrollViews)(UIView *) = ^(UIView *view) {
+                if ([view isKindOfClass:[UIScrollView class]]) {
+                    UIScrollView *sv = (UIScrollView *)view;
+                    CGFloat maxOffset = sv.contentSize.height - sv.bounds.size.height;
+                    if (maxOffset > sv.contentOffset.y) {
+                        [sv setContentOffset:CGPointMake(0, maxOffset) animated:YES];
+                        DLog(@"Scrolled UIScrollView %@ to offset %.0f", NSStringFromClass([sv class]), maxOffset);
+                    }
+                }
+                for (UIView *sub in view.subviews) {
+                    scrollAllScrollViews(sub);
+                }
+            };
+            scrollAllScrollViews(vc.view);
+        });
+
+        showToast([NSString stringWithFormat:@"正在向下查找... (%ld/%ld)", (long)attemptCount, (long)maxAttempts]);
     }]
                                                             selector:@selector(main)
                                                             userInfo:nil
@@ -1173,7 +1187,7 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 8 ? 8 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.10"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.11"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n智能流程：改名->刷新2次->自动点击->检测打开->自动恢复", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件"
@@ -1235,7 +1249,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v10.10 loaded - Auto-Click Edition");
+    DLog(@"BaiduPan Troll v10.11 loaded - Auto-Click Edition");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
