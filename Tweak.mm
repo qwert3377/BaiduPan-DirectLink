@@ -751,6 +751,38 @@ static void scrollToFileLocation(NSString *fileName) {
     if (!fileName) return;
     DLog(@"Scrolling to file: %@", fileName);
 
+    UIViewController *vc = topViewController();
+    if (!vc) { DLog(@"No top VC for scroll"); return; }
+
+    // Strategy 1: Find UITableView and scroll directly to cell containing file
+    UITableView *tableView = (UITableView *)findViewRecursively(vc.view, [UITableView class]);
+    if (tableView) {
+        DLog(@"Found tableView, searching rows for: %@", fileName);
+
+        NSInteger totalSections = 1;
+        @try { totalSections = [tableView numberOfSections]; } @catch (NSException *e) {}
+
+        for (NSInteger section = 0; section < totalSections; section++) {
+            NSInteger rows = 0;
+            @try { rows = [tableView numberOfRowsInSection:section]; } @catch (NSException *e) {}
+
+            for (NSInteger row = 0; row < rows; row++) {
+                NSIndexPath *ip = [NSIndexPath indexPathForRow:row inSection:section];
+                @try {
+                    UITableViewCell *cell = [tableView cellForRowAtIndexPath:ip];
+                    if (!cell) continue;
+                    if (viewContainsText(cell, fileName)) {
+                        DLog(@"Found cell at row %ld, scrolling to it", (long)row);
+                        [tableView scrollToRowAtIndexPath:ip atScrollPosition:UITableViewScrollPositionTop animated:YES];
+                        return;
+                    }
+                } @catch (NSException *e) {}
+            }
+        }
+        DLog(@"Cell not found in tableView rows");
+    }
+
+    // Strategy 2: Find label via window search
     UIWindow *window = nil;
     if (@available(iOS 13.0, *)) {
         for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
@@ -763,21 +795,15 @@ static void scrollToFileLocation(NSString *fileName) {
     if (!window) window = [[UIApplication sharedApplication] keyWindow];
     if (!window) return;
 
-    // Strategy 1: Find label with exact file name
     UIView *targetLabel = findLabelWithText(window, fileName, 0);
-
-    // Strategy 2: Try without .ipa extension
     if (!targetLabel) {
         NSString *nameWithoutExt = [fileName stringByDeletingPathExtension];
         if (nameWithoutExt.length > 0 && ![nameWithoutExt isEqualToString:fileName]) {
             targetLabel = findLabelWithText(window, nameWithoutExt, 0);
         }
     }
-
-    // Strategy 3: Try partial match (first 10 chars)
     if (!targetLabel) {
-        NSString *partial = fileName;
-        if (fileName.length > 10) partial = [fileName substringToIndex:10];
+        NSString *partial = fileName.length > 10 ? [fileName substringToIndex:10] : fileName;
         targetLabel = findLabelWithText(window, partial, 0);
     }
 
@@ -785,20 +811,15 @@ static void scrollToFileLocation(NSString *fileName) {
         UIScrollView *scrollView = findParentScrollView(targetLabel);
         if (scrollView) {
             CGRect labelFrame = [targetLabel convertRect:targetLabel.bounds toView:scrollView];
-            // Scroll so the label is near the top of the screen (not center)
-            CGFloat targetY = labelFrame.origin.y - 80; // 80pt from top
+            CGFloat targetY = labelFrame.origin.y - 100; // 100pt from top
             targetY = MAX(0, MIN(targetY, scrollView.contentSize.height - scrollView.bounds.size.height));
-            CGPoint targetOffset = CGPointMake(0, targetY);
-
-            DLog(@"Scrolling to y=%.1f, labelFrame=%@", targetY, NSStringFromCGRect(labelFrame));
-            [scrollView setContentOffset:targetOffset animated:YES];
+            [scrollView setContentOffset:CGPointMake(0, targetY) animated:YES];
+            DLog(@"Scrolled to y=%.1f via label", targetY);
             return;
-        } else {
-            DLog(@"Found label but no parent scroll view");
         }
     }
 
-    DLog(@"Could not find file label");
+    DLog(@"Could not find file to scroll to");
 }
 
 // ========== v10.2 Auto-click helpers ==========
