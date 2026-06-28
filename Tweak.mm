@@ -747,6 +747,22 @@ static UIScrollView * findParentScrollView(UIView *view) {
     return nil;
 }
 
+static BOOL viewContainsText(UIView *view, NSString *text) {
+    if (!view || !text) return NO;
+    if ([view isKindOfClass:[UILabel class]]) {
+        UILabel *lbl = (UILabel *)view;
+        if (lbl.text && [lbl.text containsString:text]) return YES;
+    }
+    if ([view isKindOfClass:[UIButton class]]) {
+        UIButton *btn = (UIButton *)view;
+        if (btn.currentTitle && [btn.currentTitle containsString:text]) return YES;
+    }
+    for (UIView *sub in view.subviews) {
+        if (viewContainsText(sub, text)) return YES;
+    }
+    return NO;
+}
+
 static void scrollToFileLocation(NSString *fileName) {
     if (!fileName) return;
     DLog(@"Scrolling to file: %@", fileName);
@@ -879,22 +895,6 @@ static UIView * findViewRecursively(UIView *root, Class targetClass) {
 }
 
 // ========== v10.2 CORE: Auto-click renamed file (rebuilt) ==========
-
-static BOOL viewContainsText(UIView *view, NSString *text) {
-    if (!view || !text) return NO;
-    if ([view isKindOfClass:[UILabel class]]) {
-        UILabel *lbl = (UILabel *)view;
-        if (lbl.text && [lbl.text containsString:text]) return YES;
-    }
-    if ([view isKindOfClass:[UIButton class]]) {
-        UIButton *btn = (UIButton *)view;
-        if (btn.currentTitle && [btn.currentTitle containsString:text]) return YES;
-    }
-    for (UIView *sub in view.subviews) {
-        if (viewContainsText(sub, text)) return YES;
-    }
-    return NO;
-}
 
 static void autoClickRenamedFile(NSString *ipaName) {
     if (!ipaName) return;
