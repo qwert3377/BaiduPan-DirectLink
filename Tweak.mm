@@ -1,7 +1,7 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.15
-//  Flow: select -> rename to .ipa -> refresh x2 + scroll to top -> AUTO CLICK renamed file -> detect new VC pushed -> auto restore name
-//  NO direct link download - only simulate user tap on renamed file
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.16
+//  Flow: select -> rename to .ipa -> refresh x2 -> AUTO CLICK renamed file
+//        -> detect preview opened -> auto back -> wait 1s -> re-click -> restore name
 //
 
 #import <UIKit/UIKit.h>
@@ -14,7 +14,7 @@ static NSString *gBdstoken = nil;
 static NSString *gBDUSS = nil;
 static UIButton *gFloatButton = nil;
 
-// State for tap detection
+// State machine for two-phase flow
 static NSString *gPendingRestoreFileId = nil;
 static NSString *gPendingRestorePdfPath = nil;
 static NSString *gPendingRestoreOriginalName = nil;
@@ -22,6 +22,7 @@ static NSTimer *gTapDetectionTimer = nil;
 static NSInteger gNavStackCount = 0;
 static BOOL gIsWaitingForTap = NO;
 static BOOL gHasOpenedFile = NO;
+static BOOL gIsWaitingForBack = NO;
 static NSString *gInitialTopVCClass = nil;
 static NSString *gInitialTopVCTitle = nil;
 
@@ -39,8 +40,14 @@ static void renameFile(NSString *fileId, NSString *path, NSString *newName, void
 static void showToast(NSString *msg);
 static void forceRefreshFileList(void);
 static void refreshVC(UIViewController *vc);
+static UIScrollView * findScrollViewInView(UIView *view);
 static void simulatePullToRefreshOnScrollView(UIScrollView *scrollView);
 static void tryRefreshOnScrollView(UIScrollView *scrollView);
+static void triggerMJRefresh(id headerOrFooter);
+static void triggerNotificationFallback(void);
+static void triggerEGORefresh(UIView *subview, UIScrollView *scrollView);
+static void triggerBDWalletRefresh(UIView *subview, UIScrollView *scrollView);
+static BOOL viewContainsText(UIView *view, NSString *text);
 static void startTapDetection(void);
 static void stopTapDetection(void);
 static void checkIfFileOpened(void);
@@ -50,7 +57,7 @@ static void triggerDownloadFlow(void);
 static void onFloatButtonTap(void);
 static void showFloatButton(void);
 
-// ========== v10.15 Auto-click helpers ==========
+// v10.16 Auto-click helpers
 static UIScrollView * findListViewInHierarchy(UIView *root);
 static UIScrollView * findListViewGlobally(void);
 static void sendTouchToView(UIView *targetView, CGPoint point);
@@ -63,6 +70,8 @@ static NSIndexPath * searchFileInCollectionView(NSString *targetName, UICollecti
 static void performScrollAttempt(NSString *ipaName, UIScrollView *listView, NSInteger attempt, NSInteger maxAttempts, CGFloat scrollStep);
 static void autoClickRenamedFile(NSString *ipaName);
 static void simulateBackButtonTap(void);
+static NSString * topVCClassName(void);
+static NSString * topVCTitle(void);
 
 // ========== Implementations ==========
 
@@ -167,7 +176,7 @@ static NSString * scanMemoryForBdstoken(void) {
     NSString *bestToken = nil;
     NSString *bestKey = nil;
 
-    NSArray *preferredKeys = @[@"bdstoken", @"BDSTOKEN", @"token", @"TOKEN", 
+    NSArray *preferredKeys = @[@"bdstoken", @"BDSTOKEN", @"token", @"TOKEN",
                                 @"access_token", @"bd_token", @"pan_token", @"panToken",
                                 @"user_token", @"auth_token"];
     for (NSString *key in preferredKeys) {
@@ -224,7 +233,7 @@ static NSString * scanMemoryForBdstoken(void) {
 
 static NSString * extractPathFromVC(UIViewController *vc) {
     if (!vc) return nil;
-    NSArray *pathKeys = @[@"path", @"currentPath", @"filePath", @"dirPath", @"currentDir", 
+    NSArray *pathKeys = @[@"path", @"currentPath", @"filePath", @"dirPath", @"currentDir",
                           @"_path", @"_currentPath", @"directory", @"folderPath", @"currentFolder",
                           @"mPath", @"_mPath", @"fileListPath", @"currentDirectory", @"directoryPath",
                           @"currentDirPath", @"_directory", @"_dirPath"];
@@ -615,7 +624,7 @@ static BOOL viewContainsText(UIView *view, NSString *text) {
     return NO;
 }
 
-// ========== v10.15 Auto-click helpers ==========
+// ========== v10.16 Auto-click helpers ==========
 
 static UIScrollView * findListViewInHierarchy(UIView *root) {
     if (!root) return nil;
@@ -679,8 +688,6 @@ static void triggerGestureRecognizers(UIView *view) {
                 DLog(@"Triggering tap gesture on view");
                 gr.enabled = YES;
                 [gr setValue:@(UIGestureRecognizerStateEnded) forKey:@"state"];
-                if (gr.delegate && [gr.delegate respondsToSelector:@selector(gestureRecognizer:shouldReceiveTouch:)]) {
-                }
             }
         }
         for (UIView *sub in view.subviews) {
@@ -790,7 +797,7 @@ static void executeClickOnCollectionCell(UICollectionViewCell *cell, NSIndexPath
     });
 }
 
-// ========== v10.15 CORE: Auto-click renamed file (rebuilt) ==========
+// ========== v10.16 CORE: Auto-click renamed file ==========
 
 static NSIndexPath * searchFileInTableView(NSString *targetName, UITableView *tv) {
     if (!targetName || !tv) return nil;
@@ -905,7 +912,7 @@ static void performScrollAttempt(NSString *ipaName, UIScrollView *listView, NSIn
 
 static void autoClickRenamedFile(NSString *ipaName) {
     if (!ipaName) return;
-    DLog(@"v10.15 Auto-clicking: %@", ipaName);
+    DLog(@"v10.16 Auto-clicking: %@", ipaName);
 
     UIScrollView *listView = findListViewGlobally();
     if (!listView) {
@@ -954,30 +961,85 @@ static void autoClickRenamedFile(NSString *ipaName) {
     });
 }
 
+// ========== v10.16: Enhanced back button simulation ==========
+
 static void simulateBackButtonTap(void) {
     DLog(@"Simulating back button tap...");
-    UIViewController *vc = topViewController();
-    if (!vc) return;
 
-    // Method 1: Try navigation controller pop (most reliable)
+    UIViewController *vc = topViewController();
+    if (!vc) {
+        DLog(@"No top VC found");
+        return;
+    }
+
+    // Method 1: Navigation pop (most reliable for push transitions)
     if (vc.navigationController && vc.navigationController.viewControllers.count > 1) {
-        DLog(@"Popping view controller via navigationController");
+        DLog(@"Method 1: popViewControllerAnimated");
         [vc.navigationController popViewControllerAnimated:YES];
         return;
     }
 
-    // Method 2: Find and tap the back button in the navigation bar
+    // Method 2: Dismiss presented view controller
+    if (vc.presentingViewController) {
+        DLog(@"Method 2: dismissViewController");
+        [vc dismissViewControllerAnimated:YES completion:nil];
+        return;
+    }
+
+    // Method 3: Find and trigger leftBarButtonItem
+    if (vc.navigationItem.leftBarButtonItem) {
+        UIBarButtonItem *item = vc.navigationItem.leftBarButtonItem;
+        if (item.target && item.action) {
+            DLog(@"Method 3: Triggering leftBarButtonItem action");
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [item.target performSelector:item.action withObject:item];
+            #pragma clang diagnostic pop
+            return;
+        }
+    }
+
+    // Method 4: Search navigation bar for back button views
     UINavigationBar *navBar = nil;
     if (vc.navigationController) {
         navBar = vc.navigationController.navigationBar;
+    } else {
+        UIWindow *window = nil;
+        if (@available(iOS 13.0, *)) {
+            for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
+                if (scene.activationState == UISceneActivationStateForegroundActive) {
+                    window = scene.windows.firstObject;
+                    break;
+                }
+            }
+        }
+        if (!window) window = [[UIApplication sharedApplication] keyWindow];
+        if (window && window.rootViewController) {
+            UIViewController *root = window.rootViewController;
+            while (root.presentedViewController) root = root.presentedViewController;
+            if ([root isKindOfClass:[UINavigationController class]]) {
+                navBar = [(UINavigationController *)root navigationBar];
+            }
+        }
     }
 
     if (navBar) {
-        DLog(@"Searching navBar subviews for back button...");
+        DLog(@"Method 4: Searching navBar subviews...");
+
+        UIView *backButtonView = nil;
+        @try {
+            backButtonView = [navBar valueForKey:@"_backButtonView"];
+        } @catch (NSException *e) {}
+
+        if (backButtonView) {
+            DLog(@"Found _backButtonView, tapping...");
+            sendTouchToView(backButtonView, CGPointMake(backButtonView.bounds.size.width/2, backButtonView.bounds.size.height/2));
+            return;
+        }
+
         for (UIView *sub in navBar.subviews) {
             DLog(@"  navBar subview: %@ frame=%@", NSStringFromClass([sub class]), NSStringFromCGRect(sub.frame));
 
-            // Check for UIButton
             if ([sub isKindOfClass:[UIButton class]]) {
                 UIButton *btn = (UIButton *)sub;
                 DLog(@"  Found UIButton: title=%@", btn.currentTitle ?: @"nil");
@@ -985,23 +1047,20 @@ static void simulateBackButtonTap(void) {
                 return;
             }
 
-            // Check for any interactive view at top-left area
-            if (sub.frame.origin.x < 50 && sub.frame.origin.y < 50 && sub.frame.size.width > 20 && sub.frame.size.height > 20) {
-                DLog(@"  Found potential back button at top-left, tapping...");
+            if ([sub isKindOfClass:[UIImageView class]] && sub.userInteractionEnabled && sub.frame.origin.x < 60) {
+                DLog(@"  Found interactive UIImageView at left");
                 sendTouchToView(sub, CGPointMake(sub.bounds.size.width/2, sub.bounds.size.height/2));
                 return;
             }
 
-            // Check sub-subviews
             for (UIView *sub2 in sub.subviews) {
                 if ([sub2 isKindOfClass:[UIButton class]]) {
-                    UIButton *btn = (UIButton *)sub2;
-                    DLog(@"  Found nested UIButton: title=%@", btn.currentTitle ?: @"nil");
-                    sendTouchToView(btn, CGPointMake(btn.bounds.size.width/2, btn.bounds.size.height/2));
+                    DLog(@"  Found nested UIButton");
+                    sendTouchToView(sub2, CGPointMake(sub2.bounds.size.width/2, sub2.bounds.size.height/2));
                     return;
                 }
-                if (sub2.frame.origin.x < 50 && sub2.frame.origin.y < 50 && sub2.frame.size.width > 20 && sub2.frame.size.height > 20) {
-                    DLog(@"  Found nested potential back button, tapping...");
+                if ([sub2 isKindOfClass:[UIImageView class]] && sub2.userInteractionEnabled && sub2.frame.origin.x < 60) {
+                    DLog(@"  Found nested interactive UIImageView at left");
                     sendTouchToView(sub2, CGPointMake(sub2.bounds.size.width/2, sub2.bounds.size.height/2));
                     return;
                 }
@@ -1009,24 +1068,90 @@ static void simulateBackButtonTap(void) {
         }
     }
 
-    // Method 3: Directly tap the top-left corner of the screen (where < usually is)
+    // Method 5: Global search for any back button in window hierarchy
     UIWindow *window = nil;
     if (@available(iOS 13.0, *)) {
         for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
-            if (scene.activationState == UISceneActivationStateForegroundActive) { window = scene.windows.firstObject; break; }
+            if (scene.activationState == UISceneActivationStateForegroundActive) {
+                window = scene.windows.firstObject;
+                break;
+            }
         }
     }
     if (!window) window = [[UIApplication sharedApplication] keyWindow];
+
     if (window) {
-        DLog(@"Tapping top-left corner of screen...");
-        CGPoint backPoint = CGPointMake(30, 50); // Typical back button position
+        DLog(@"Method 5: Global back button search...");
+        __block UIView *backButton = nil;
+
+        void (^searchBackButton)(UIView *) = ^(UIView *view) {
+            if (backButton) return;
+
+            NSString *clsName = NSStringFromClass([view class]);
+
+            if ([clsName containsString:@"BackButton"] || [clsName containsString:@"backButton"] ||
+                [clsName containsString:@"ReturnButton"] || [clsName containsString:@"NavBack"] ||
+                [clsName containsString:@"UINavigationBarButton"]) {
+                backButton = view;
+                return;
+            }
+
+            if ([view isKindOfClass:[UIControl class]] || view.userInteractionEnabled) {
+                CGPoint absOrigin = [view convertPoint:CGPointZero toView:window];
+                if (absOrigin.x < 70 && absOrigin.y < 120 &&
+                    view.bounds.size.width > 20 && view.bounds.size.height > 20 &&
+                    view.bounds.size.width < 100 && view.bounds.size.height < 80) {
+                    if ([view isKindOfClass:[UIButton class]]) {
+                        UIButton *btn = (UIButton *)view;
+                        NSString *title = btn.currentTitle ?: @"";
+                        if ([title containsString:@"<"] || [title containsString:@"返回"] || [title containsString:@"Back"]) {
+                            backButton = view;
+                            return;
+                        }
+                    }
+                    if (absOrigin.x < 50 && absOrigin.y > 20 && absOrigin.y < 100) {
+                        backButton = view;
+                        return;
+                    }
+                }
+            }
+
+            for (UIView *sub in view.subviews) {
+                searchBackButton(sub);
+            }
+        };
+
+        searchBackButton(window);
+
+        if (backButton) {
+            DLog(@"Found global back button: %@ frame=%@", NSStringFromClass([backButton class]), NSStringFromCGRect([backButton convertRect:backButton.bounds toView:window]));
+            sendTouchToView(backButton, CGPointMake(backButton.bounds.size.width/2, backButton.bounds.size.height/2));
+            return;
+        }
+
+        // Method 6: Direct screen coordinate tap at top-left
+        DLog(@"Method 6: Tapping top-left corner of screen");
+        CGPoint backPoint = CGPointMake(25, 55);
         sendTouchToView(window, backPoint);
     }
 
-    DLog(@"Could not find back button to tap");
+    DLog(@"All back button methods exhausted");
 }
 
-// ========== Tap Detection ==========
+// ========== Tap Detection (Two-Phase) ==========
+
+static NSString * topVCClassName(void) {
+    UIViewController *vc = topViewController();
+    return vc ? NSStringFromClass([vc class]) : @"nil";
+}
+
+static NSString * topVCTitle(void) {
+    UIViewController *vc = topViewController();
+    if (!vc) return @"nil";
+    NSString *title = vc.title;
+    if (!title || title.length == 0) title = vc.navigationItem.title;
+    return title ?: @"nil";
+}
 
 static void executeRestore(void) {
     if (!gPendingRestoreFileId || !gPendingRestorePdfPath || !gPendingRestoreOriginalName) {
@@ -1045,6 +1170,8 @@ static void executeRestore(void) {
         gPendingRestorePdfPath = nil;
         gPendingRestoreOriginalName = nil;
         gIsWaitingForTap = NO;
+        gHasOpenedFile = NO;
+        gIsWaitingForBack = NO;
     });
 }
 
@@ -1055,19 +1182,7 @@ static void stopTapDetection(void) {
     }
     gIsWaitingForTap = NO;
     gHasOpenedFile = NO;
-}
-
-static NSString * topVCClassName(void) {
-    UIViewController *vc = topViewController();
-    return vc ? NSStringFromClass([vc class]) : @"nil";
-}
-
-static NSString * topVCTitle(void) {
-    UIViewController *vc = topViewController();
-    if (!vc) return @"nil";
-    NSString *title = vc.title;
-    if (!title || title.length == 0) title = vc.navigationItem.title;
-    return title ?: @"nil";
+    gIsWaitingForBack = NO;
 }
 
 static void checkIfFileOpened(void) {
@@ -1077,71 +1192,74 @@ static void checkIfFileOpened(void) {
     NSString *currentClass = topVCClassName();
     NSString *currentTitle = topVCTitle();
 
-    DLog(@"Tap detection: nav=%ld->%ld class=[%@]->[%@] title=[%@]->[%@] hasOpened=%d", 
+    DLog(@"Tap detection: nav=%ld->%ld class=[%@]->[%@] title=[%@]->[%@] hasOpened=%d waitingBack=%d",
          (long)gNavStackCount, (long)currentCount,
          gInitialTopVCClass, currentClass,
-         gInitialTopVCTitle, currentTitle, gHasOpenedFile);
+         gInitialTopVCTitle, currentTitle, gHasOpenedFile, gIsWaitingForBack);
 
     // Phase 1: Detect file opened (nav stack increased or VC changed to preview)
     if (!gHasOpenedFile) {
+        BOOL opened = NO;
+
         if (currentCount > gNavStackCount) {
             DLog(@"Phase 1: File opened (nav stack increased)!");
-            gHasOpenedFile = YES;
-            showToast(@"文件已打开，自动退出中...");
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                simulateBackButtonTap();
-            });
-            return;
-        }
-
-        if (gInitialTopVCClass && ![gInitialTopVCClass isEqualToString:currentClass]) {
+            opened = YES;
+        } else if (gInitialTopVCClass && ![gInitialTopVCClass isEqualToString:currentClass]) {
             DLog(@"Phase 1: File opened (VC class changed)!");
-            gHasOpenedFile = YES;
-            showToast(@"文件已打开，自动退出中...");
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                simulateBackButtonTap();
-            });
-            return;
-        }
-
-        if (gPendingRestoreOriginalName && currentTitle && [currentTitle containsString:gPendingRestoreOriginalName]) {
-            DLog(@"Phase 1: File opened (title matches file name)!");
-            gHasOpenedFile = YES;
-            showToast(@"文件已打开，自动退出中...");
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                simulateBackButtonTap();
-            });
-            return;
-        }
-
-        if (currentTitle && ([currentTitle containsString:@"预览"] || [currentTitle containsString:@"下载"] || [currentTitle containsString:@"文件详情"])) {
+            opened = YES;
+        } else if (currentTitle && ([currentTitle containsString:@"预览"] || [currentTitle containsString:@"下载"] || [currentTitle containsString:@"文件详情"])) {
             DLog(@"Phase 1: File opened (preview title)!");
+            opened = YES;
+        } else if (gPendingRestoreOriginalName && currentTitle && [currentTitle containsString:gPendingRestoreOriginalName]) {
+            DLog(@"Phase 1: File opened (title matches file name)!");
+            opened = YES;
+        }
+
+        if (opened) {
             gHasOpenedFile = YES;
+            gIsWaitingForBack = YES;
             showToast(@"文件已打开，自动退出中...");
+
+            // Wait 1 second so user can see the preview, then auto-back
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 simulateBackButtonTap();
+                // Wait 0.5s for back animation to complete before allowing Phase 2 detection
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    gIsWaitingForBack = NO;
+                });
             });
             return;
         }
     }
-    // Phase 2: User exited preview, re-click then restore
-    else {
-        BOOL navBack = (currentCount == gNavStackCount);
-        BOOL classBack = (gInitialTopVCClass && [gInitialTopVCClass isEqualToString:currentClass]);
+    // Phase 2: Detect returned to file list, then re-click and restore
+    else if (!gIsWaitingForBack) {
+        BOOL returned = NO;
 
-        DLog(@"Phase 2 check: navBack=%d classBack=%d", navBack, classBack);
+        if (currentCount == gNavStackCount) {
+            returned = YES;
+        } else if (gInitialTopVCClass && [gInitialTopVCClass isEqualToString:currentClass]) {
+            returned = YES;
+        } else if (gInitialTopVCTitle && [gInitialTopVCTitle isEqualToString:currentTitle]) {
+            returned = YES;
+        }
 
-        if (navBack && classBack) {
-            DLog(@"Phase 2: User exited, re-clicking...");
-            showToast(@"检测到已退出，重新点击...");
+        if (returned) {
+            DLog(@"Phase 2: Returned to file list, re-clicking after 1s...");
+            showToast(@"已退出，1秒后重新点击...");
 
-            NSString *ipaName = [gPendingRestoreOriginalName stringByAppendingString:@".ipa"];
-            autoClickRenamedFile(ipaName);
+            if (gTapDetectionTimer) {
+                [gTapDetectionTimer invalidate];
+                gTapDetectionTimer = nil;
+            }
 
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                stopTapDetection();
-                showToast(@"正在恢复原名...");
-                executeRestore();
+                NSString *ipaName = [gPendingRestoreOriginalName stringByAppendingString:@".ipa"];
+                autoClickRenamedFile(ipaName);
+
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    showToast(@"正在恢复原名...");
+                    executeRestore();
+                });
             });
             return;
         }
@@ -1152,6 +1270,7 @@ static void startTapDetection(void) {
     stopTapDetection();
     gIsWaitingForTap = YES;
     gHasOpenedFile = NO;
+    gIsWaitingForBack = NO;
     gNavStackCount = currentNavStackCount();
     gInitialTopVCClass = topVCClassName();
     gInitialTopVCTitle = topVCTitle();
@@ -1241,7 +1360,7 @@ static void triggerDownloadFlow(void) {
             return;
         }
         UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"选择文件"
-                                                                       message:@"选择后自动重命名为.ipa并刷新，自动点击文件打开后自动恢复原名"
+                                                                       message:@"选择后自动重命名为.ipa并刷新，自动点击文件打开后自动退出并重新点击，最后恢复原名"
                                                                 preferredStyle:UIAlertControllerStyleActionSheet];
         for (NSDictionary *file in fileItems) {
             NSString *name = file[@"server_filename"];
@@ -1285,8 +1404,8 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 8 ? 8 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.15"
-                                                                   message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n智能流程：改名->刷新2次->自动点击->检测打开->自动恢复", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.16"
+                                                                   message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n智能流程：改名->刷新2次->自动点击->检测打开->自动退出->等待1秒->再次点击->恢复原名", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件"
                                                              style:UIAlertActionStyleDefault
@@ -1347,7 +1466,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v10.15 loaded - GlobalListView Edition");
+    DLog(@"BaiduPan Troll v10.16 loaded - Two-Phase Edition");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
