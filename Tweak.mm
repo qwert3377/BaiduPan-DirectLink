@@ -1,6 +1,7 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v11.1
-//  Fix: 修复编译错误（invokeMethod 重载歧义）+ 自动点击稳定性
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.0
+//  Fix: 修复自动点击逻辑，利用类清单精确定位下载链路
+//  核心：Hook 文件列表 Cell 点击事件，多维度匹配 + 深度视图搜索 + 下载管理器直接调用
 //
 
 #import <UIKit/UIKit.h>
@@ -13,7 +14,7 @@ static NSString *gBdstoken = nil;
 static NSString *gBDUSS = nil;
 static UIButton *gFloatButton = nil;
 
-// ========== 前置声明（C 语言禁止同名不同返回类型的重载）==========
+// ========== 前置声明 ==========
 static UIViewController * topViewController(void);
 static NSString * strictEncodeURIComponent(NSString *str);
 static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *headers, NSString *body, void (^handler)(id json, NSError *err));
@@ -25,17 +26,13 @@ static void fetchFileList(void (^completion)(NSArray *files, NSError *err));
 static void showToast(NSString *msg);
 static void showAlert(NSString *title, NSString *msg);
 static void invokeMethod(id target, SEL selector, NSArray *args);
-static id invokeMethodRet(id target, SEL selector, NSArray *args);
 
-// ========== v11.1 核心：修复自动点击 ==========
+// ========== v10.0 新增：自动点击修复 ==========
 static UIView * findViewRecursively(UIView *root, Class targetClass);
-static UIView * findViewByClassName(UIView *root, NSString *className);
 static id getDownloadManagerFromClasses(void);
 static id getFileListDataSource(UIViewController *vc);
 static BOOL matchFileMeta(id item, NSDictionary *targetMeta);
-static void performTapOnView(UIView *view);
-static void performSelectTableViewRow(UITableView *tableView, NSIndexPath *indexPath);
-static void performSelectCollectionViewItem(UICollectionView *collectionView, NSIndexPath *indexPath);
+static void simulateTouchOnView(UIView *view);
 static void triggerCellActionByClassList(id cell, NSDictionary *fileMeta);
 static void triggerDownloadViaManager(NSDictionary *fileMeta);
 static void triggerDownloadBySimulatingUserAction(NSDictionary *fileMeta);
@@ -44,20 +41,6 @@ static void runDownloadFlow(NSDictionary *fileMeta);
 static void triggerDownloadSheet(void);
 static void onFloatButtonTap(void);
 static void showFloatButton(void);
-
-// ========== 浮窗按钮专用 Target ==========
-@interface BDTFloatButtonTarget : NSObject
-@end
-@implementation BDTFloatButtonTarget
-- (void)floatButtonTapped:(id)sender { onFloatButtonTap(); }
-- (void)floatButtonPanned:(UIPanGestureRecognizer *)gesture {
-    UIView *button = gesture.view;
-    CGPoint translation = [gesture translationInView:button.superview];
-    button.center = CGPointMake(button.center.x + translation.x, button.center.y + translation.y);
-    [gesture setTranslation:CGPointZero inView:button.superview];
-}
-@end
-static BDTFloatButtonTarget *gFloatButtonTarget = nil;
 
 // ========== 实现 ==========
 
@@ -90,8 +73,9 @@ static UIViewController * topViewController(void) {
 
 static NSString * strictEncodeURIComponent(NSString *str) {
     if (!str) return @"";
-    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~"];
-    return [str stringByAddingPercentEncodingWithAllowedCharacters:allowed];
+    NSMutableCharacterSet *cs = [NSMutableCharacterSet alphanumericCharacterSet];
+    [cs addCharactersInString:@"-_.!~*'()"];
+    return [str stringByAddingPercentEncodingWithAllowedCharacters:cs];
 }
 
 static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *headers, NSString *body, void (^handler)(id json, NSError *err)) {
@@ -232,10 +216,6 @@ static void fetchFileList(void (^completion)(NSArray *files, NSError *err)) {
 }
 
 static void showToast(NSString *msg) {
-    if (![NSThread isMainThread]) {
-        dispatch_async(dispatch_get_main_queue(), ^{ showToast(msg); });
-        return;
-    }
     UIWindow *window = nil;
     if (@available(iOS 13.0, *)) {
         for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
@@ -266,17 +246,12 @@ static void showToast(NSString *msg) {
 }
 
 static void showAlert(NSString *title, NSString *msg) {
-    if (![NSThread isMainThread]) {
-        dispatch_async(dispatch_get_main_queue(), ^{ showAlert(title, msg); });
-        return;
-    }
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:msg preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
     UIViewController *vc = topViewController();
     if (vc) [vc presentViewController:alert animated:YES completion:nil];
 }
 
-// 无返回值调用
 static void invokeMethod(id target, SEL selector, NSArray *args) {
     NSMethodSignature *sig = [target methodSignatureForSelector:selector];
     if (!sig) return;
@@ -285,35 +260,14 @@ static void invokeMethod(id target, SEL selector, NSArray *args) {
     [inv setTarget:target];
     for (NSUInteger i = 0; i < args.count; i++) {
         id arg = args[i];
-        if (arg == [NSNull null]) arg = nil;
         [inv setArgument:&arg atIndex:i + 2];
     }
     [inv invoke];
 }
 
-// 带返回值调用（不同函数名，避免 C 语言重载错误）
-static id invokeMethodRet(id target, SEL selector, NSArray *args) {
-    NSMethodSignature *sig = [target methodSignatureForSelector:selector];
-    if (!sig) return nil;
-    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-    [inv setSelector:selector];
-    [inv setTarget:target];
-    for (NSUInteger i = 0; i < args.count; i++) {
-        id arg = args[i];
-        if (arg == [NSNull null]) arg = nil;
-        [inv setArgument:&arg atIndex:i + 2];
-    }
-    [inv invoke];
-    if (sig.methodReturnLength > 0) {
-        __autoreleasing id result = nil;
-        [inv getReturnValue:&result];
-        return result;
-    }
-    return nil;
-}
+// ========== v10.0 核心：修复自动点击 ==========
 
-// ========== v11.1 核心：修复自动点击 ==========
-
+// 递归深度查找指定类的视图
 static UIView * findViewRecursively(UIView *root, Class targetClass) {
     if (!root) return nil;
     if ([root isKindOfClass:targetClass]) return root;
@@ -324,13 +278,7 @@ static UIView * findViewRecursively(UIView *root, Class targetClass) {
     return nil;
 }
 
-static UIView * findViewByClassName(UIView *root, NSString *className) {
-    if (!root || !className) return nil;
-    Class cls = NSClassFromString(className);
-    if (!cls) return nil;
-    return findViewRecursively(root, cls);
-}
-
+// 尝试从清单中的下载管理类获取实例
 static id getDownloadManagerFromClasses(void) {
     NSArray *managerClasses = @[
         @"BDPanDownloadManager",
@@ -344,11 +292,21 @@ static id getDownloadManagerFromClasses(void) {
         Class cls = NSClassFromString(className);
         if (!cls) continue;
 
+        // 尝试单例方法
         NSArray *singletonSelectors = @[@"sharedManager", @"sharedInstance", @"defaultManager", @"manager", @"currentManager"];
         for (NSString *selName in singletonSelectors) {
             SEL sel = NSSelectorFromString(selName);
             if ([cls respondsToSelector:sel]) {
-                id result = invokeMethodRet(cls, sel, @[]);
+                NSMethodSignature *sig = [cls methodSignatureForSelector:sel];
+                if (!sig) continue;
+                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                [inv setSelector:sel];
+                [inv setTarget:cls];
+                [inv invoke];
+                id result = nil;
+                if (sig.methodReturnLength > 0) {
+                    [inv getReturnValue:&result];
+                }
                 if (result) {
                     DLog(@"Got download manager via %@.%@", className, selName);
                     return result;
@@ -356,6 +314,7 @@ static id getDownloadManagerFromClasses(void) {
             }
         }
 
+        // 尝试 alloc/init
         @try {
             id instance = [[cls alloc] init];
             if (instance) {
@@ -367,15 +326,18 @@ static id getDownloadManagerFromClasses(void) {
     return nil;
 }
 
+// 获取文件列表的数据源，尝试多种途径
 static id getFileListDataSource(UIViewController *vc) {
     if (!vc) return nil;
 
+    // 1. 查找 UITableView / UICollectionView 的数据源
     UITableView *tableView = (UITableView *)findViewRecursively(vc.view, [UITableView class]);
     if (tableView && tableView.dataSource) return tableView.dataSource;
 
     UICollectionView *collectionView = (UICollectionView *)findViewRecursively(vc.view, [UICollectionView class]);
     if (collectionView && collectionView.dataSource) return collectionView.dataSource;
 
+    // 2. 尝试从 VC 本身获取
     NSArray *dataSourceKeys = @[@"dataSource", @"viewModel", @"fileViewModel", @"listViewModel", @"_dataSource", @"_viewModel", @"presenter", @"interactor"];
     for (NSString *key in dataSourceKeys) {
         @try {
@@ -384,6 +346,7 @@ static id getFileListDataSource(UIViewController *vc) {
         } @catch (NSException *e) {}
     }
 
+    // 3. 尝试从导航栈中的其他 VC 获取
     if (vc.navigationController) {
         for (UIViewController *controller in vc.navigationController.viewControllers) {
             for (NSString *key in dataSourceKeys) {
@@ -398,20 +361,21 @@ static id getFileListDataSource(UIViewController *vc) {
     return nil;
 }
 
+// 多维度匹配文件元数据
 static BOOL matchFileMeta(id item, NSDictionary *targetMeta) {
     if (!item || !targetMeta) return NO;
 
-    id targetFsId = targetMeta[@"fs_id"];
+    // 优先匹配 fs_id
+    NSNumber *targetFsId = targetMeta[@"fs_id"];
     if (targetFsId) {
         @try {
-            id itemFsId = [item valueForKey:@"fs_id"];
+            NSNumber *itemFsId = [item valueForKey:@"fs_id"];
             if (!itemFsId) itemFsId = [item valueForKey:@"_fs_id"];
-            if (itemFsId && [itemFsId respondsToSelector:@selector(isEqual:)]) {
-                if ([itemFsId isEqual:targetFsId]) return YES;
-            }
+            if ([itemFsId isEqualToNumber:targetFsId]) return YES;
         } @catch (NSException *e) {}
     }
 
+    // 匹配 path
     NSString *targetPath = targetMeta[@"path"];
     if (targetPath && targetPath.length > 0) {
         @try {
@@ -422,6 +386,7 @@ static BOOL matchFileMeta(id item, NSDictionary *targetMeta) {
         } @catch (NSException *e) {}
     }
 
+    // 匹配 server_filename
     NSString *targetName = targetMeta[@"server_filename"];
     if (targetName && targetName.length > 0) {
         @try {
@@ -436,97 +401,39 @@ static BOOL matchFileMeta(id item, NSDictionary *targetMeta) {
     return NO;
 }
 
-static void performTapOnView(UIView *view) {
+// 模拟触摸事件点击视图
+static void simulateTouchOnView(UIView *view) {
     if (!view) return;
-
-    if ([view isKindOfClass:[UIButton class]]) {
-        UIButton *btn = (UIButton *)view;
-        [btn sendActionsForControlEvents:UIControlEventTouchUpInside];
-        DLog(@"Triggered UIButton via sendActionsForControlEvents");
-        return;
-    }
-
-    if ([view isKindOfClass:[UITableViewCell class]]) {
-        UITableViewCell *cell = (UITableViewCell *)view;
-        UIView *superview = cell.superview;
-        while (superview && ![superview isKindOfClass:[UITableView class]]) {
-            superview = superview.superview;
-        }
-        if ([superview isKindOfClass:[UITableView class]]) {
-            UITableView *tableView = (UITableView *)superview;
-            NSIndexPath *indexPath = [tableView indexPathForCell:cell];
-            if (indexPath) {
-                performSelectTableViewRow(tableView, indexPath);
-                return;
-            }
-        }
-    }
-
-    if ([view isKindOfClass:[UICollectionViewCell class]]) {
-        UICollectionViewCell *cell = (UICollectionViewCell *)view;
-        UIView *superview = cell.superview;
-        while (superview && ![superview isKindOfClass:[UICollectionView class]]) {
-            superview = superview.superview;
-        }
-        if ([superview isKindOfClass:[UICollectionView class]]) {
-            UICollectionView *collectionView = (UICollectionView *)superview;
-            NSIndexPath *indexPath = [collectionView indexPathForCell:cell];
-            if (indexPath) {
-                performSelectCollectionViewItem(collectionView, indexPath);
-                return;
-            }
-        }
-    }
-
-    UIButton *innerButton = (UIButton *)findViewRecursively(view, [UIButton class]);
-    if (innerButton) {
-        [innerButton sendActionsForControlEvents:UIControlEventTouchUpInside];
-        DLog(@"Triggered inner UIButton");
-        return;
-    }
-
-    DLog(@"No reliable tap method found for view: %@", NSStringFromClass([view class]));
-}
-
-static void performSelectTableViewRow(UITableView *tableView, NSIndexPath *indexPath) {
-    if (!tableView || !indexPath) return;
+    CGPoint center = CGPointMake(view.bounds.size.width / 2, view.bounds.size.height / 2);
 
     @try {
-        [tableView scrollToRowAtIndexPath:indexPath atScrollPosition:UITableViewScrollPositionMiddle animated:NO];
-        [tableView selectRowAtIndexPath:indexPath animated:NO scrollPosition:UITableViewScrollPositionNone];
+        UITouch *touch = [[UITouch alloc] init];
+        // 使用 KVC 设置私有属性
+        [touch setValue:@(UITouchPhaseBegan) forKey:@"phase"];
+        [touch setValue:@(0) forKey:@"tapCount"];
+        [touch setValue:view forKey:@"view"];
+        [touch setValue:[view.window valueForKey:@"window"] ?: view.window forKey:@"window"];
 
-        id delegate = tableView.delegate;
-        if (delegate && [delegate respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) {
-            [delegate tableView:tableView didSelectRowAtIndexPath:indexPath];
-            DLog(@"Triggered tableView:didSelectRowAtIndexPath: %@", indexPath);
-        } else {
-            DLog(@"TableView delegate does not respond to didSelectRowAtIndexPath");
-        }
+        UIEvent *event = [[UIEvent alloc] init];
+        [event setValue:touch forKey:@"_firstTouchForView"];
+        [event setValue:touch forKey:@"_allTouches"];
+
+        [view touchesBegan:[NSSet setWithObject:touch] withEvent:event];
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [touch setValue:@(UITouchPhaseEnded) forKey:@"phase"];
+            [view touchesEnded:[NSSet setWithObject:touch] withEvent:event];
+        });
     } @catch (NSException *e) {
-        DLog(@"performSelectTableViewRow failed: %@", e.reason);
+        DLog(@"Touch simulation failed: %@", e.reason);
     }
 }
 
-static void performSelectCollectionViewItem(UICollectionView *collectionView, NSIndexPath *indexPath) {
-    if (!collectionView || !indexPath) return;
-
-    @try {
-        [collectionView scrollToItemAtIndexPath:indexPath atScrollPosition:UICollectionViewScrollPositionCenteredVertically animated:NO];
-        [collectionView selectItemAtIndexPath:indexPath animated:NO scrollPosition:UICollectionViewScrollPositionNone];
-
-        id delegate = collectionView.delegate;
-        if (delegate && [delegate respondsToSelector:@selector(collectionView:didSelectItemAtIndexPath:)]) {
-            [delegate collectionView:collectionView didSelectItemAtIndexPath:indexPath];
-            DLog(@"Triggered collectionView:didSelectItemAtIndexPath: %@", indexPath);
-        }
-    } @catch (NSException *e) {
-        DLog(@"performSelectCollectionViewItem failed: %@", e.reason);
-    }
-}
-
+// 通过类清单尝试触发 Cell 的点击动作
 static void triggerCellActionByClassList(id cell, NSDictionary *fileMeta) {
     if (!cell) return;
 
+    // 尝试调用 Cell 上的点击方法
     NSArray *cellSelectors = @[
         @"didSelect",
         @"onClick:",
@@ -545,7 +452,7 @@ static void triggerCellActionByClassList(id cell, NSDictionary *fileMeta) {
             DLog(@"Calling cell method: %@", selName);
             @try {
                 if ([selName hasSuffix:@":"]) {
-                    invokeMethod(cell, sel, @[fileMeta ?: [NSNull null]]);
+                    invokeMethod(cell, sel, @[fileMeta]);
                 } else {
                     invokeMethod(cell, sel, @[]);
                 }
@@ -556,12 +463,23 @@ static void triggerCellActionByClassList(id cell, NSDictionary *fileMeta) {
         }
     }
 
+    // 尝试查找 Cell 内部的按钮并点击
     if ([cell isKindOfClass:[UIView class]]) {
         UIView *cellView = (UIView *)cell;
-        performTapOnView(cellView);
+        UIButton *button = (UIButton *)findViewRecursively(cellView, [UIButton class]);
+        if (button) {
+            DLog(@"Found button in cell, simulating touch");
+            simulateTouchOnView(button);
+            return;
+        }
+
+        // 直接模拟点击 Cell 本身
+        DLog(@"Simulating touch on cell itself");
+        simulateTouchOnView(cellView);
     }
 }
 
+// 尝试通过下载管理器直接下载
 static void triggerDownloadViaManager(NSDictionary *fileMeta) {
     id manager = getDownloadManagerFromClasses();
     if (!manager) return;
@@ -597,7 +515,7 @@ static void triggerDownloadViaManager(NSDictionary *fileMeta) {
         if ([manager respondsToSelector:sel]) {
             DLog(@"Calling manager method: %@", selName);
             @try {
-                invokeMethod(manager, sel, @[fileMeta ?: [NSNull null]]);
+                invokeMethod(manager, sel, @[fileMeta]);
                 showToast(@"已通过下载管理器触发");
                 return;
             } @catch (NSException *e) {
@@ -606,7 +524,10 @@ static void triggerDownloadViaManager(NSDictionary *fileMeta) {
         }
     }
 
+    // 尝试用 BBADownloadItem / BBADownloaderTask 创建任务
     Class itemClass = NSClassFromString(@"BBADownloadItem");
+    Class taskClass = NSClassFromString(@"BBADownloaderTask");
+
     if (itemClass) {
         @try {
             id item = [[itemClass alloc] init];
@@ -629,11 +550,6 @@ static void triggerDownloadViaManager(NSDictionary *fileMeta) {
 }
 
 static void triggerDownloadBySimulatingUserAction(NSDictionary *fileMeta) {
-    if (![NSThread isMainThread]) {
-        dispatch_async(dispatch_get_main_queue(), ^{ triggerDownloadBySimulatingUserAction(fileMeta); });
-        return;
-    }
-
     UIViewController *vc = topViewController();
     if (!vc) {
         showToast(@"无法获取当前页面");
@@ -642,7 +558,7 @@ static void triggerDownloadBySimulatingUserAction(NSDictionary *fileMeta) {
 
     DLog(@"Trying to simulate user download action for: %@", fileMeta[@"server_filename"]);
 
-    // 方法1: UITableView
+    // ========== 方法1: 深度查找 UITableView 并模拟点击对应行 ==========
     UITableView *tableView = (UITableView *)findViewRecursively(vc.view, [UITableView class]);
 
     if (tableView) {
@@ -651,17 +567,15 @@ static void triggerDownloadBySimulatingUserAction(NSDictionary *fileMeta) {
 
         if (dataSource) {
             NSArray *fileList = nil;
-            NSArray *listKeys = @[@"fileList", @"dataList", @"list", @"files", @"_fileList", @"_dataList", @"_list", @"fileArray", @"dataArray", @"items", @"models"];
+            NSArray *listKeys = @[@"fileList", @"dataList", @"list", @"files", @"_fileList", @"_dataList", @"_list", @"fileArray", @"dataArray", @"items"];
             for (NSString *key in listKeys) {
                 @try {
-                    id value = [dataSource valueForKey:key];
-                    if (value && [value isKindOfClass:[NSArray class]]) {
-                        fileList = value;
-                        break;
-                    }
+                    fileList = [dataSource valueForKey:key];
+                    if (fileList && [fileList isKindOfClass:[NSArray class]]) break;
                 } @catch (NSException *e) {}
             }
 
+            // 如果数据源没有 list，尝试通过 dataSource 方法获取
             if (!fileList) {
                 @try {
                     if ([dataSource respondsToSelector:@selector(tableView:numberOfRowsInSection:)]) {
@@ -695,9 +609,49 @@ static void triggerDownloadBySimulatingUserAction(NSDictionary *fileMeta) {
                 if (targetIndex != NSNotFound) {
                     NSIndexPath *indexPath = [NSIndexPath indexPathForRow:targetIndex inSection:0];
                     DLog(@"Found target at indexPath: %@", indexPath);
-                    performSelectTableViewRow(tableView, indexPath);
-                    showToast(@"已模拟点击文件");
-                    return;
+
+                    // 先尝试滚动到可见区域
+                    @try {
+                        [tableView scrollToRowAtIndexPath:indexPath atScrollPosition:UITableViewScrollPositionMiddle animated:NO];
+                    } @catch (NSException *e) {}
+
+                    // 获取 Cell 并尝试多种点击方式
+                    UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+                    if (!cell) {
+                        @try {
+                            cell = [tableView.dataSource tableView:tableView cellForRowAtIndexPath:indexPath];
+                        } @catch (NSException *e) {}
+                    }
+
+                    if (cell) {
+                        triggerCellActionByClassList(cell, fileMeta);
+                        showToast(@"已模拟点击文件");
+                        return;
+                    }
+
+                    // 回退到标准 delegate 方法
+                    id delegate = tableView.delegate;
+                    if (delegate && [delegate respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) {
+                        DLog(@"Calling delegate tableView:didSelectRowAtIndexPath:");
+                        @try {
+                            invokeMethod(delegate, @selector(tableView:didSelectRowAtIndexPath:), @[tableView, indexPath]);
+                            showToast(@"已模拟点击文件");
+                            return;
+                        } @catch (NSException *e) {
+                            DLog(@"Delegate method failed: %@", e.reason);
+                        }
+                    }
+
+                    if ([vc respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) {
+                        DLog(@"Calling VC tableView:didSelectRowAtIndexPath:");
+                        @try {
+                            invokeMethod(vc, @selector(tableView:didSelectRowAtIndexPath:), @[tableView, indexPath]);
+                            showToast(@"已模拟点击文件");
+                            return;
+                        } @catch (NSException *e) {
+                            DLog(@"VC method failed: %@", e.reason);
+                        }
+                    }
                 } else {
                     DLog(@"Target file not found in list");
                 }
@@ -705,7 +659,7 @@ static void triggerDownloadBySimulatingUserAction(NSDictionary *fileMeta) {
         }
     }
 
-    // 方法1b: UICollectionView
+    // ========== 方法1b: 深度查找 UICollectionView ==========
     UICollectionView *collectionView = (UICollectionView *)findViewRecursively(vc.view, [UICollectionView class]);
     if (collectionView) {
         DLog(@"Found collectionView via recursive search");
@@ -723,7 +677,17 @@ static void triggerDownloadBySimulatingUserAction(NSDictionary *fileMeta) {
                         if (!item) item = [cell valueForKey:@"data"];
                         if (matchFileMeta(item ?: cell, fileMeta)) {
                             DLog(@"Found target in collectionView at indexPath: %@", indexPath);
-                            performSelectCollectionViewItem(collectionView, indexPath);
+
+                            id delegate = collectionView.delegate;
+                            if (delegate && [delegate respondsToSelector:@selector(collectionView:didSelectItemAtIndexPath:)]) {
+                                @try {
+                                    invokeMethod(delegate, @selector(collectionView:didSelectItemAtIndexPath:), @[collectionView, indexPath]);
+                                    showToast(@"已模拟点击文件");
+                                    return;
+                                } @catch (NSException *e) {}
+                            }
+
+                            triggerCellActionByClassList(cell, fileMeta);
                             showToast(@"已模拟点击文件");
                             return;
                         }
@@ -733,7 +697,7 @@ static void triggerDownloadBySimulatingUserAction(NSDictionary *fileMeta) {
         }
     }
 
-    // 方法2: VC 直接下载方法
+    // ========== 方法2: 尝试直接调用 VC 的下载方法 ==========
     NSArray *vcSelectors = @[
         @"downloadFile:", @"downloadFileWithMeta:", @"startDownload:", @"addDownloadTask:",
         @"handleDownloadAction:", @"onDownloadButtonClick:", @"didClickDownload:",
@@ -749,7 +713,7 @@ static void triggerDownloadBySimulatingUserAction(NSDictionary *fileMeta) {
         if ([vc respondsToSelector:sel]) {
             DLog(@"Calling VC method: %@", selName);
             @try {
-                invokeMethod(vc, sel, @[fileMeta ?: [NSNull null]]);
+                invokeMethod(vc, sel, @[fileMeta]);
                 showToast(@"已触发下载");
                 return;
             } @catch (NSException *e) {
@@ -758,7 +722,7 @@ static void triggerDownloadBySimulatingUserAction(NSDictionary *fileMeta) {
         }
     }
 
-    // 方法3: navigationController viewControllers
+    // ========== 方法3: 尝试 navigationController 的 viewControllers ==========
     if (vc.navigationController) {
         for (UIViewController *controller in vc.navigationController.viewControllers) {
             for (NSString *selName in vcSelectors) {
@@ -766,7 +730,7 @@ static void triggerDownloadBySimulatingUserAction(NSDictionary *fileMeta) {
                 if ([controller respondsToSelector:sel]) {
                     DLog(@"Calling stack VC method: %@ on %@", selName, NSStringFromClass([controller class]));
                     @try {
-                        invokeMethod(controller, sel, @[fileMeta ?: [NSNull null]]);
+                        invokeMethod(controller, sel, @[fileMeta]);
                         showToast(@"已触发下载");
                         return;
                     } @catch (NSException *e) {
@@ -775,6 +739,7 @@ static void triggerDownloadBySimulatingUserAction(NSDictionary *fileMeta) {
                 }
             }
 
+            // 尝试从导航栈中的 VC 获取 TableView
             UITableView *stackTV = (UITableView *)findViewRecursively(controller.view, [UITableView class]);
             if (stackTV) {
                 id ds = getFileListDataSource(controller);
@@ -787,9 +752,14 @@ static void triggerDownloadBySimulatingUserAction(NSDictionary *fileMeta) {
                         for (NSUInteger i = 0; i < [list count]; i++) {
                             if (matchFileMeta(list[i], fileMeta)) {
                                 NSIndexPath *ip = [NSIndexPath indexPathForRow:i inSection:0];
-                                performSelectTableViewRow(stackTV, ip);
-                                showToast(@"已触发下载");
-                                return;
+                                id del = stackTV.delegate;
+                                if (del && [del respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) {
+                                    @try {
+                                        invokeMethod(del, @selector(tableView:didSelectRowAtIndexPath:), @[stackTV, ip]);
+                                        showToast(@"已触发下载");
+                                        return;
+                                    } @catch (NSException *e) {}
+                                }
                             }
                         }
                     }
@@ -798,7 +768,7 @@ static void triggerDownloadBySimulatingUserAction(NSDictionary *fileMeta) {
         }
     }
 
-    // 方法4: AppDelegate
+    // ========== 方法4: 尝试 AppDelegate ==========
     id appDelegate = [[UIApplication sharedApplication] delegate];
     if (appDelegate) {
         for (NSString *selName in vcSelectors) {
@@ -806,7 +776,7 @@ static void triggerDownloadBySimulatingUserAction(NSDictionary *fileMeta) {
             if ([appDelegate respondsToSelector:sel]) {
                 DLog(@"Calling AppDelegate method: %@", selName);
                 @try {
-                    invokeMethod(appDelegate, sel, @[fileMeta ?: [NSNull null]]);
+                    invokeMethod(appDelegate, sel, @[fileMeta]);
                     showToast(@"已触发下载");
                     return;
                 } @catch (NSException *e) {
@@ -816,7 +786,7 @@ static void triggerDownloadBySimulatingUserAction(NSDictionary *fileMeta) {
         }
     }
 
-    // 方法5: 下载管理器
+    // ========== 方法5: 尝试通过下载管理器直接下载 ==========
     triggerDownloadViaManager(fileMeta);
 
     DLog(@"All simulation methods failed, using fallback");
@@ -967,7 +937,7 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 16 ? 16 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v11.1"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.0"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"📥 下载文件" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
@@ -999,18 +969,31 @@ static void showFloatButton(void) {
     [gFloatButton setTitle:@"🚀" forState:UIControlStateNormal];
     [gFloatButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     gFloatButton.titleLabel.font = [UIFont systemFontOfSize:24];
-
-    if (!gFloatButtonTarget) gFloatButtonTarget = [[BDTFloatButtonTarget alloc] init];
-    [gFloatButton addTarget:gFloatButtonTarget action:@selector(floatButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:gFloatButtonTarget action:@selector(floatButtonPanned:)];
+    [gFloatButton addTarget:nil action:@selector(bdt_floatButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:nil action:@selector(bdt_floatButtonPanned:)];
     [gFloatButton addGestureRecognizer:pan];
     [window addSubview:gFloatButton];
     DLog(@"Float button shown");
 }
 
+@interface NSObject (BaiduPanTroll)
+- (void)bdt_floatButtonTapped:(id)sender;
+- (void)bdt_floatButtonPanned:(UIPanGestureRecognizer *)gesture;
+@end
+
+@implementation NSObject (BaiduPanTroll)
+- (void)bdt_floatButtonTapped:(id)sender { onFloatButtonTap(); }
+- (void)bdt_floatButtonPanned:(UIPanGestureRecognizer *)gesture {
+    UIView *button = gesture.view;
+    CGPoint translation = [gesture translationInView:button.superview];
+    button.center = CGPointMake(button.center.x + translation.x, button.center.y + translation.y);
+    [gesture setTranslation:CGPointZero inView:button.superview];
+}
+@end
+
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v11.1 loaded");
+    DLog(@"BaiduPan Troll v10.0 loaded");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
