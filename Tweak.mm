@@ -765,121 +765,9 @@ static BOOL viewContainsText(UIView *view, NSString *text) {
 
 static void scrollToFileLocation(NSString *fileName) {
     if (!fileName) return;
-    DLog(@"Scrolling to file: %@", fileName);
-
-    UIViewController *vc = topViewController();
-    if (!vc) { DLog(@"No top VC for scroll"); return; }
-
-    // Strategy 1: Find UITableView and scroll directly to cell
-    UITableView *tableView = (UITableView *)findViewRecursively(vc.view, [UITableView class]);
-    if (tableView) {
-        DLog(@"Found tableView, searching rows for: %@", fileName);
-
-        // Fix iOS 11+ estimated height issue
-        @try {
-            tableView.estimatedRowHeight = 0;
-            tableView.estimatedSectionHeaderHeight = 0;
-            tableView.estimatedSectionFooterHeight = 0;
-        } @catch (NSException *e) {}
-
-        // Ensure layout is complete before searching
-        [tableView layoutIfNeeded];
-
-        NSInteger totalSections = 1;
-        @try { totalSections = [tableView numberOfSections]; } @catch (NSException *e) {}
-
-        NSIndexPath *foundIndexPath = nil;
-
-        for (NSInteger section = 0; section < totalSections; section++) {
-            NSInteger rows = 0;
-            @try { rows = [tableView numberOfRowsInSection:section]; } @catch (NSException *e) {}
-
-            for (NSInteger row = 0; row < rows; row++) {
-                NSIndexPath *ip = [NSIndexPath indexPathForRow:row inSection:section];
-                @try {
-                    // Force cell creation/visibility before checking
-                    UITableViewCell *cell = [tableView cellForRowAtIndexPath:ip];
-                    if (!cell) continue;
-                    if (viewContainsText(cell, fileName)) {
-                        foundIndexPath = ip;
-                        DLog(@"Found cell at row %ld, section %ld", (long)row, (long)section);
-                        break;
-                    }
-                } @catch (NSException *e) {}
-            }
-            if (foundIndexPath) break;
-        }
-
-        if (foundIndexPath) {
-            // Method A: Use rectForRowAtIndexPath + setContentOffset (most reliable)
-            CGRect cellRect = [tableView rectForRowAtIndexPath:foundIndexPath];
-            CGFloat targetY = cellRect.origin.y - tableView.contentInset.top - 20;
-            targetY = MAX(-tableView.contentInset.top, targetY);
-
-            DLog(@"Scrolling to cell rect: %@, targetY: %.1f", NSStringFromCGRect(cellRect), targetY);
-            [tableView setContentOffset:CGPointMake(0, targetY) animated:YES];
-            return;
-        }
-        DLog(@"Cell not found in tableView rows");
-    }
-
-    // Strategy 2: Direct UIScrollView contentOffset manipulation
-    UIScrollView *scrollView = (UIScrollView *)findViewRecursively(vc.view, [UIScrollView class]);
-    if (scrollView) {
-        DLog(@"Trying direct scrollView manipulation");
-        [scrollView layoutIfNeeded];
-
-        for (UIView *sub in scrollView.subviews) {
-            if (viewContainsText(sub, fileName)) {
-                CGRect frame = [sub convertRect:sub.bounds toView:scrollView];
-                CGFloat targetY = frame.origin.y - 80;
-                targetY = MAX(-scrollView.contentInset.top, MIN(targetY, scrollView.contentSize.height - scrollView.bounds.size.height));
-                [scrollView setContentOffset:CGPointMake(0, targetY) animated:YES];
-                DLog(@"Scrolled to y=%.1f via direct manipulation", targetY);
-                return;
-            }
-        }
-    }
-
-    // Strategy 3: Find label via window search
-    UIWindow *window = nil;
-    if (@available(iOS 13.0, *)) {
-        for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
-            if (scene.activationState == UISceneActivationStateForegroundActive) {
-                window = scene.windows.firstObject;
-                break;
-            }
-        }
-    }
-    if (!window) window = [[UIApplication sharedApplication] keyWindow];
-    if (!window) return;
-
-    UIView *targetLabel = findLabelWithText(window, fileName, 0);
-    if (!targetLabel) {
-        NSString *nameWithoutExt = [fileName stringByDeletingPathExtension];
-        if (nameWithoutExt.length > 0 && ![nameWithoutExt isEqualToString:fileName]) {
-            targetLabel = findLabelWithText(window, nameWithoutExt, 0);
-        }
-    }
-    if (!targetLabel) {
-        NSString *partial = fileName.length > 10 ? [fileName substringToIndex:10] : fileName;
-        targetLabel = findLabelWithText(window, partial, 0);
-    }
-
-    if (targetLabel) {
-        UIScrollView *sv = findParentScrollView(targetLabel);
-        if (sv) {
-            [sv layoutIfNeeded];
-            CGRect labelFrame = [targetLabel convertRect:targetLabel.bounds toView:sv];
-            CGFloat targetY = labelFrame.origin.y - 100;
-            targetY = MAX(-sv.contentInset.top, MIN(targetY, sv.contentSize.height - sv.bounds.size.height));
-            [sv setContentOffset:CGPointMake(0, targetY) animated:YES];
-            DLog(@"Scrolled to y=%.1f via label", targetY);
-            return;
-        }
-    }
-
-    DLog(@"Could not find file to scroll to");
+    DLog(@"scrollToFileLocation: %@", fileName);
+    // This function is now a no-op placeholder.
+    // All scrolling logic has been moved into autoClickRenamedFile for consistency.
 }
 
 // ========== v10.2 Auto-click helpers ==========
@@ -898,178 +786,121 @@ static UIView * findViewRecursively(UIView *root, Class targetClass) {
 
 static void autoClickRenamedFile(NSString *ipaName) {
     if (!ipaName) return;
-    DLog(@"v10.2 Auto-clicking: %@", ipaName);
+    DLog(@"v10.3 Auto-clicking: %@", ipaName);
 
     UIViewController *vc = topViewController();
     if (!vc) {
-        DLog(@"No top VC");
+        DLog(@"No top VC for auto-click");
         return;
     }
 
-    __block UITableViewCell *targetCell = nil;
-    __block NSIndexPath *targetIndexPath = nil;
-
-    // Strategy 1: Find UITableView and search ALL rows (not just visible)
     UITableView *tableView = (UITableView *)findViewRecursively(vc.view, [UITableView class]);
-    if (tableView) {
-        DLog(@"Found tableView, searching all rows for: %@", ipaName);
-
-        // Step 1: Search ALL rows in the table (not just visible ones)
-        NSInteger totalSections = 1;
-        @try { totalSections = [tableView numberOfSections]; } @catch (NSException *e) {}
-
-        for (NSInteger section = 0; section < totalSections && !targetCell; section++) {
-            NSInteger rows = 0;
-            @try { rows = [tableView numberOfRowsInSection:section]; } @catch (NSException *e) {}
-
-            for (NSInteger row = 0; row < rows; row++) {
-                NSIndexPath *ip = [NSIndexPath indexPathForRow:row inSection:section];
-                @try {
-                    UITableViewCell *cell = [tableView cellForRowAtIndexPath:ip];
-                    if (!cell) continue;
-                    if (viewContainsText(cell, ipaName)) {
-                        targetCell = cell;
-                        targetIndexPath = ip;
-                        DLog(@"Found cell at row %ld, section %ld", (long)row, (long)section);
-                        break;
-                    }
-                } @catch (NSException *e) {}
-            }
-        }
-
-        // Step 2: If not found, reload and try again
-        if (!targetCell) {
-            DLog(@"Cell not found in current rows, reloading table...");
-            [tableView reloadData];
-
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                NSInteger sections = 1;
-                @try { sections = [tableView numberOfSections]; } @catch (NSException *e) {}
-
-                for (NSInteger section = 0; section < sections && !targetCell; section++) {
-                    NSInteger rows = 0;
-                    @try { rows = [tableView numberOfRowsInSection:section]; } @catch (NSException *e) {}
-
-                    for (NSInteger row = 0; row < rows; row++) {
-                        NSIndexPath *ip = [NSIndexPath indexPathForRow:row inSection:section];
-                        @try {
-                            UITableViewCell *cell = [tableView cellForRowAtIndexPath:ip];
-                            if (!cell) continue;
-                            if (viewContainsText(cell, ipaName)) {
-                                targetCell = cell;
-                                targetIndexPath = ip;
-                                DLog(@"Found cell after reload at row %ld", (long)row);
-                                break;
-                            }
-                        } @catch (NSException *e) {}
-                    }
-                }
-
-                if (targetCell && targetIndexPath) {
-                    [tableView scrollToRowAtIndexPath:targetIndexPath atScrollPosition:UITableViewScrollPositionTop animated:YES];
-                    showToast(@"正在滚动到文件...");
-
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                        executeClickOnCell(targetCell, targetIndexPath, tableView);
-                    });
-                } else {
-                    DLog(@"Cell still not found after reload");
-                    showToast(@"未找到文件，请手动点击");
-                }
-            });
-            return;
-        }
-
-        // Step 3: Cell found, scroll to top and click
-        if (targetCell && targetIndexPath) {
-            [tableView scrollToRowAtIndexPath:targetIndexPath atScrollPosition:UITableViewScrollPositionTop animated:YES];
-            showToast(@"正在滚动到文件...");
-
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                executeClickOnCell(targetCell, targetIndexPath, tableView);
-            });
-            return;
-        }
+    if (!tableView) {
+        DLog(@"No tableView found");
+        showToast(@"未找到文件列表");
+        return;
     }
 
-    // Strategy 2: Find UICollectionView
-    UICollectionView *collectionView = (UICollectionView *)findViewRecursively(vc.view, [UICollectionView class]);
-    if (collectionView) {
-        DLog(@"Found collectionView");
-        for (UICollectionViewCell *cell in collectionView.visibleCells) {
-            if (viewContainsText(cell, ipaName)) {
-                NSIndexPath *ip = [collectionView indexPathForCell:cell];
-                if (ip) {
-                    [collectionView scrollToItemAtIndexPath:ip atScrollPosition:UICollectionViewScrollPositionCenteredVertically animated:NO];
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                        CGPoint center = CGPointMake(cell.bounds.size.width / 2, cell.bounds.size.height / 2);
-                        sendTouchToView(cell.contentView, center);
-                        sendTouchToView(cell, center);
+    DLog(@"Found tableView, searching all rows for: %@", ipaName);
 
-                        id delegate = collectionView.delegate;
-                        if (delegate && [delegate respondsToSelector:@selector(collectionView:didSelectItemAtIndexPath:)]) {
-                            NSMethodSignature *sig = [delegate methodSignatureForSelector:@selector(collectionView:didSelectItemAtIndexPath:)];
-                            if (sig) {
-                                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                                [inv setSelector:@selector(collectionView:didSelectItemAtIndexPath:)];
-                                [inv setTarget:delegate];
-                                id cv = collectionView;
-                                id ipArg = ip;
-                                [inv setArgument:&cv atIndex:2];
-                                [inv setArgument:&ipArg atIndex:3];
-                                [inv invoke];
-                            }
+    // Fix iOS 11+ estimated height issue
+    @try {
+        tableView.estimatedRowHeight = 0;
+        tableView.estimatedSectionHeaderHeight = 0;
+        tableView.estimatedSectionFooterHeight = 0;
+    } @catch (NSException *e) {}
+
+    [tableView layoutIfNeeded];
+
+    // Step 1: Find the target row by iterating all rows
+    NSInteger totalSections = 1;
+    @try { totalSections = [tableView numberOfSections]; } @catch (NSException *e) {}
+
+    NSIndexPath *foundIndexPath = nil;
+
+    for (NSInteger section = 0; section < totalSections; section++) {
+        NSInteger rows = 0;
+        @try { rows = [tableView numberOfRowsInSection:section]; } @catch (NSException *e) {}
+
+        for (NSInteger row = 0; row < rows; row++) {
+            NSIndexPath *ip = [NSIndexPath indexPathForRow:row inSection:section];
+            @try {
+                UITableViewCell *cell = [tableView cellForRowAtIndexPath:ip];
+                if (!cell) continue;
+                if (viewContainsText(cell, ipaName)) {
+                    foundIndexPath = ip;
+                    DLog(@"Found cell at row %ld, section %ld", (long)row, (long)section);
+                    break;
+                }
+            } @catch (NSException *e) {}
+        }
+        if (foundIndexPath) break;
+    }
+
+    if (!foundIndexPath) {
+        DLog(@"Cell not found, reloading...");
+        [tableView reloadData];
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [tableView layoutIfNeeded];
+
+            NSInteger sections = 1;
+            @try { sections = [tableView numberOfSections]; } @catch (NSException *e) {}
+            NSIndexPath *foundAfterReload = nil;
+
+            for (NSInteger section = 0; section < sections; section++) {
+                NSInteger rows = 0;
+                @try { rows = [tableView numberOfRowsInSection:section]; } @catch (NSException *e) {}
+
+                for (NSInteger row = 0; row < rows; row++) {
+                    NSIndexPath *ip = [NSIndexPath indexPathForRow:row inSection:section];
+                    @try {
+                        UITableViewCell *cell = [tableView cellForRowAtIndexPath:ip];
+                        if (!cell) continue;
+                        if (viewContainsText(cell, ipaName)) {
+                            foundAfterReload = ip;
+                            DLog(@"Found cell after reload at row %ld", (long)row);
+                            break;
                         }
-                        triggerGestureRecognizers(cell);
-                        showToast(@"已自动点击文件");
-                    });
-                    return;
+                    } @catch (NSException *e) {}
                 }
+                if (foundAfterReload) break;
             }
-        }
-    }
 
-    // Strategy 3: Global window search
-    DLog(@"Falling back to global label search");
-    UIWindow *window = nil;
-    if (@available(iOS 13.0, *)) {
-        for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
-            if (scene.activationState == UISceneActivationStateForegroundActive) {
-                window = scene.windows.firstObject;
-                break;
-            }
-        }
-    }
-    if (!window) window = [[UIApplication sharedApplication] keyWindow];
-    if (window) {
-        for (UIView *sub in window.subviews) {
-            if (viewContainsText(sub, ipaName)) {
-                DLog(@"Found view containing text via global search");
-                UIView *clickTarget = sub;
-                // Walk up to find cell or meaningful container
-                NSInteger depth = 0;
-                while (clickTarget && depth < 10) {
-                    if ([clickTarget isKindOfClass:[UITableViewCell class]] || 
-                        [clickTarget isKindOfClass:[UICollectionViewCell class]] ||
-                        [clickTarget isKindOfClass:[UIButton class]]) {
-                        break;
+            if (foundAfterReload) {
+                [tableView scrollToRowAtIndexPath:foundAfterReload atScrollPosition:UITableViewScrollPositionTop animated:YES];
+                showToast(@"正在滚动到文件...");
+
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    UITableViewCell *cell = [tableView cellForRowAtIndexPath:foundAfterReload];
+                    if (cell) {
+                        executeClickOnCell(cell, foundAfterReload, tableView);
+                    } else {
+                        DLog(@"Cell became nil after scroll");
+                        showToast(@"文件未显示，请手动点击");
                     }
-                    clickTarget = clickTarget.superview;
-                    depth++;
-                }
-                if (!clickTarget) clickTarget = sub;
-
-                CGPoint center = CGPointMake(clickTarget.bounds.size.width / 2, clickTarget.bounds.size.height / 2);
-                sendTouchToView(clickTarget, center);
-                triggerGestureRecognizers(clickTarget);
-                showToast(@"已自动点击文件");
-                return;
+                });
+            } else {
+                DLog(@"Cell still not found after reload");
+                showToast(@"未找到文件，请手动点击");
             }
-        }
+        });
+        return;
     }
 
-    DLog(@"Auto-click failed completely");
-    showToast(@"自动点击失败，请手动点击文件");
+    // Cell found - scroll to it first, then click
+    [tableView scrollToRowAtIndexPath:foundIndexPath atScrollPosition:UITableViewScrollPositionTop animated:YES];
+    showToast(@"正在滚动到文件...");
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UITableViewCell *cell = [tableView cellForRowAtIndexPath:foundIndexPath];
+        if (cell) {
+            executeClickOnCell(cell, foundIndexPath, tableView);
+        } else {
+            DLog(@"Cell became nil after scroll");
+            showToast(@"文件未显示，请手动点击");
+        }
+    });
 }
 // ========== Tap Detection ==========
 
