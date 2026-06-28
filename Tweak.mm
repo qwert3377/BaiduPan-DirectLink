@@ -613,30 +613,6 @@ static BOOL viewContainsText(UIView *view, NSString *text) {
     return NO;
 }
 
-static void scrollToFileLocation(NSString *fileName) {
-    if (!fileName) return;
-    DLog(@"scrollToFileLocation: %@", fileName);
-
-    UIScrollView *listView = findListViewGlobally();
-    if (!listView) {
-        DLog(@"No list view for scroll");
-        return;
-    }
-
-    CGFloat contentHeight = listView.contentSize.height;
-    CGFloat boundsHeight = listView.bounds.size.height;
-    CGFloat bottomOffset = contentHeight - boundsHeight;
-
-    if (bottomOffset > 0) {
-        [UIView animateWithDuration:0.5 animations:^{
-            listView.contentOffset = CGPointMake(0, bottomOffset);
-        }];
-        DLog(@"Forced scroll to bottom offset %.0f", bottomOffset);
-    } else {
-        DLog(@"Content already fits in view");
-    }
-}
-
 // ========== v10.15 Auto-click helpers ==========
 
 static UIScrollView * findListViewInHierarchy(UIView *root) {
