@@ -1250,15 +1250,19 @@ static void checkIfFileOpened(void) {
         }
 
         if (returned) {
-            DLog(@"Phase 2: Returned to file list, re-clicking after 1s...");
-            showToast(@"已退出，1秒后重新点击...");
+            DLog(@"Phase 2: Returned to file list, refreshing then re-clicking...");
+            showToast(@"已退出，刷新后重新点击...");
 
             if (gTapDetectionTimer) {
                 [gTapDetectionTimer invalidate];
                 gTapDetectionTimer = nil;
             }
 
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            // Refresh first after returning
+            forceRefreshFileList();
+
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                showToast(@"再次点击文件...");
                 NSString *ppName = [gPendingRestoreOriginalName stringByAppendingString:@".pp"];
                 autoClickRenamedFile(ppName);
 
@@ -1366,7 +1370,7 @@ static void triggerDownloadFlow(void) {
             return;
         }
         UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"选择文件"
-                                                                       message:@"选择后自动重命名为.pp并刷新，自动点击文件打开后自动退出并重新点击，最后恢复原名"
+                                                                       message:@"选择后自动重命名为.pp并刷新，自动点击文件打开后自动退出、刷新、再次点击，最后恢复原名"
                                                                 preferredStyle:UIAlertControllerStyleActionSheet];
         for (NSDictionary *file in fileItems) {
             NSString *name = file[@"server_filename"];
