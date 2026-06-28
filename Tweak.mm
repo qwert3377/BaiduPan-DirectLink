@@ -346,11 +346,11 @@ static void showToast(NSString *msg) {
 
     // Remove existing toast if any
     for (UIView *sub in window.subviews) {
-        if (sub.tag == 0xBDT) [sub removeFromSuperview];
+        if (sub.tag == 0xBDF0) [sub removeFromSuperview];
     }
 
     UILabel *toast = [[UILabel alloc] init];
-    toast.tag = 0xBDT;
+    toast.tag = 0xBDF0;
     toast.text = msg;
     toast.textColor = [UIColor whiteColor];
     toast.backgroundColor = [UIColor colorWithWhite:0 alpha:0.85];
