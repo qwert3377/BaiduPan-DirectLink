@@ -1,17 +1,9 @@
 //
 //  BaiduPan SVIP Direct Link Helper - TrollStore Edition v8.5
-//  Fix: objc_setAssociatedObject key type (const void*), removed hardcoded fallback token
-//  Fix v8.3: Replaced private API KVC (setValue:forKey:@"contentViewController") with standard addTextFieldWithConfigurationHandler
-//            Removed LinkCopyButton subclass to avoid UIButton class-cluster crash
-//            Added __weak reference for progressAlert to prevent use-after-free
-//  Fix v8.4: "再次复制" now also restores original filename in one step
-//            Skip rename if file is already .pdf
-//  Fix v8.5: Rewrote forceRefreshFileList with multi-strategy approach
-//            Added recursive UITableView/UICollectionView reload
-//            Added NSNotification-based refresh triggers
-//            Added navigation stack traversal
-//            Fixed "processing" dialog stuck issue
-//  Token source: auto-detected from app only (NSUserDefaults + memory scan)
+//  Fix: forceRefreshFileList now supports BaiduPan-specific refresh components
+//       (MJRefreshHeader, EGORefreshTableHeaderView, BDPanRefreshBackNormalFooter)
+//  Fix: Replaced fixed 4s delay with polling-based file existence check after rename
+//  Fix: Added recursive scrollView discovery and notification broadcast fallback
 //
 
 #import <UIKit/UIKit.h>
@@ -332,34 +324,49 @@ static void showToast(NSString *msg) {
     });
 }
 
-// ========== v8.5 改进的文件列表刷新机制 ==========
+// ========== v8.5 刷新修复 ==========
 
-static void forceRefreshSubviews(UIView *view);
-static void forceTriggerPullToRefresh(UIView *view);
+static UIScrollView * findScrollViewInView(UIView *view) {
+    if ([view isKindOfClass:[UIScrollView class]]) return (UIScrollView *)view;
+    for (UIView *subview in view.subviews) {
+        UIScrollView *found = findScrollViewInView(subview);
+        if (found) return found;
+    }
+    return nil;
+}
+
+static void triggerMJRefresh(id headerOrFooter) {
+    if (!headerOrFooter) return;
+    SEL beginSel = NSSelectorFromString(@"beginRefreshing");
+    SEL executeSel = NSSelectorFromString(@"executeRefreshingCallback");
+    if ([headerOrFooter respondsToSelector:beginSel]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        [headerOrFooter performSelector:beginSel];
+        #pragma clang diagnostic pop
+        DLog(@"Triggered MJRefresh beginRefreshing");
+    }
+    if ([headerOrFooter respondsToSelector:executeSel]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        [headerOrFooter performSelector:executeSel];
+        #pragma clang diagnostic pop
+    }
+}
 
 static void forceRefreshFileList(void) {
     UIViewController *vc = topViewController();
-    if (!vc) return;
+    if (!vc) { DLog(@"No top VC for refresh"); return; }
 
-    DLog(@"Attempting to refresh file list...");
-
-    // 策略1: 尝试调用百度网盘特定的刷新方法
-    NSArray *baiduRefreshSelectors = @[
-        @"refreshFileList", @"reloadFileList", @"fetchFileList",
-        @"loadFileList", @"requestFileList", @"updateFileList",
-        @"refreshData", @"reloadData", @"loadData",
-        @"refresh", @"reload", @"requestData",
-        @"fetchData", @"updateData", @"syncData",
-        @"refreshCurrentDirectory", @"reloadCurrentDirectory",
-        @"refreshDirectory", @"reloadDirectory",
-        @"refreshPath", @"reloadPath",
-        @"pan_refresh", @"pan_reload", @"pan_fetchData",
-        @"fileListRefresh", @"fileListReload",
-        @"directoryRefresh", @"directoryReload",
-        @"contentRefresh", @"contentReload"
+    // 1. 尝试调用百度网盘特定的刷新方法（无参数）
+    NSArray *baiduSelectors = @[
+        @"refreshFileList", @"reloadFileList", @"updateFileList",
+        @"refreshData", @"reloadData", @"updateData",
+        @"refreshContent", @"reloadContent", @"updateContent",
+        @"requestFileList", @"fetchFileList", @"loadFileList",
+        @"beginRefreshing", @"beginRefresh:"
     ];
-
-    for (NSString *selName in baiduRefreshSelectors) {
+    for (NSString *selName in baiduSelectors) {
         SEL sel = NSSelectorFromString(selName);
         if ([vc respondsToSelector:sel]) {
             DLog(@"Calling VC refresh method: %@", selName);
@@ -371,114 +378,137 @@ static void forceRefreshFileList(void) {
         }
     }
 
-    // 策略2: 尝试刷新 UITableView/UICollectionView
-    [forceRefreshSubviews:vc.view];
-
-    // 策略3: 尝试发送 NSNotification 触发刷新
-    NSArray *notificationNames = @[
-        @"BDPanFileListNeedRefreshNotification",
-        @"BDPanDirectoryChangedNotification",
-        @"BDPanFileListUpdatedNotification",
-        @"BDPanNeedReloadNotification",
-        @"BaiduPanRefreshNotification",
-        @"BaiduPanReloadNotification",
-        @"netdisk.refresh",
-        @"com.baidu.netdisk.refresh",
-        @"FileListShouldRefresh",
-        @"DirectoryShouldReload"
-    ];
-
-    for (NSString *notifName in notificationNames) {
-        DLog(@"Posting notification: %@", notifName);
-        [[NSNotificationCenter defaultCenter] postNotificationName:notifName object:nil];
+    // 2. 尝试找到UIScrollView并触发其刷新控件
+    UIScrollView *scrollView = findScrollViewInView(vc.view);
+    if (!scrollView) {
+        DLog(@"No scrollView found in VC, trying notification fallback");
+        goto NOTIFICATION_FALLBACK;
     }
 
-    // 策略4: 尝试触发下拉刷新控件
-    [forceTriggerPullToRefresh:vc.view];
-
-    // 策略5: 尝试调用导航栈中其他 VC 的刷新方法
-    UINavigationController *nav = nil;
-    if ([vc isKindOfClass:[UINavigationController class]]) {
-        nav = (UINavigationController *)vc;
-    } else if (vc.navigationController) {
-        nav = vc.navigationController;
+    // 2.1 标准UIRefreshControl
+    if (scrollView.refreshControl) {
+        DLog(@"Triggering UIRefreshControl");
+        [scrollView.refreshControl beginRefreshing];
+        CGPoint offset = scrollView.contentOffset;
+        [UIView animateWithDuration:0.25 animations:^{
+            scrollView.contentOffset = CGPointMake(offset.x, -scrollView.refreshControl.frame.size.height);
+        }];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [scrollView.refreshControl endRefreshing];
+        });
+        return;
     }
 
-    if (nav) {
-        for (UIViewController *controller in nav.viewControllers) {
-            for (NSString *selName in baiduRefreshSelectors) {
-                SEL sel = NSSelectorFromString(selName);
-                if ([controller respondsToSelector:sel]) {
-                    DLog(@"Calling Nav VC refresh method: %@", selName);
-                    #pragma clang diagnostic push
-                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                    [controller performSelector:sel];
-                    #pragma clang diagnostic pop
-                }
+    // 2.2 MJRefreshHeader / MJRefreshFooter (KVC)
+    id mjHeader = nil;
+    id mjFooter = nil;
+    @try {
+        mjHeader = [scrollView valueForKey:@"mj_header"];
+        mjFooter = [scrollView valueForKey:@"mj_footer"];
+    } @catch (NSException *e) {}
+    if (mjHeader) { triggerMJRefresh(mjHeader); return; }
+    if (mjFooter) { triggerMJRefresh(mjFooter); return; }
+
+    // 2.3 EGORefreshTableHeaderView / BDPanRefresh / BDWalletRefresh
+    for (UIView *subview in scrollView.subviews) {
+        NSString *className = NSStringFromClass([subview class]);
+        if ([className containsString:@"RefreshHeader"] ||
+            [className containsString:@"EGORefresh"] ||
+            [className containsString:@"BDWalletRefresh"] ||
+            [className containsString:@"BDPanRefresh"] ||
+            [className containsString:@"RadarRefresh"] ||
+            [className containsString:@"DimeCircleRefresh"]) {
+            DLog(@"Found refresh component: %@", className);
+
+            // 尝试 beginRefreshing
+            if ([subview respondsToSelector:@selector(beginRefreshing)]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                [subview performSelector:@selector(beginRefreshing)];
+                #pragma clang diagnostic pop
+                return;
             }
-            [forceRefreshSubviews:controller.view];
+
+            // 尝试 EGO 协议方法
+            SEL egoScrollSel = NSSelectorFromString(@"egoRefreshScrollViewDidScroll:");
+            SEL egoDragSel = NSSelectorFromString(@"egoRefreshScrollViewDidEndDragging:");
+            if ([subview respondsToSelector:egoScrollSel]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                [subview performSelector:egoScrollSel withObject:scrollView];
+                if ([subview respondsToSelector:egoDragSel]) {
+                    [subview performSelector:egoDragSel withObject:scrollView];
+                }
+                #pragma clang diagnostic pop
+                return;
+            }
+
+            // 尝试 BDWallet 协议方法
+            SEL bdScrollSel = NSSelectorFromString(@"BDWalletRefreshScrollViewDidScroll:");
+            SEL bdDragSel = NSSelectorFromString(@"BDWalletRefreshScrollViewDidEndDragging:");
+            if ([subview respondsToSelector:bdScrollSel]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                [subview performSelector:bdScrollSel withObject:scrollView];
+                if ([subview respondsToSelector:bdDragSel]) {
+                    [subview performSelector:bdDragSel withObject:scrollView];
+                }
+                #pragma clang diagnostic pop
+                return;
+            }
         }
     }
 
-    DLog(@"File list refresh attempts completed");
-}
-
-// 递归刷新子视图中的 TableView/CollectionView
-static void forceRefreshSubviews(UIView *view) {
-    if (!view) return;
-
-    if ([view isKindOfClass:[UITableView class]]) {
-        UITableView *tv = (UITableView *)view;
-        DLog(@"Reloading UITableView");
-        [tv reloadData];
-
-        if (tv.refreshControl) {
-            [tv.refreshControl beginRefreshing];
-            CGPoint offset = tv.contentOffset;
-            tv.contentOffset = CGPointMake(offset.x, offset.y - tv.refreshControl.frame.size.height);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                [tv.refreshControl endRefreshing];
-            });
-        }
-        return;
-    }
-
-    if ([view isKindOfClass:[UICollectionView class]]) {
-        UICollectionView *cv = (UICollectionView *)view;
-        DLog(@"Reloading UICollectionView");
-        [cv reloadData];
-        return;
-    }
-
-    for (UIView *subview in view.subviews) {
-        forceRefreshSubviews(subview);
+NOTIFICATION_FALLBACK:
+    // 3. 广播通知（部分版本通过通知触发刷新）
+    DLog(@"Falling back to notification broadcast");
+    NSArray *notifNames = @[
+        @"BDPanRefreshFileListNotification",
+        @"BDPanReloadFileListNotification",
+        @"kRefreshFileListNotification",
+        @"kReloadDataNotification",
+        @"RefreshFileListNotification",
+        @"com.baidu.pan.refreshFileList"
+    ];
+    for (NSString *name in notifNames) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:name object:nil userInfo:@{@"path": gCurrentPath ?: @"/"}];
     }
 }
 
-// 强制触发下拉刷新
-static void forceTriggerPullToRefresh(UIView *view) {
-    if (!view) return;
+// ========== v8.5 轮询确认文件存在 ==========
 
-    if ([view isKindOfClass:[UIScrollView class]]) {
-        UIScrollView *sv = (UIScrollView *)view;
-        if (sv.refreshControl) {
-            DLog(@"Triggering pull-to-refresh");
-            [sv.refreshControl beginRefreshing];
-            CGPoint offset = sv.contentOffset;
-            sv.contentOffset = CGPointMake(offset.x, offset.y - sv.refreshControl.frame.size.height);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                [sv.refreshControl endRefreshing];
+static void pollForFileExistence(NSString *expectedPath, NSString *fileId, NSString *originalName, NSInteger attempt, void (^completion)(BOOL found, NSError *err)) {
+    if (attempt > 15) {
+        completion(NO, [NSError errorWithDomain:@"BaiduPanTroll" code:-10 userInfo:@{NSLocalizedDescriptionKey: @"轮询超时：刷新后仍未找到文件"}]);
+        return;
+    }
+    NSString *encodedPath = strictEncodeURIComponent(gCurrentPath ?: @"/");
+    NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/list?dir=%@&bdstoken=%@&order=time&desc=1&showempty=0&web=1&page=1&num=100", encodedPath, gBdstoken];
+    bdAsyncRequest(url, @"GET", nil, nil, ^(id json, NSError *err) {
+        if (err) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                pollForFileExistence(expectedPath, fileId, originalName, attempt + 1, completion);
             });
             return;
         }
-    }
-
-    for (UIView *subview in view.subviews) {
-        forceTriggerPullToRefresh(subview);
-    }
+        NSArray *list = json[@"list"];
+        if ([list isKindOfClass:[NSArray class]]) {
+            for (NSDictionary *file in list) {
+                NSString *path = file[@"path"];
+                if ([path isEqualToString:expectedPath]) {
+                    completion(YES, nil);
+                    return;
+                }
+            }
+        }
+        // 未找到，继续轮询
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            pollForFileExistence(expectedPath, fileId, originalName, attempt + 1, completion);
+        });
+    });
 }
 
-// ========== v8.5 UI Dialog ==========
+// ========== v8.4/v8.5 UI Dialog ==========
 
 static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId, NSString *pdfPath, BOOL needsRestore) {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"直链已复制"
@@ -544,7 +574,7 @@ static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString
                 showToast(@"直链已复制到剪贴板！");
                 showLinkDialog(link, fileName, fileId, filePath, NO);
             }];
-        });
+        }];
         return;
     }
 
@@ -567,13 +597,26 @@ static void runRenameAndGetLink(NSString *fileName, NSString *filePath, NSString
             return;
         }
 
-        DLog(@"Renamed to %@, refreshing...", pdfName);
+        DLog(@"Renamed to %@, triggering refresh...", pdfName);
         weakProgress.message = @"2. 刷新文件列表...";
         forceRefreshFileList();
 
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            weakProgress.message = @"3. 获取直链...";
+        // v8.5: 使用轮询代替固定 4 秒等待
+        weakProgress.message = @"3. 等待文件列表同步...";
+        pollForFileExistence(pdfPath, fileId, fileName, 0, ^(BOOL found, NSError *pollErr) {
+            if (!found) {
+                [weakProgress dismissViewControllerAnimated:YES completion:^{
+                    renameFile(fileId, pdfPath, fileName, ^(BOOL ok, NSError *e) {
+                        DLog(@"Auto restore (poll failed): %@", ok ? @"OK" : e.localizedDescription);
+                    });
+                    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"同步失败" message:pollErr.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
+                    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                    UIViewController *vc = topViewController(); if (vc) [vc presentViewController:alert animated:YES completion:nil];
+                }];
+                return;
+            }
 
+            weakProgress.message = @"4. 获取直链...";
             fetchDirectLink(pdfPath, ^(NSString *link, NSError *err) {
                 [weakProgress dismissViewControllerAnimated:YES completion:^{
                     if (err || !link) {
