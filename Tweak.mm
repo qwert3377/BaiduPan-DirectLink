@@ -933,12 +933,12 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
     gPendingRestoreOriginalName = nil;
 
     NSString *ext = fileName.pathExtension.lowercaseString;
-    if ([ext isEqualToString:@"pp"]) {
-        showToast(@"文件已是PP，无需处理");
+    if ([ext isEqualToString:@"88888888888888"]) {
+        showToast(@"文件已是 .8888888888888888，无需处理");
         return;
     }
 
-    NSString *ppName = [@"!!! " stringByAppendingString:[fileName stringByAppendingString:@".pp"]];
+    NSString *ppName = [[fileName stringByAppendingString:@"88888888888888"]];
     NSString *ppPath = [[filePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:ppName];
 
     showToast(@"1. 重命名...");
@@ -960,7 +960,7 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
             forceRefreshFileList();
 
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                showToast(@"!!! 请找到置顶标记的文件并点击进入");
+                showToast(@"请找到带88888888888888后缀的文件并点击进入");
                 startTapDetection();
                 scrollToRenamedFile(ppName);
             });
@@ -990,7 +990,7 @@ static void triggerDownloadFlow(void) {
             return;
         }
         UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"选择文件"
-                                                                       message:@"选择后自动重命名为 !!!文件名.pp 并置顶，点击进入下载界面后自动恢复原名"
+                                                                       message:@"选择后自动重命名为 文件名88888888888888，点击进入下载界面后自动恢复原名"
                                                                 preferredStyle:UIAlertControllerStyleActionSheet];
         for (NSDictionary *file in fileItems) {
             NSString *name = file[@"server_filename"];
