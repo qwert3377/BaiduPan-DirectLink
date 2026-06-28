@@ -1126,8 +1126,6 @@ static void simulateBackButtonTap(void) {
 
     if (window) {
         DLog(@"Method 5: Global back button search...");
-        __block UIView *backButton = nil;
-
         UIView *backButton = nil;
         findBackButtonInView(window, window, &backButton);
 
