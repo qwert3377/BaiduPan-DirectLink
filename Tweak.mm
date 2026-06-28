@@ -51,6 +51,107 @@ static void showFloatButton(void);
 
 // ========== v10.2 Auto-click helpers ==========
 static UIView * findViewRecursively(UIView *root, Class targetClass);
+static void sendTouchToView(UIView *targetView, CGPoint point) {
+    if (!targetView) return;
+    @try {
+        // Method 1: Create UITouch with proper initialization
+        UITouch *touch = [[UITouch alloc] init];
+        [touch setValue:@(UITouchPhaseBegan) forKey:@"phase"];
+        [touch setValue:@(1) forKey:@"tapCount"];
+        [touch setValue:targetView forKey:@"view"];
+        [touch setValue:targetView.window forKey:@"window"];
+
+        // Set touch location
+        CGPoint loc = [targetView convertPoint:point toView:targetView.window];
+        NSValue *locValue = [NSValue valueWithCGPoint:loc];
+        [touch setValue:locValue forKey:@"locationInWindow"];
+
+        UIEvent *event = [[UIEvent alloc] init];
+        [event setValue:touch forKey:@"_firstTouchForView"];
+        [event setValue:[NSSet setWithObject:touch] forKey:@"_allTouches"];
+
+        // Send to view and its responders
+        [targetView touchesBegan:[NSSet setWithObject:touch] withEvent:event];
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.08 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [touch setValue:@(UITouchPhaseEnded) forKey:@"phase"];
+            [targetView touchesEnded:[NSSet setWithObject:touch] withEvent:event];
+        });
+    } @catch (NSException *e) {
+        DLog(@"Touch send failed: %@", e.reason);
+    }
+}
+
+static void triggerGestureRecognizers(UIView *view) {
+    if (!view) return;
+    @try {
+        NSArray *gestures = view.gestureRecognizers;
+        for (UIGestureRecognizer *gr in gestures) {
+            if ([gr isKindOfClass:[UITapGestureRecognizer class]]) {
+                DLog(@"Triggering tap gesture on view");
+                gr.enabled = YES;
+                [gr setValue:@(UIGestureRecognizerStateEnded) forKey:@"state"];
+                if (gr.delegate && [gr.delegate respondsToSelector:@selector(gestureRecognizer:shouldReceiveTouch:)]) {
+                    // Try to trigger through delegate
+                }
+            }
+        }
+        // Also check subviews
+        for (UIView *sub in view.subviews) {
+            triggerGestureRecognizers(sub);
+        }
+    } @catch (NSException *e) {}
+}
+
+static void callSelectOnTableView(UITableView *tv, NSIndexPath *ip) {
+    if (!tv || !ip) return;
+    @try {
+        // Method A: Direct delegate call
+        id delegate = tv.delegate;
+        if (delegate && [delegate respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) {
+            DLog(@"Calling delegate didSelectRowAtIndexPath:");
+            NSMethodSignature *sig = [delegate methodSignatureForSelector:@selector(tableView:didSelectRowAtIndexPath:)];
+            if (sig) {
+                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                [inv setSelector:@selector(tableView:didSelectRowAtIndexPath:)];
+                [inv setTarget:delegate];
+                id tvArg = tv;
+                id ipArg = ip;
+                [inv setArgument:&tvArg atIndex:2];
+                [inv setArgument:&ipArg atIndex:3];
+                [inv invoke];
+            }
+        }
+
+        // Method B: Call through UITableView itself
+        SEL selectSel = NSSelectorFromString(@"_selectRowAtIndexPath:animated:scrollPosition:notifyDelegate:");
+        if ([tv respondsToSelector:selectSel]) {
+            DLog(@"Calling _selectRowAtIndexPath:animated:scrollPosition:notifyDelegate:");
+            NSMethodSignature *sig = [tv methodSignatureForSelector:selectSel];
+            if (sig) {
+                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                [inv setSelector:selectSel];
+                [inv setTarget:tv];
+                id ipArg = ip;
+                BOOL animated = YES;
+                NSInteger scrollPos = UITableViewScrollPositionNone;
+                BOOL notify = YES;
+                [inv setArgument:&ipArg atIndex:2];
+                [inv setArgument:&animated atIndex:3];
+                [inv setArgument:&scrollPos atIndex:4];
+                [inv setArgument:&notify atIndex:5];
+                [inv invoke];
+            }
+        }
+
+        // Method C: Use selectRowAtIndexPath:animated:scrollPosition:
+        [tv selectRowAtIndexPath:ip animated:YES scrollPosition:UITableViewScrollPositionNone];
+
+    } @catch (NSException *e) {
+        DLog(@"TableView select failed: %@", e.reason);
+    }
+}
+
 static void executeClickOnCell(UITableViewCell *cell, NSIndexPath *ip, UITableView *tableView) {
     if (!cell || !ip || !tableView) return;
     DLog(@"Executing click on cell at %@", ip);
@@ -728,107 +829,6 @@ static BOOL viewContainsText(UIView *view, NSString *text) {
         if (viewContainsText(sub, text)) return YES;
     }
     return NO;
-}
-
-static void sendTouchToView(UIView *targetView, CGPoint point) {
-    if (!targetView) return;
-    @try {
-        // Method 1: Create UITouch with proper initialization
-        UITouch *touch = [[UITouch alloc] init];
-        [touch setValue:@(UITouchPhaseBegan) forKey:@"phase"];
-        [touch setValue:@(1) forKey:@"tapCount"];
-        [touch setValue:targetView forKey:@"view"];
-        [touch setValue:targetView.window forKey:@"window"];
-
-        // Set touch location
-        CGPoint loc = [targetView convertPoint:point toView:targetView.window];
-        NSValue *locValue = [NSValue valueWithCGPoint:loc];
-        [touch setValue:locValue forKey:@"locationInWindow"];
-
-        UIEvent *event = [[UIEvent alloc] init];
-        [event setValue:touch forKey:@"_firstTouchForView"];
-        [event setValue:[NSSet setWithObject:touch] forKey:@"_allTouches"];
-
-        // Send to view and its responders
-        [targetView touchesBegan:[NSSet setWithObject:touch] withEvent:event];
-
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.08 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [touch setValue:@(UITouchPhaseEnded) forKey:@"phase"];
-            [targetView touchesEnded:[NSSet setWithObject:touch] withEvent:event];
-        });
-    } @catch (NSException *e) {
-        DLog(@"Touch send failed: %@", e.reason);
-    }
-}
-
-static void triggerGestureRecognizers(UIView *view) {
-    if (!view) return;
-    @try {
-        NSArray *gestures = view.gestureRecognizers;
-        for (UIGestureRecognizer *gr in gestures) {
-            if ([gr isKindOfClass:[UITapGestureRecognizer class]]) {
-                DLog(@"Triggering tap gesture on view");
-                gr.enabled = YES;
-                [gr setValue:@(UIGestureRecognizerStateEnded) forKey:@"state"];
-                if (gr.delegate && [gr.delegate respondsToSelector:@selector(gestureRecognizer:shouldReceiveTouch:)]) {
-                    // Try to trigger through delegate
-                }
-            }
-        }
-        // Also check subviews
-        for (UIView *sub in view.subviews) {
-            triggerGestureRecognizers(sub);
-        }
-    } @catch (NSException *e) {}
-}
-
-static void callSelectOnTableView(UITableView *tv, NSIndexPath *ip) {
-    if (!tv || !ip) return;
-    @try {
-        // Method A: Direct delegate call
-        id delegate = tv.delegate;
-        if (delegate && [delegate respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) {
-            DLog(@"Calling delegate didSelectRowAtIndexPath:");
-            NSMethodSignature *sig = [delegate methodSignatureForSelector:@selector(tableView:didSelectRowAtIndexPath:)];
-            if (sig) {
-                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                [inv setSelector:@selector(tableView:didSelectRowAtIndexPath:)];
-                [inv setTarget:delegate];
-                id tvArg = tv;
-                id ipArg = ip;
-                [inv setArgument:&tvArg atIndex:2];
-                [inv setArgument:&ipArg atIndex:3];
-                [inv invoke];
-            }
-        }
-
-        // Method B: Call through UITableView itself
-        SEL selectSel = NSSelectorFromString(@"_selectRowAtIndexPath:animated:scrollPosition:notifyDelegate:");
-        if ([tv respondsToSelector:selectSel]) {
-            DLog(@"Calling _selectRowAtIndexPath:animated:scrollPosition:notifyDelegate:");
-            NSMethodSignature *sig = [tv methodSignatureForSelector:selectSel];
-            if (sig) {
-                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                [inv setSelector:selectSel];
-                [inv setTarget:tv];
-                id ipArg = ip;
-                BOOL animated = YES;
-                NSInteger scrollPos = UITableViewScrollPositionNone;
-                BOOL notify = YES;
-                [inv setArgument:&ipArg atIndex:2];
-                [inv setArgument:&animated atIndex:3];
-                [inv setArgument:&scrollPos atIndex:4];
-                [inv setArgument:&notify atIndex:5];
-                [inv invoke];
-            }
-        }
-
-        // Method C: Use selectRowAtIndexPath:animated:scrollPosition:
-        [tv selectRowAtIndexPath:ip animated:YES scrollPosition:UITableViewScrollPositionNone];
-
-    } @catch (NSException *e) {
-        DLog(@"TableView select failed: %@", e.reason);
-    }
 }
 
 static void autoClickRenamedFile(NSString *ipaName) {
