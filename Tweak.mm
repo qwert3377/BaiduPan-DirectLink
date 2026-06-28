@@ -767,14 +767,16 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
 
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 showToast(@"4. 自动点击文件...");
-                autoTapFileCell(ipaName, 0, ^(BOOL success) {
-                    if (success) {
-                        showToast(@"已自动点击文件，打开后自动恢复原名");
-                    } else {
-                        showToast(@"自动点击失败，请手动点击文件");
-                    }
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                showToast(@"4. 滚动到顶部...");
+                bruteForceScrollToTop();
+                
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    bruteForceScrollToTop();
+                    showToast(@"请点击顶部的文件，打开后自动恢复原名");
                     startTapDetection();
                 });
+            });
             });
         });
     });
