@@ -800,31 +800,6 @@ static NSIndexPath * searchFileInTableView(NSString *targetName, UITableView *tv
 }
 
 // Helper: search for file in currently visible UITableView cells, scanning from bottom-up
-static NSIndexPath * searchFileInTableView(NSString *targetName, UITableView *tv) {
-    if (!targetName || !tv) return nil;
-    NSInteger totalSections = 1;
-    @try { totalSections = [tv numberOfSections]; } @catch (NSException *e) {}
-
-    for (NSInteger section = 0; section < totalSections; section++) {
-        NSInteger rows = 0;
-        @try { rows = [tv numberOfRowsInSection:section]; } @catch (NSException *e) {}
-
-        // Search from bottom to top: files are sorted below folders in BaiduPan
-        for (NSInteger row = rows - 1; row >= 0; row--) {
-            NSIndexPath *ip = [NSIndexPath indexPathForRow:row inSection:section];
-            @try {
-                UITableViewCell *cell = [tv cellForRowAtIndexPath:ip];
-                if (!cell) continue;
-                if (viewContainsText(cell, targetName)) {
-                    DLog(@"Found cell at row %ld, section %ld", (long)row, (long)section);
-                    return ip;
-                }
-            } @catch (NSException *e) {}
-        }
-    }
-    return nil;
-}
-
 static void autoClickRenamedFile(NSString *ipaName) {
     if (!ipaName) return;
     DLog(@"v10.10 Auto-clicking: %@", ipaName);
