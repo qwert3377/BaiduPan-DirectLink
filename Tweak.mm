@@ -50,7 +50,6 @@ static void onFloatButtonTap(void);
 static void showFloatButton(void);
 
 // ========== v10.15 Auto-click helpers ==========
-static UIView * findViewRecursively(UIView *root, Class targetClass);
 static UIScrollView * findListViewInHierarchy(UIView *root);
 static UIScrollView * findListViewGlobally(void);
 static void sendTouchToView(UIView *targetView, CGPoint point);
@@ -639,16 +638,6 @@ static void scrollToFileLocation(NSString *fileName) {
 }
 
 // ========== v10.15 Auto-click helpers ==========
-
-static UIView * findViewRecursively(UIView *root, Class targetClass) {
-    if (!root) return nil;
-    if ([root isKindOfClass:targetClass]) return root;
-    for (UIView *subview in root.subviews) {
-        UIView *found = findViewRecursively(subview, targetClass);
-        if (found) return found;
-    }
-    return nil;
-}
 
 static UIScrollView * findListViewInHierarchy(UIView *root) {
     if (!root) return nil;
