@@ -879,22 +879,13 @@ static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInt
         }
 
         if (foundPath) {
-            DLog(@"File found at attempt %ld", (long)attempt);
+            DLog(@"File found at attempt %ld, scrolling to it...", (long)attempt);
             if ([listView isKindOfClass:[UITableView class]]) {
-                UITableViewCell *cell = [(UITableView *)listView cellForRowAtIndexPath:foundPath];
-                if (cell) {
-                    executeClickOnCell(cell, foundPath, (UITableView *)listView);
-                } else {
-                    showToast(@"文件已找到但未显示，请手动点击");
-                }
+                [(UITableView *)listView scrollToRowAtIndexPath:foundPath atScrollPosition:UITableViewScrollPositionMiddle animated:YES];
             } else if ([listView isKindOfClass:[UICollectionView class]]) {
-                UICollectionViewCell *cell = [(UICollectionView *)listView cellForItemAtIndexPath:foundPath];
-                if (cell) {
-                    executeClickOnCollectionCell(cell, foundPath, (UICollectionView *)listView);
-                } else {
-                    showToast(@"文件已找到但未显示，请手动点击");
-                }
+                [(UICollectionView *)listView scrollToItemAtIndexPath:foundPath atScrollPosition:UICollectionViewScrollPositionCenteredVertically animated:YES];
             }
+            showToast(@"已滚动到文件，请点击进入下载界面");
             return;
         }
 
@@ -911,11 +902,11 @@ static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInt
 
 // ========== v10.18: Back button finder (no recursive block) ==========
 
-// ========== v10.25: Scroll to file and wait for user tap ==========
+// ========== v10.26: Scroll to file and wait for user tap ==========
 
 static void scrollToRenamedFile(NSString *ppName) {
     if (!ppName) return;
-    DLog(@"v10.25 Scrolling to file: %@", ppName);
+    DLog(@"v10.26 Scrolling to file: %@", ppName);
 
     UIScrollView *listView = findListViewGlobally();
     if (!listView) {
