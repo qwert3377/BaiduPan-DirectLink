@@ -97,8 +97,13 @@ static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *header
 
 static NSString * scanMemoryForBdstoken(void) {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSDictionary *allDefaults = [defaults dictionaryRepresentation];
+    NSString *bestToken = nil;
+    NSString *bestKey = nil;
+
     NSArray *preferredKeys = @[@"bdstoken", @"BDSTOKEN", @"token", @"TOKEN", 
-                                @"access_token", @"bd_token", @"pan_token", @"panToken"];
+                                @"access_token", @"bd_token", @"pan_token", @"panToken",
+                                @"user_token", @"auth_token"];
     for (NSString *key in preferredKeys) {
         id value = [defaults objectForKey:key];
         if ([value isKindOfClass:[NSString class]]) {
@@ -108,11 +113,45 @@ static NSString * scanMemoryForBdstoken(void) {
                 if ([hexRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, str.length)] == 1) {
                     NSRegularExpression *letterRegex = [NSRegularExpression regularExpressionWithPattern:@"[a-fA-F]" options:0 error:nil];
                     if ([letterRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, str.length)] > 0) {
+                        DLog(@"Found 32-bit token in preferred key '%@': %@...", key, [str substringToIndex:8]);
                         return str;
                     }
                 }
             }
         }
+    }
+
+    NSArray *blacklistKeys = @[@"password", @"passwd", @"secret", @"credit", @"card", @"phone", @"mobile", @"email", @"address"];
+    for (NSString *key in allDefaults) {
+        BOOL isBlacklisted = NO;
+        NSString *lowKey = key.lowercaseString;
+        for (NSString *bk in blacklistKeys) {
+            if ([lowKey containsString:bk]) { isBlacklisted = YES; break; }
+        }
+        if (isBlacklisted) continue;
+
+        id value = allDefaults[key];
+        if ([value isKindOfClass:[NSString class]]) {
+            NSString *str = value;
+            NSRegularExpression *hexRegex = [NSRegularExpression regularExpressionWithPattern:@"^[a-fA-F0-9]+$" options:0 error:nil];
+            if ([hexRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, str.length)] == 1) {
+                NSRegularExpression *letterRegex = [NSRegularExpression regularExpressionWithPattern:@"[a-fA-F]" options:0 error:nil];
+                if ([letterRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, str.length)] > 0) {
+                    if (str.length == 32) {
+                        DLog(@"Found 32-bit token in key '%@': %@...", key, [str substringToIndex:8]);
+                        return str;
+                    }
+                    if (str.length == 16 && !bestToken) {
+                        bestToken = str;
+                        bestKey = key;
+                    }
+                }
+            }
+        }
+    }
+    if (bestToken) {
+        DLog(@"Only found 16-bit token in key '%@': %@...", bestKey, [bestToken substringToIndex:8]);
+        return bestToken;
     }
     return nil;
 }
