@@ -1098,10 +1098,14 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
         showToast(@"2. 刷新第1次...");
         forceRefreshFileList();
 
-                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                        showToast(@"5. 再次尝试点击...");
-                        autoClickRenamedFile(ipaName);
-                    });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            showToast(@"3. 刷新第2次...");
+            forceRefreshFileList();
+
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                showToast(@"4. 尝试点击...");
+                startTapDetection();
+                autoClickRenamedFile(ipaName);
             });
         });
     });
@@ -1241,4 +1245,3 @@ static void baiduPanTrollInit(void) {
         autoDetectPathAndToken();
     });
 }
- 
