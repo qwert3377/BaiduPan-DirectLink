@@ -333,18 +333,27 @@ static void renameFile(NSString *fileId, NSString *path, NSString *newName, void
     NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/filemanager?async=2&onnest=fail&opera=rename&clienttype=0&app_id=250528&web=1&bdstoken=%@", gBdstoken];
     NSString *filelist = [NSString stringWithFormat:@"[{\"id\":%@,\"path\":\"%@\",\"newname\":\"%@\"}]", fileId, path, newName];
     NSString *body = [NSString stringWithFormat:@"filelist=%@", strictEncodeURIComponent(filelist)];
+    DLog(@"RENAME body: %@", body);
+    DLog(@"RENAME filelist raw: %@", filelist);
     NSDictionary *headers = @{
         @"Content-Type": @"application/x-www-form-urlencoded; charset=UTF-8",
         @"X-Requested-With": @"XMLHttpRequest"
     };
     bdAsyncRequest(url, @"POST", headers, body, ^(id json, NSError *err) {
-        if (err) { completion(NO, err); return; }
+        if (err) {
+            DLog(@"RENAME network error: %@", err);
+            completion(NO, err);
+            return;
+        }
+        DLog(@"RENAME response: %@", json);
         NSNumber *errnoNum = json[@"errno"];
         if (errnoNum && [errnoNum integerValue] == 0) {
             completion(YES, nil);
         } else {
             NSString *msg = json[@"show_msg"] ?: json[@"errmsg"] ?: @"Unknown error";
-            completion(NO, [NSError errorWithDomain:@"BaiduPanTroll" code:[errnoNum integerValue] userInfo:@{NSLocalizedDescriptionKey: msg}]);
+            NSString *fullErr = [NSString stringWithFormat:@"errno=%@ | %@", errnoNum ?: @"nil", msg];
+            DLog(@"RENAME failed: %@", fullErr);
+            completion(NO, [NSError errorWithDomain:@"BaiduPanTroll" code:[errnoNum integerValue] userInfo:@{NSLocalizedDescriptionKey: fullErr}]);
         }
     });
 }
@@ -929,7 +938,7 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
         return;
     }
 
-    NSString *ppName = [@"🔴 " stringByAppendingString:[fileName stringByAppendingString:@".pp"]];
+    NSString *ppName = [@"!!! " stringByAppendingString:[fileName stringByAppendingString:@".pp"]];
     NSString *ppPath = [[filePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:ppName];
 
     showToast(@"1. 重命名...");
@@ -951,7 +960,7 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
             forceRefreshFileList();
 
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                showToast(@"🔴 请找到红色标记的文件并点击进入");
+                showToast(@"!!! 请找到置顶标记的文件并点击进入");
                 startTapDetection();
                 scrollToRenamedFile(ppName);
             });
@@ -981,7 +990,7 @@ static void triggerDownloadFlow(void) {
             return;
         }
         UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"选择文件"
-                                                                       message:@"选择后自动重命名为.pp并刷新，滚动到文件位置，点击进入下载界面后自动恢复原名"
+                                                                       message:@"选择后自动重命名为 !!!文件名.pp 并置顶，点击进入下载界面后自动恢复原名"
                                                                 preferredStyle:UIAlertControllerStyleActionSheet];
         for (NSDictionary *file in fileItems) {
             NSString *name = file[@"server_filename"];
