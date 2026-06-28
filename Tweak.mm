@@ -584,27 +584,89 @@ static void forceRefreshFileList(void) {
     triggerNotificationFallback();
 }
 
-static void scrollAllScrollViewsToTop(UIView *view) {
-    if (!view) return;
-    if ([view isKindOfClass:[UIScrollView class]]) {
-        UIScrollView *sv = (UIScrollView *)view;
-        [sv setContentOffset:CGPointMake(0, -sv.contentInset.top) animated:YES];
-        DLog(@"Scrolled UIScrollView to top: %@", NSStringFromClass([view class]));
+static UIView * findLabelWithText(UIView *view, NSString *text, NSInteger depth) {
+    if (!view || !text || depth > 30) return nil;
+
+    if ([view isKindOfClass:[UILabel class]]) {
+        UILabel *lbl = (UILabel *)view;
+        if (lbl.text && [lbl.text containsString:text]) {
+            DLog(@"Found label at depth %ld: %@", (long)depth, lbl.text);
+            return view;
+        }
     }
+
     for (UIView *sub in view.subviews) {
-        scrollAllScrollViewsToTop(sub);
+        UIView *found = findLabelWithText(sub, text, depth + 1);
+        if (found) return found;
     }
+    return nil;
 }
 
-static void bruteForceScrollToTop(void) {
-    DLog(@"Brute force scrolling all scroll views to top");
-    for (UIWindow *window in [[UIApplication sharedApplication] windows]) {
-        scrollAllScrollViewsToTop(window);
+static UIScrollView * findParentScrollView(UIView *view) {
+    UIView *parent = view.superview;
+    NSInteger maxDepth = 0;
+    while (parent && maxDepth < 20) {
+        if ([parent isKindOfClass:[UIScrollView class]]) {
+            return (UIScrollView *)parent;
+        }
+        parent = parent.superview;
+        maxDepth++;
     }
-    // Also try the key window specifically
-    UIWindow *keyWindow = [[UIApplication sharedApplication] keyWindow];
-    if (keyWindow) {
-        scrollAllScrollViewsToTop(keyWindow);
+    return nil;
+}
+
+static void scrollToFileLocation(NSString *fileName) {
+    if (!fileName) return;
+    DLog(@"Scrolling to file: %@", fileName);
+
+    UIWindow *window = nil;
+    if (@available(iOS 13.0, *)) {
+        for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
+            if (scene.activationState == UISceneActivationStateForegroundActive) {
+                window = scene.windows.firstObject;
+                break;
+            }
+        }
+    }
+    if (!window) window = [[UIApplication sharedApplication] keyWindow];
+    if (!window) return;
+
+    // Try multiple search variants
+    NSArray *searchTexts = @[
+        fileName,
+        [fileName stringByDeletingPathExtension],
+    ];
+
+    for (NSString *text in searchTexts) {
+        if (text.length == 0) continue;
+
+        UIView *label = findLabelWithText(window, text, 0);
+        if (label) {
+            UIScrollView *scrollView = findParentScrollView(label);
+            if (scrollView) {
+                CGRect labelFrame = [label convertRect:label.bounds toView:scrollView];
+                CGFloat targetY = labelFrame.origin.y - scrollView.bounds.size.height / 2 + labelFrame.size.height / 2;
+                targetY = MAX(0, MIN(targetY, scrollView.contentSize.height - scrollView.bounds.size.height));
+                CGPoint targetOffset = CGPointMake(0, targetY);
+
+                DLog(@"Scrolling to y=%.1f, labelFrame=%@", targetY, NSStringFromCGRect(labelFrame));
+                [scrollView setContentOffset:targetOffset animated:YES];
+                return;
+            } else {
+                DLog(@"Found label but no parent scroll view");
+            }
+        }
+    }
+
+    DLog(@"Could not find file label, falling back to top");
+    // Fallback: scroll all scroll views to top
+    for (UIWindow *win in [[UIApplication sharedApplication] windows]) {
+        for (UIView *sub in win.subviews) {
+            if ([sub isKindOfClass:[UIScrollView class]]) {
+                UIScrollView *sv = (UIScrollView *)sub;
+                [sv setContentOffset:CGPointMake(0, -sv.contentInset.top) animated:YES];
+            }
+        }
     }
 }
 
