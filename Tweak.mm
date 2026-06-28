@@ -754,7 +754,7 @@ static void scrollToFileLocation(NSString *fileName) {
     UIViewController *vc = topViewController();
     if (!vc) { DLog(@"No top VC for scroll"); return; }
 
-    // Strategy 1: Find UITableView and scroll directly to cell containing file
+    // Strategy 1: Find UITableView and scroll directly to cell
     UITableView *tableView = (UITableView *)findViewRecursively(vc.view, [UITableView class]);
     if (tableView) {
         DLog(@"Found tableView, searching rows for: %@", fileName);
@@ -772,8 +772,18 @@ static void scrollToFileLocation(NSString *fileName) {
                     UITableViewCell *cell = [tableView cellForRowAtIndexPath:ip];
                     if (!cell) continue;
                     if (viewContainsText(cell, fileName)) {
-                        DLog(@"Found cell at row %ld, scrolling to it", (long)row);
-                        [tableView scrollToRowAtIndexPath:ip atScrollPosition:UITableViewScrollPositionTop animated:YES];
+                        DLog(@"Found cell at row %ld, scrolling to top", (long)row);
+                        // Use scrollToRow with NONE to minimize movement, then set contentOffset directly
+                        [tableView scrollToRowAtIndexPath:ip atScrollPosition:UITableViewScrollPositionNone animated:NO];
+
+                        // After scroll, adjust to put cell at top
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                            CGRect cellRect = [tableView rectForRowAtIndexPath:ip];
+                            CGFloat targetY = cellRect.origin.y - tableView.contentInset.top;
+                            targetY = MAX(-tableView.contentInset.top, targetY);
+                            [tableView setContentOffset:CGPointMake(0, targetY) animated:YES];
+                            DLog(@"Adjusted scroll to y=%.1f", targetY);
+                        });
                         return;
                     }
                 } @catch (NSException *e) {}
@@ -782,7 +792,24 @@ static void scrollToFileLocation(NSString *fileName) {
         DLog(@"Cell not found in tableView rows");
     }
 
-    // Strategy 2: Find label via window search
+    // Strategy 2: Direct UIScrollView contentOffset manipulation
+    UIScrollView *scrollView = (UIScrollView *)findViewRecursively(vc.view, [UIScrollView class]);
+    if (scrollView) {
+        DLog(@"Trying direct scrollView manipulation");
+        // Search all subviews for the file name
+        for (UIView *sub in scrollView.subviews) {
+            if (viewContainsText(sub, fileName)) {
+                CGRect frame = [sub convertRect:sub.bounds toView:scrollView];
+                CGFloat targetY = frame.origin.y - 80;
+                targetY = MAX(-scrollView.contentInset.top, MIN(targetY, scrollView.contentSize.height - scrollView.bounds.size.height));
+                [scrollView setContentOffset:CGPointMake(0, targetY) animated:YES];
+                DLog(@"Scrolled to y=%.1f via direct manipulation", targetY);
+                return;
+            }
+        }
+    }
+
+    // Strategy 3: Find label via window search
     UIWindow *window = nil;
     if (@available(iOS 13.0, *)) {
         for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
@@ -808,12 +835,12 @@ static void scrollToFileLocation(NSString *fileName) {
     }
 
     if (targetLabel) {
-        UIScrollView *scrollView = findParentScrollView(targetLabel);
-        if (scrollView) {
-            CGRect labelFrame = [targetLabel convertRect:targetLabel.bounds toView:scrollView];
-            CGFloat targetY = labelFrame.origin.y - 100; // 100pt from top
-            targetY = MAX(0, MIN(targetY, scrollView.contentSize.height - scrollView.bounds.size.height));
-            [scrollView setContentOffset:CGPointMake(0, targetY) animated:YES];
+        UIScrollView *sv = findParentScrollView(targetLabel);
+        if (sv) {
+            CGRect labelFrame = [targetLabel convertRect:targetLabel.bounds toView:sv];
+            CGFloat targetY = labelFrame.origin.y - 100;
+            targetY = MAX(-sv.contentInset.top, MIN(targetY, sv.contentSize.height - sv.bounds.size.height));
+            [sv setContentOffset:CGPointMake(0, targetY) animated:YES];
             DLog(@"Scrolled to y=%.1f via label", targetY);
             return;
         }
@@ -1178,15 +1205,15 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
             showToast(@"3. 刷新第2次...");
             forceRefreshFileList();
 
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 showToast(@"4. 滚动到文件位置...");
                 scrollToFileLocation(ipaName);
 
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     showToast(@"5. 自动点击文件...");
                     autoClickRenamedFile(ipaName);
 
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                         showToast(@"已尝试自动点击，如未打开请手动点击");
                         startTapDetection();
                     });
