@@ -882,16 +882,14 @@ static void checkIfFileOpened(void) {
 
         if (opened) {
             gHasOpenedFile = YES;
-            showToast(@"已进入下载界面，恢复原名...");
+            showToast(@"已进入下载界面，马上恢复原名...");
 
             if (gTapDetectionTimer) {
                 [gTapDetectionTimer invalidate];
                 gTapDetectionTimer = nil;
             }
 
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                executeRestore();
-            });
+            executeRestore();
             return;
         }
     }
