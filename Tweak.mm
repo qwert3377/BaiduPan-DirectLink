@@ -20,6 +20,8 @@ static NSString *gPendingRestoreOriginalName = nil;
 static NSTimer *gTapDetectionTimer = nil;
 static NSInteger gNavStackCount = 0;
 static BOOL gIsWaitingForTap = NO;
+static NSString *gInitialTopVCClass = nil;
+static NSString *gInitialTopVCTitle = nil;
 
 // ========== Forward declarations ==========
 static UIViewController * topViewController(void);
@@ -624,15 +626,65 @@ static void stopTapDetection(void) {
     gIsWaitingForTap = NO;
 }
 
+static NSString * topVCClassName(void) {
+    UIViewController *vc = topViewController();
+    return vc ? NSStringFromClass([vc class]) : @"nil";
+}
+
+static NSString * topVCTitle(void) {
+    UIViewController *vc = topViewController();
+    if (!vc) return @"nil";
+    NSString *title = vc.title;
+    if (!title || title.length == 0) title = vc.navigationItem.title;
+    return title ?: @"nil";
+}
+
 static void checkIfFileOpened(void) {
     if (!gIsWaitingForTap) return;
+
     NSInteger currentCount = currentNavStackCount();
-    DLog(@"Tap detection: nav count %ld -> %ld", (long)gNavStackCount, (long)currentCount);
+    NSString *currentClass = topVCClassName();
+    NSString *currentTitle = topVCTitle();
+
+    DLog(@"Tap detection: nav=%ld->%ld class=[%@]->[%@] title=[%@]->[%@]", 
+         (long)gNavStackCount, (long)currentCount,
+         gInitialTopVCClass, currentClass,
+         gInitialTopVCTitle, currentTitle);
+
+    // Method 1: Nav stack increased (pushed new VC)
     if (currentCount > gNavStackCount) {
-        DLog(@"File opened detected! Restoring name...");
+        DLog(@"File opened detected (nav stack increased)! Restoring...");
         stopTapDetection();
         showToast(@"检测到文件已打开，正在恢复原名...");
         executeRestore();
+        return;
+    }
+
+    // Method 2: Top VC class changed (presented modal or different VC)
+    if (gInitialTopVCClass && ![gInitialTopVCClass isEqualToString:currentClass]) {
+        DLog(@"File opened detected (VC class changed)! Restoring...");
+        stopTapDetection();
+        showToast(@"检测到文件已打开，正在恢复原名...");
+        executeRestore();
+        return;
+    }
+
+    // Method 3: Title changed to file name (preview page opened within same VC structure)
+    if (gPendingRestoreOriginalName && currentTitle && [currentTitle containsString:gPendingRestoreOriginalName]) {
+        DLog(@"File opened detected (title matches file name)! Restoring...");
+        stopTapDetection();
+        showToast(@"检测到文件已打开，正在恢复原名...");
+        executeRestore();
+        return;
+    }
+
+    // Method 4: Title contains "预览" or "下载" (Chinese preview/download keywords)
+    if (currentTitle && ([currentTitle containsString:@"预览"] || [currentTitle containsString:@"下载"] || [currentTitle containsString:@"文件详情"])) {
+        DLog(@"File opened detected (preview title)! Restoring...");
+        stopTapDetection();
+        showToast(@"检测到文件已打开，正在恢复原名...");
+        executeRestore();
+        return;
     }
 }
 
@@ -640,10 +692,11 @@ static void startTapDetection(void) {
     stopTapDetection();
     gIsWaitingForTap = YES;
     gNavStackCount = currentNavStackCount();
-    DLog(@"Started tap detection, initial nav count: %ld", (long)gNavStackCount);
+    gInitialTopVCClass = topVCClassName();
+    gInitialTopVCTitle = topVCTitle();
+    DLog(@"Started tap detection, nav=%ld class=%@ title=%@", (long)gNavStackCount, gInitialTopVCClass, gInitialTopVCTitle);
     showToast(@"请点击改名后的文件，打开后自动恢复原名");
 
-    // Check every 0.5 seconds for nav stack change
     gTapDetectionTimer = [NSTimer scheduledTimerWithTimeInterval:0.5
                                                             target:[NSBlockOperation blockOperationWithBlock:^{
                                                                 checkIfFileOpened();
@@ -652,7 +705,6 @@ static void startTapDetection(void) {
                                                           userInfo:nil
                                                            repeats:YES];
 
-    // Safety timeout: auto-restore after 60 seconds regardless
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (gIsWaitingForTap) {
             DLog(@"Tap detection timeout, forcing restore");
