@@ -39,7 +39,6 @@ static void forceRefreshFileList(void);
 static void refreshVC(UIViewController *vc);
 static void simulatePullToRefreshOnScrollView(UIScrollView *scrollView);
 static void tryRefreshOnScrollView(UIScrollView *scrollView);
-static void scrollToTopInVC(UIViewController *vc);
 static void startTapDetection(void);
 static void stopTapDetection(void);
 static void checkIfFileOpened(void);
