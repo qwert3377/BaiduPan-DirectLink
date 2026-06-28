@@ -51,10 +51,7 @@ static void showFloatButton(void);
 
 // ========== v10.2 Auto-click helpers ==========
 static UIView * findViewRecursively(UIView *root, Class targetClass);
-static id getFileListDataSource(UIViewController *vc);
-static BOOL matchFileByName(id item, NSString *targetName);
 static void simulateTouchOnView(UIView *view);
-static void triggerCellActionByClassList(id cell, NSString *fileName);
 static void autoClickRenamedFile(NSString *ipaName);
 
 // ========== Implementations ==========
@@ -688,44 +685,6 @@ static UIView * findViewRecursively(UIView *root, Class targetClass) {
     return nil;
 }
 
-static id getFileListDataSource(UIViewController *vc) {
-    if (!vc) return nil;
-    UITableView *tableView = (UITableView *)findViewRecursively(vc.view, [UITableView class]);
-    if (tableView && tableView.dataSource) return tableView.dataSource;
-    UICollectionView *collectionView = (UICollectionView *)findViewRecursively(vc.view, [UICollectionView class]);
-    if (collectionView && collectionView.dataSource) return collectionView.dataSource;
-    NSArray *dataSourceKeys = @[@"dataSource", @"viewModel", @"fileViewModel", @"listViewModel", @"_dataSource", @"_viewModel", @"presenter", @"interactor"];
-    for (NSString *key in dataSourceKeys) {
-        @try {
-            id value = [vc valueForKey:key];
-            if (value) return value;
-        } @catch (NSException *e) {}
-    }
-    if (vc.navigationController) {
-        for (UIViewController *controller in vc.navigationController.viewControllers) {
-            for (NSString *key in dataSourceKeys) {
-                @try {
-                    id value = [controller valueForKey:key];
-                    if (value) return value;
-                } @catch (NSException *e) {}
-            }
-        }
-    }
-    return nil;
-}
-
-static BOOL matchFileByName(id item, NSString *targetName) {
-    if (!item || !targetName) return NO;
-    @try {
-        NSString *itemName = [item valueForKey:@"server_filename"];
-        if (!itemName) itemName = [item valueForKey:@"filename"];
-        if (!itemName) itemName = [item valueForKey:@"name"];
-        if (!itemName) itemName = [item valueForKey:@"_name"];
-        if ([itemName isEqualToString:targetName]) return YES;
-    } @catch (NSException *e) {}
-    return NO;
-}
-
 static void simulateTouchOnView(UIView *view) {
     if (!view) return;
     CGPoint center = CGPointMake(view.bounds.size.width / 2, view.bounds.size.height / 2);
@@ -745,52 +704,6 @@ static void simulateTouchOnView(UIView *view) {
         });
     } @catch (NSException *e) {
         DLog(@"Touch simulation failed: %@", e.reason);
-    }
-}
-
-static void triggerCellActionByClassList(id cell, NSString *fileName) {
-    if (!cell) return;
-    NSArray *cellSelectors = @[
-        @"didSelect", @"onClick:", @"handleTap:", @"cellDidClick:",
-        @"didTapCell:", @"onCellSelected:", @"triggerAction:",
-        @"performClick", @"executeAction"
-    ];
-    for (NSString *selName in cellSelectors) {
-        SEL sel = NSSelectorFromString(selName);
-        if ([cell respondsToSelector:sel]) {
-            DLog(@"Calling cell method: %@", selName);
-            @try {
-                if ([selName hasSuffix:@":"]) {
-                    NSMethodSignature *sig = [cell methodSignatureForSelector:sel];
-                    if (!sig) continue;
-                    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                    [inv setSelector:sel];
-                    [inv setTarget:cell];
-                    id arg = fileName;
-                    [inv setArgument:&arg atIndex:2];
-                    [inv invoke];
-                } else {
-                    #pragma clang diagnostic push
-                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                    [cell performSelector:sel];
-                    #pragma clang diagnostic pop
-                }
-                return;
-            } @catch (NSException *e) {
-                DLog(@"Cell method %@ failed: %@", selName, e.reason);
-            }
-        }
-    }
-    if ([cell isKindOfClass:[UIView class]]) {
-        UIView *cellView = (UIView *)cell;
-        UIButton *button = (UIButton *)findViewRecursively(cellView, [UIButton class]);
-        if (button) {
-            DLog(@"Found button in cell, simulating touch");
-            simulateTouchOnView(button);
-            return;
-        }
-        DLog(@"Simulating touch on cell itself");
-        simulateTouchOnView(cellView);
     }
 }
 
