@@ -1098,21 +1098,10 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
         showToast(@"2. 刷新第1次...");
         forceRefreshFileList();
 
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            showToast(@"3. 刷新第2次...");
-            forceRefreshFileList();
-
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                showToast(@"4. 滚动到文件位置...");
-                scrollToFileLocation(ipaName);
-
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    showToast(@"5. 自动点击文件...");
-                    startTapDetection();  // Start detection BEFORE clicking, so we capture pre-click state
-                    autoClickRenamedFile(ipaName);
-
-
-                });
+                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        showToast(@"5. 再次尝试点击...");
+                        autoClickRenamedFile(ipaName);
+                    });
             });
         });
     });
