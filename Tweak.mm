@@ -606,13 +606,11 @@ static void triggerDownloadBySimulatingUserAction(NSDictionary *fileMeta) {
                 DLog(@"Found file list with %lu items", (unsigned long)[(NSArray *)fileList count]);
 
                 NSUInteger targetIndex = NSNotFound;
-                id targetItem = nil;
 
                 for (NSUInteger i = 0; i < [(NSArray *)fileList count]; i++) {
                     id item = [(NSArray *)fileList objectAtIndex:i];
                     if (matchFileMeta(item, fileMeta)) {
                         targetIndex = i;
-                        targetItem = item;
                         break;
                     }
                 }
