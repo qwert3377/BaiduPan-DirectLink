@@ -21,6 +21,7 @@ static NSString *gPendingRestoreOriginalName = nil;
 static NSTimer *gTapDetectionTimer = nil;
 static NSInteger gNavStackCount = 0;
 static BOOL gIsWaitingForTap = NO;
+static BOOL gHasOpenedFile = NO;
 static NSString *gInitialTopVCClass = nil;
 static NSString *gInitialTopVCTitle = nil;
 
@@ -980,6 +981,7 @@ static void stopTapDetection(void) {
         gTapDetectionTimer = nil;
     }
     gIsWaitingForTap = NO;
+    gHasOpenedFile = NO;
 }
 
 static NSString * topVCClassName(void) {
@@ -1044,6 +1046,7 @@ static void checkIfFileOpened(void) {
 static void startTapDetection(void) {
     stopTapDetection();
     gIsWaitingForTap = YES;
+    gHasOpenedFile = NO;
     gNavStackCount = currentNavStackCount();
     gInitialTopVCClass = topVCClassName();
     gInitialTopVCTitle = topVCTitle();
