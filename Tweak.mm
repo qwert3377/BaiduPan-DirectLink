@@ -1,5 +1,5 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.17
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.18
 //  Flow: select -> rename to .pp -> refresh x2 -> AUTO CLICK renamed file
 //        -> detect preview opened -> auto back -> wait 1s -> re-click -> restore name
 //
@@ -57,7 +57,7 @@ static void triggerDownloadFlow(void);
 static void onFloatButtonTap(void);
 static void showFloatButton(void);
 
-// v10.17 Auto-click helpers
+// v10.18 Auto-click helpers
 static UIScrollView * findListViewInHierarchy(UIView *root);
 static UIScrollView * findListViewGlobally(void);
 static void sendTouchToView(UIView *targetView, CGPoint point);
@@ -70,6 +70,7 @@ static NSIndexPath * searchFileInCollectionView(NSString *targetName, UICollecti
 static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInteger attempt, NSInteger maxAttempts, CGFloat scrollStep);
 static void autoClickRenamedFile(NSString *ppName);
 static void simulateBackButtonTap(void);
+static UIView * findBackButtonInView(UIView *view, UIWindow *window, UIView **outButton);
 static NSString * topVCClassName(void);
 static NSString * topVCTitle(void);
 
@@ -624,7 +625,7 @@ static BOOL viewContainsText(UIView *view, NSString *text) {
     return NO;
 }
 
-// ========== v10.17 Auto-click helpers ==========
+// ========== v10.18 Auto-click helpers ==========
 
 static UIScrollView * findListViewInHierarchy(UIView *root) {
     if (!root) return nil;
@@ -797,7 +798,7 @@ static void executeClickOnCollectionCell(UICollectionViewCell *cell, NSIndexPath
     });
 }
 
-// ========== v10.17 CORE: Auto-click renamed file ==========
+// ========== v10.18 CORE: Auto-click renamed file ==========
 
 static NSIndexPath * searchFileInTableView(NSString *targetName, UITableView *tv) {
     if (!targetName || !tv) return nil;
@@ -912,7 +913,7 @@ static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInt
 
 static void autoClickRenamedFile(NSString *ppName) {
     if (!ppName) return;
-    DLog(@"v10.17 Auto-clicking: %@", ppName);
+    DLog(@"v10.18 Auto-clicking: %@", ppName);
 
     UIScrollView *listView = findListViewGlobally();
     if (!listView) {
@@ -961,7 +962,50 @@ static void autoClickRenamedFile(NSString *ppName) {
     });
 }
 
-// ========== v10.17: Enhanced back button simulation ==========
+
+// ========== v10.18: Back button finder (no recursive block) ==========
+
+static UIView * findBackButtonInView(UIView *view, UIWindow *window, UIView **outButton) {
+    if (*outButton) return *outButton;
+
+    NSString *clsName = NSStringFromClass([view class]);
+
+    if ([clsName containsString:@"BackButton"] || [clsName containsString:@"backButton"] ||
+        [clsName containsString:@"ReturnButton"] || [clsName containsString:@"NavBack"] ||
+        [clsName containsString:@"UINavigationBarButton"]) {
+        *outButton = view;
+        return view;
+    }
+
+    if ([view isKindOfClass:[UIControl class]] || view.userInteractionEnabled) {
+        CGPoint absOrigin = [view convertPoint:CGPointZero toView:window];
+        if (absOrigin.x < 70 && absOrigin.y < 120 &&
+            view.bounds.size.width > 20 && view.bounds.size.height > 20 &&
+            view.bounds.size.width < 100 && view.bounds.size.height < 80) {
+            if ([view isKindOfClass:[UIButton class]]) {
+                UIButton *btn = (UIButton *)view;
+                NSString *title = btn.currentTitle ?: @"";
+                if ([title containsString:@"<"] || [title containsString:@"返回"] || [title containsString:@"Back"]) {
+                    *outButton = view;
+                    return view;
+                }
+            }
+            if (absOrigin.x < 50 && absOrigin.y > 20 && absOrigin.y < 100) {
+                *outButton = view;
+                return view;
+            }
+        }
+    }
+
+    for (UIView *sub in view.subviews) {
+        UIView *found = findBackButtonInView(sub, window, outButton);
+        if (found) return found;
+    }
+
+    return nil;
+}
+
+// ========== v10.18: Enhanced back button simulation ==========
 
 static void simulateBackButtonTap(void) {
     DLog(@"Simulating back button tap...");
@@ -1084,44 +1128,8 @@ static void simulateBackButtonTap(void) {
         DLog(@"Method 5: Global back button search...");
         __block UIView *backButton = nil;
 
-        __block void (^searchBackButton)(UIView *) = ^(UIView *view) {
-            if (backButton) return;
-
-            NSString *clsName = NSStringFromClass([view class]);
-
-            if ([clsName containsString:@"BackButton"] || [clsName containsString:@"backButton"] ||
-                [clsName containsString:@"ReturnButton"] || [clsName containsString:@"NavBack"] ||
-                [clsName containsString:@"UINavigationBarButton"]) {
-                backButton = view;
-                return;
-            }
-
-            if ([view isKindOfClass:[UIControl class]] || view.userInteractionEnabled) {
-                CGPoint absOrigin = [view convertPoint:CGPointZero toView:window];
-                if (absOrigin.x < 70 && absOrigin.y < 120 &&
-                    view.bounds.size.width > 20 && view.bounds.size.height > 20 &&
-                    view.bounds.size.width < 100 && view.bounds.size.height < 80) {
-                    if ([view isKindOfClass:[UIButton class]]) {
-                        UIButton *btn = (UIButton *)view;
-                        NSString *title = btn.currentTitle ?: @"";
-                        if ([title containsString:@"<"] || [title containsString:@"返回"] || [title containsString:@"Back"]) {
-                            backButton = view;
-                            return;
-                        }
-                    }
-                    if (absOrigin.x < 50 && absOrigin.y > 20 && absOrigin.y < 100) {
-                        backButton = view;
-                        return;
-                    }
-                }
-            }
-
-            for (UIView *sub in view.subviews) {
-                searchBackButton(sub);
-            }
-        };
-
-        searchBackButton(window);
+        UIView *backButton = nil;
+        findBackButtonInView(window, window, &backButton);
 
         if (backButton) {
             DLog(@"Found global back button: %@ frame=%@", NSStringFromClass([backButton class]), NSStringFromCGRect([backButton convertRect:backButton.bounds toView:window]));
@@ -1404,7 +1412,7 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 8 ? 8 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.17"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.18"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n智能流程：改名->.pp->刷新2次->自动点击->检测打开->自动退出->等待1秒->再次点击->恢复原名", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件"
@@ -1466,7 +1474,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v10.17 loaded - PP Edition");
+    DLog(@"BaiduPan Troll v10.18 loaded - PP Edition");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
