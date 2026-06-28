@@ -22,7 +22,6 @@ static NSTimer *gTapDetectionTimer = nil;
 static NSInteger gNavStackCount = 0;
 static BOOL gIsWaitingForTap = NO;
 static BOOL gHasOpenedFile = NO;
-static BOOL gIsWaitingForBack = NO;
 static NSString *gInitialTopVCClass = nil;
 static NSString *gInitialTopVCTitle = nil;
 
@@ -69,6 +68,7 @@ static NSIndexPath * searchFileInTableView(NSString *targetName, UITableView *tv
 static NSIndexPath * searchFileInCollectionView(NSString *targetName, UICollectionView *cv);
 static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInteger attempt, NSInteger maxAttempts, CGFloat scrollStep);
 static void autoClickRenamedFile(NSString *ppName);
+static void scrollToRenamedFile(NSString *ppName);
 static void simulateBackButtonTap(void);
 static UIView * findBackButtonInView(UIView *view, UIWindow *window, UIView **outButton);
 static NSString * topVCClassName(void);
@@ -965,6 +965,51 @@ static void autoClickRenamedFile(NSString *ppName) {
 
 // ========== v10.18: Back button finder (no recursive block) ==========
 
+// ========== v10.24: Scroll to file and wait for user tap ==========
+
+static void scrollToRenamedFile(NSString *ppName) {
+    if (!ppName) return;
+    DLog(@"v10.24 Scrolling to file: %@", ppName);
+
+    UIScrollView *listView = findListViewGlobally();
+    if (!listView) {
+        DLog(@"No list view found globally");
+        showToast(@"未找到文件列表");
+        return;
+    }
+    DLog(@"Found list view: %@", NSStringFromClass([listView class]));
+
+    NSIndexPath *foundPath = nil;
+    if ([listView isKindOfClass:[UITableView class]]) {
+        foundPath = searchFileInTableView(ppName, (UITableView *)listView);
+    } else if ([listView isKindOfClass:[UICollectionView class]]) {
+        foundPath = searchFileInCollectionView(ppName, (UICollectionView *)listView);
+    }
+
+    if (foundPath) {
+        DLog(@"File found, scrolling to position...");
+        if ([listView isKindOfClass:[UITableView class]]) {
+            [(UITableView *)listView scrollToRowAtIndexPath:foundPath atScrollPosition:UITableViewScrollPositionMiddle animated:YES];
+        } else if ([listView isKindOfClass:[UICollectionView class]]) {
+            [(UICollectionView *)listView scrollToItemAtIndexPath:foundPath atScrollPosition:UICollectionViewScrollPositionCenteredVertically animated:YES];
+        }
+        showToast(@"已滚动到文件，请点击进入下载界面");
+        return;
+    }
+
+    DLog(@"File not visible, starting scroll search...");
+    showToast(@"正在查找文件...");
+
+    [listView setContentOffset:CGPointZero animated:YES];
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        CGFloat scrollStep = listView.bounds.size.height * 0.7;
+        if (scrollStep < 100) scrollStep = 100;
+        performScrollAttempt(ppName, listView, 0, 15, scrollStep);
+    });
+}
+
+
 static UIView * findBackButtonInView(UIView *view, UIWindow *window, UIView **outButton) {
     if (*outButton) return *outButton;
 
@@ -1177,7 +1222,6 @@ static void executeRestore(void) {
         gPendingRestoreOriginalName = nil;
         gIsWaitingForTap = NO;
         gHasOpenedFile = NO;
-        gIsWaitingForBack = NO;
     });
 }
 
@@ -1188,7 +1232,6 @@ static void stopTapDetection(void) {
     }
     gIsWaitingForTap = NO;
     gHasOpenedFile = NO;
-    gIsWaitingForBack = NO;
 }
 
 static void checkIfFileOpened(void) {
@@ -1198,83 +1241,40 @@ static void checkIfFileOpened(void) {
     NSString *currentClass = topVCClassName();
     NSString *currentTitle = topVCTitle();
 
-    DLog(@"Tap detection: nav=%ld->%ld class=[%@]->[%@] title=[%@]->[%@] hasOpened=%d waitingBack=%d",
+    DLog(@"Tap detection: nav=%ld->%ld class=[%@]->[%@] title=[%@]->[%@] hasOpened=%d",
          (long)gNavStackCount, (long)currentCount,
          gInitialTopVCClass, currentClass,
-         gInitialTopVCTitle, currentTitle, gHasOpenedFile, gIsWaitingForBack);
+         gInitialTopVCTitle, currentTitle, gHasOpenedFile);
 
-    // Phase 1: Detect file opened (nav stack increased or VC changed to preview)
+    // Detect file opened (nav stack increased or VC changed to preview)
     if (!gHasOpenedFile) {
         BOOL opened = NO;
 
         if (currentCount > gNavStackCount) {
-            DLog(@"Phase 1: File opened (nav stack increased)!");
+            DLog(@"File opened (nav stack increased)!");
             opened = YES;
         } else if (gInitialTopVCClass && ![gInitialTopVCClass isEqualToString:currentClass]) {
-            DLog(@"Phase 1: File opened (VC class changed)!");
+            DLog(@"File opened (VC class changed)!");
             opened = YES;
         } else if (currentTitle && ([currentTitle containsString:@"预览"] || [currentTitle containsString:@"下载"] || [currentTitle containsString:@"文件详情"])) {
-            DLog(@"Phase 1: File opened (preview title)!");
+            DLog(@"File opened (preview title)!");
             opened = YES;
         } else if (gPendingRestoreOriginalName && currentTitle && [currentTitle containsString:gPendingRestoreOriginalName]) {
-            DLog(@"Phase 1: File opened (title matches file name)!");
+            DLog(@"File opened (title matches file name)!");
             opened = YES;
         }
 
         if (opened) {
             gHasOpenedFile = YES;
-            gIsWaitingForBack = YES;
-            showToast(@"文件已打开，自动退出中...");
-
-            // Wait 1 second so user can see the preview, then auto-back
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                simulateBackButtonTap();
-                // Wait 0.5s for back animation to complete before allowing Phase 2 detection
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    gIsWaitingForBack = NO;
-                });
-            });
-            return;
-        }
-    }
-    // Phase 2: Detect returned to file list, then re-click and restore
-    else if (!gIsWaitingForBack) {
-        BOOL returned = NO;
-
-        if (currentCount == gNavStackCount) {
-            returned = YES;
-        } else if (gInitialTopVCClass && [gInitialTopVCClass isEqualToString:currentClass]) {
-            returned = YES;
-        } else if (gInitialTopVCTitle && [gInitialTopVCTitle isEqualToString:currentTitle]) {
-            returned = YES;
-        }
-
-        if (returned) {
-            DLog(@"Phase 2: Returned to file list, refreshing x2 then re-clicking...");
-            showToast(@"已退出，刷新第1次...");
+            showToast(@"已进入下载界面，恢复原名...");
 
             if (gTapDetectionTimer) {
                 [gTapDetectionTimer invalidate];
                 gTapDetectionTimer = nil;
             }
 
-            // Refresh 1st time after returning
-            forceRefreshFileList();
-
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                showToast(@"刷新第2次...");
-                forceRefreshFileList();
-
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    showToast(@"再次点击文件...");
-                    NSString *ppName = [gPendingRestoreOriginalName stringByAppendingString:@".pp"];
-                    autoClickRenamedFile(ppName);
-
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                        showToast(@"正在恢复原名...");
-                        executeRestore();
-                    });
-                });
+                executeRestore();
             });
             return;
         }
@@ -1285,7 +1285,6 @@ static void startTapDetection(void) {
     stopTapDetection();
     gIsWaitingForTap = YES;
     gHasOpenedFile = NO;
-    gIsWaitingForBack = NO;
     gNavStackCount = currentNavStackCount();
     gInitialTopVCClass = topVCClassName();
     gInitialTopVCTitle = topVCTitle();
@@ -1345,9 +1344,9 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
             forceRefreshFileList();
 
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                showToast(@"4. 尝试点击...");
+                showToast(@"4. 滚动到文件位置，请手动点击");
                 startTapDetection();
-                autoClickRenamedFile(ppName);
+                scrollToRenamedFile(ppName);
             });
         });
     });
@@ -1375,7 +1374,7 @@ static void triggerDownloadFlow(void) {
             return;
         }
         UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"选择文件"
-                                                                       message:@"选择后自动重命名为.pp并刷新，自动点击文件打开后自动退出、刷新2次、再次点击，最后恢复原名"
+                                                                       message:@"选择后自动重命名为.pp并刷新，滚动到文件位置，点击进入下载界面后自动恢复原名"
                                                                 preferredStyle:UIAlertControllerStyleActionSheet];
         for (NSDictionary *file in fileItems) {
             NSString *name = file[@"server_filename"];
@@ -1420,7 +1419,7 @@ static void onFloatButtonTap(void) {
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.18"
-                                                                   message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n智能流程：改名->.pp->刷新2次->自动点击->检测打开->自动退出->等待1秒->再次点击->恢复原名", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
+                                                                   message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n智能流程：改名->.pp->刷新2次->滚动到文件->用户点击->进入下载->自动恢复原名", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件"
                                                              style:UIAlertActionStyleDefault
