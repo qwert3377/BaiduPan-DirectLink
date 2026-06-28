@@ -603,37 +603,149 @@ static UICollectionView * findCollectionViewInView(UIView *view) {
     return nil;
 }
 
-static void scrollToTopInVC(UIViewController *vc) {
-    if (!vc) return;
-
-    // Method 1: Direct UITableView
-    UITableView *tv = findTableViewInView(vc.view);
-    if (tv) {
-        [tv reloadData];
-        [tv setContentOffset:CGPointZero animated:YES];
-        [tv scrollToRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:0] atScrollPosition:UITableViewScrollPositionTop animated:YES];
-        DLog(@"Scrolled UITableView to top");
-        return;
-    }
-
-    // Method 2: Direct UICollectionView
-    UICollectionView *cv = findCollectionViewInView(vc.view);
-    if (cv) {
-        [cv reloadData];
-        [cv setContentOffset:CGPointZero animated:YES];
-        if ([cv numberOfItemsInSection:0] > 0) {
-            [cv scrollToItemAtIndexPath:[NSIndexPath indexPathForItem:0 inSection:0] atScrollPosition:UICollectionViewScrollPositionTop animated:YES];
+static UIView * findCellWithText(UIView *view, NSString *text) {
+    if (!view || !text) return nil;
+    // Check if this view is a cell containing the text
+    if ([view isKindOfClass:[UITableViewCell class]] || [view isKindOfClass:[UICollectionViewCell class]]) {
+        for (UIView *sub in view.subviews) {
+            if ([sub isKindOfClass:[UILabel class]]) {
+                UILabel *lbl = (UILabel *)sub;
+                if (lbl.text && [lbl.text containsString:text]) return view;
+            }
+            for (UIView *ss in sub.subviews) {
+                if ([ss isKindOfClass:[UILabel class]]) {
+                    UILabel *lbl = (UILabel *)ss;
+                    if (lbl.text && [lbl.text containsString:text]) return view;
+                }
+            }
         }
-        DLog(@"Scrolled UICollectionView to top");
+    }
+    // Also check buttons (some cells use UIButton)
+    if ([view isKindOfClass:[UIButton class]]) {
+        UIButton *btn = (UIButton *)view;
+        NSString *btnTitle = [btn titleForState:UIControlStateNormal];
+        if (btnTitle && [btnTitle containsString:text]) return view;
+    }
+    // Recurse
+    for (UIView *sub in view.subviews) {
+        UIView *found = findCellWithText(sub, text);
+        if (found) return found;
+    }
+    return nil;
+}
+
+static void simulateTapOnCell(UIView *cell) {
+    if (!cell) return;
+    DLog(@"Auto-tapping cell: %@", NSStringFromClass([cell class]));
+
+    // Method 1: Send touch events
+    @try {
+        UITouch *touch = [[UITouch alloc] init];
+        [touch setValue:@(1) forKey:@"tapCount"];
+        [touch setValue:cell.window forKey:@"window"];
+        [touch setValue:cell forKey:@"view"];
+        [touch setValue:@(UITouchPhaseBegan) forKey:@"phase"];
+        CGPoint center = CGPointMake(cell.bounds.size.width / 2, cell.bounds.size.height / 2);
+        CGPoint locInWindow = [cell convertPoint:center toView:cell.window];
+        [touch setValue:[NSValue valueWithCGPoint:locInWindow] forKey:@"locationInWindow"];
+        [touch setValue:[NSValue valueWithCGPoint:locInWindow] forKey:@"previousLocationInWindow"];
+
+        UIEvent *event = [[UIApplication sharedApplication] performSelector:@selector(_touchesEvent)];
+        if (event) {
+            [event setValue:touch forKey:@"_firstTouchForView"];
+            [event setValue:touch forKey:@"_allTouches"];
+        }
+        NSSet *touches = [NSSet setWithObject:touch];
+        SEL touchesBegan = @selector(touchesBegan:withEvent:);
+        if ([cell respondsToSelector:touchesBegan]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [cell performSelector:touchesBegan withObject:touches withObject:event];
+            #pragma clang diagnostic pop
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [touch setValue:@(UITouchPhaseEnded) forKey:@"phase"];
+            SEL touchesEnded = @selector(touchesEnded:withEvent:);
+            if ([cell respondsToSelector:touchesEnded]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                [cell performSelector:touchesEnded withObject:touches withObject:event];
+                #pragma clang diagnostic pop
+            }
+        });
+    } @catch (NSException *e) {
+        DLog(@"Touch simulation exception: %@", e.reason);
+    }
+
+    // Method 2: If table cell, trigger delegate
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if ([cell isKindOfClass:[UITableViewCell class]]) {
+            UITableViewCell *tc = (UITableViewCell *)cell;
+            UITableView *tv = findTableViewInView(cell.superview);
+            if (tv && [tv.delegate respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) {
+                NSIndexPath *ip = [tv indexPathForCell:tc];
+                if (ip) {
+                    [tv selectRowAtIndexPath:ip animated:NO scrollPosition:UITableViewScrollPositionNone];
+                    [tv.delegate tableView:tv didSelectRowAtIndexPath:ip];
+                    DLog(@"Triggered tableView:didSelectRowAtIndexPath:");
+                }
+            }
+        } else if ([cell isKindOfClass:[UICollectionViewCell class]]) {
+            UICollectionViewCell *cc = (UICollectionViewCell *)cell;
+            UICollectionView *cv = findCollectionViewInView(cell.superview);
+            if (cv && [cv.delegate respondsToSelector:@selector(collectionView:didSelectItemAtIndexPath:)]) {
+                NSIndexPath *ip = [cv indexPathForCell:cc];
+                if (ip) {
+                    [cv selectItemAtIndexPath:ip animated:NO scrollPosition:UICollectionViewScrollPositionNone];
+                    [cv.delegate collectionView:cv didSelectItemAtIndexPath:ip];
+                    DLog(@"Triggered collectionView:didSelectItemAtIndexPath:");
+                }
+            }
+        }
+    });
+}
+
+static void autoTapFileCell(NSString *fileName, NSInteger retryCount, void (^completion)(BOOL success)) {
+    if (retryCount > 30) {
+        completion(NO);
         return;
     }
 
-    // Method 3: Generic UIScrollView
-    UIScrollView *sv = findScrollViewInView(vc.view);
-    if (sv) {
-        [sv setContentOffset:CGPointMake(0, -sv.contentInset.top) animated:YES];
-        DLog(@"Scrolled UIScrollView to top");
+    UIViewController *vc = topViewController();
+    if (!vc) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            autoTapFileCell(fileName, retryCount + 1, completion);
+        });
+        return;
     }
+
+    // Force reload to ensure cells are rendered
+    UITableView *tv = findTableViewInView(vc.view);
+    if (tv) [tv reloadData];
+    UICollectionView *cv = findCollectionViewInView(vc.view);
+    if (cv) [cv reloadData];
+
+    // Find cell containing the file name
+    NSString *searchText = fileName;
+    UIView *cell = findCellWithText(vc.view, searchText);
+
+    if (!cell && [searchText hasSuffix:@".pdf"]) {
+        // Try without .pdf suffix
+        NSString *baseName = [searchText stringByDeletingPathExtension];
+        cell = findCellWithText(vc.view, baseName);
+    }
+
+    if (cell) {
+        DLog(@"Found cell for %@, auto-tapping...", fileName);
+        simulateTapOnCell(cell);
+        completion(YES);
+        return;
+    }
+
+    DLog(@"Cell not found yet, retry %ld...", (long)retryCount);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        autoTapFileCell(fileName, retryCount + 1, completion);
+    });
 }
 
 // ========== Tap Detection ==========
@@ -790,13 +902,19 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
         forceRefreshFileList();
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            showToast(@"3. 刷新第2次并置顶...");
+            showToast(@"3. 刷新第2次...");
             forceRefreshFileList();
-            scrollToTopInVC(topViewController());
 
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                showToast(@"4. 请点击文件打开下载，打开后自动恢复原名");
-                startTapDetection();
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                showToast(@"4. 自动点击文件...");
+                autoTapFileCell(pdfName, 0, ^(BOOL success) {
+                    if (success) {
+                        showToast(@"已自动点击文件，打开后自动恢复原名");
+                    } else {
+                        showToast(@"自动点击失败，请手动点击文件");
+                    }
+                    startTapDetection();
+                });
             });
         });
     });
