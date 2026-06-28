@@ -279,14 +279,6 @@ static UIView * findViewRecursively(UIView *root, Class targetClass) {
     return nil;
 }
 
-// 通过类名字符串递归查找视图
-static UIView * findViewByClassName(UIView *root, NSString *className) {
-    if (!root || !className) return nil;
-    Class cls = NSClassFromString(className);
-    if (!cls) return nil;
-    return findViewRecursively(root, cls);
-}
-
 // 尝试从清单中的下载管理类获取实例
 static id getDownloadManagerFromClasses(void) {
     NSArray *managerClasses = @[
