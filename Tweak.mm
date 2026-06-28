@@ -959,7 +959,7 @@ static void simulateBackButtonTap(void) {
     UIViewController *vc = topViewController();
     if (!vc) return;
 
-    // Method 1: Try navigation controller pop
+    // Method 1: Try navigation controller pop (most reliable)
     if (vc.navigationController && vc.navigationController.viewControllers.count > 1) {
         DLog(@"Popping view controller via navigationController");
         [vc.navigationController popViewControllerAnimated:YES];
@@ -970,35 +970,46 @@ static void simulateBackButtonTap(void) {
     UINavigationBar *navBar = nil;
     if (vc.navigationController) {
         navBar = vc.navigationController.navigationBar;
-    } else if ([vc.view isKindOfClass:[UINavigationBar class]]) {
-        navBar = (UINavigationBar *)vc.view;
     }
 
     if (navBar) {
-        // Look for back button or left bar button
+        DLog(@"Searching navBar subviews for back button...");
         for (UIView *sub in navBar.subviews) {
-            // Check for back button indicator or custom back button
+            DLog(@"  navBar subview: %@ frame=%@", NSStringFromClass([sub class]), NSStringFromCGRect(sub.frame));
+
+            // Check for UIButton
             if ([sub isKindOfClass:[UIButton class]]) {
                 UIButton *btn = (UIButton *)sub;
-                if (btn.currentTitle && ([btn.currentTitle containsString:@"<"] || 
-                                         [btn.currentTitle containsString:@"返回"] ||
-                                         [btn.currentTitle containsString:@"Back"])) {
-                    DLog(@"Found back button, tapping...");
+                DLog(@"  Found UIButton: title=%@", btn.currentTitle ?: @"nil");
+                sendTouchToView(btn, CGPointMake(btn.bounds.size.width/2, btn.bounds.size.height/2));
+                return;
+            }
+
+            // Check for any interactive view at top-left area
+            if (sub.frame.origin.x < 50 && sub.frame.origin.y < 50 && sub.frame.size.width > 20 && sub.frame.size.height > 20) {
+                DLog(@"  Found potential back button at top-left, tapping...");
+                sendTouchToView(sub, CGPointMake(sub.bounds.size.width/2, sub.bounds.size.height/2));
+                return;
+            }
+
+            // Check sub-subviews
+            for (UIView *sub2 in sub.subviews) {
+                if ([sub2 isKindOfClass:[UIButton class]]) {
+                    UIButton *btn = (UIButton *)sub2;
+                    DLog(@"  Found nested UIButton: title=%@", btn.currentTitle ?: @"nil");
                     sendTouchToView(btn, CGPointMake(btn.bounds.size.width/2, btn.bounds.size.height/2));
                     return;
                 }
-            }
-            // Check for UINavigationBarButton
-            NSString *clsName = NSStringFromClass([sub class]);
-            if ([clsName containsString:@"Button"] || [clsName containsString:@"BarButton"]) {
-                DLog(@"Found nav bar button: %@, tapping...", clsName);
-                sendTouchToView(sub, CGPointMake(sub.bounds.size.width/2, sub.bounds.size.height/2));
-                return;
+                if (sub2.frame.origin.x < 50 && sub2.frame.origin.y < 50 && sub2.frame.size.width > 20 && sub2.frame.size.height > 20) {
+                    DLog(@"  Found nested potential back button, tapping...");
+                    sendTouchToView(sub2, CGPointMake(sub2.bounds.size.width/2, sub2.bounds.size.height/2));
+                    return;
+                }
             }
         }
     }
 
-    // Method 3: Find any button with back-like appearance in the window
+    // Method 3: Directly tap the top-left corner of the screen (where < usually is)
     UIWindow *window = nil;
     if (@available(iOS 13.0, *)) {
         for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
@@ -1007,16 +1018,9 @@ static void simulateBackButtonTap(void) {
     }
     if (!window) window = [[UIApplication sharedApplication] keyWindow];
     if (window) {
-        for (UIView *sub in window.subviews) {
-            if ([sub isKindOfClass:[UIButton class]]) {
-                UIButton *btn = (UIButton *)sub;
-                if (btn.frame.origin.x < 60 && btn.frame.origin.y < 100) {
-                    DLog(@"Found potential back button at top-left, tapping...");
-                    sendTouchToView(btn, CGPointMake(btn.bounds.size.width/2, btn.bounds.size.height/2));
-                    return;
-                }
-            }
-        }
+        DLog(@"Tapping top-left corner of screen...");
+        CGPoint backPoint = CGPointMake(30, 50); // Typical back button position
+        sendTouchToView(window, backPoint);
     }
 
     DLog(@"Could not find back button to tap");
