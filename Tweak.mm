@@ -1,7 +1,6 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v8.7.0
-//  Ultra-minimal flow: select -> rename to .pdf -> pull-to-refresh x2 -> wait 3s -> restore name
-//  Removed: polling, cell finding, tap simulation, direct link fetching, all dialogs except file picker
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v8.8.0
+//  Flow: select -> rename to .pdf -> refresh x2 + scroll to top -> wait for user tap -> detect new VC pushed -> auto restore name
 //
 
 #import <UIKit/UIKit.h>
@@ -14,8 +13,17 @@ static NSString *gBdstoken = nil;
 static NSString *gBDUSS = nil;
 static UIButton *gFloatButton = nil;
 
+// State for tap detection
+static NSString *gPendingRestoreFileId = nil;
+static NSString *gPendingRestorePdfPath = nil;
+static NSString *gPendingRestoreOriginalName = nil;
+static NSTimer *gTapDetectionTimer = nil;
+static NSInteger gNavStackCount = 0;
+static BOOL gIsWaitingForTap = NO;
+
 // ========== Forward declarations ==========
 static UIViewController * topViewController(void);
+static NSInteger currentNavStackCount(void);
 static NSString * strictEncodeURIComponent(NSString *str);
 static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *headers, NSString *body, void (^handler)(id json, NSError *err));
 static NSString * scanMemoryForBdstoken(void);
@@ -29,7 +37,12 @@ static void forceRefreshFileList(void);
 static void refreshVC(UIViewController *vc);
 static void simulatePullToRefreshOnScrollView(UIScrollView *scrollView);
 static void tryRefreshOnScrollView(UIScrollView *scrollView);
-static void runUltraMinimalFlow(NSString *fileName, NSString *filePath, NSString *fileId);
+static void scrollToTopInVC(UIViewController *vc);
+static void startTapDetection(void);
+static void stopTapDetection(void);
+static void checkIfFileOpened(void);
+static void executeRestore(void);
+static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileId);
 static void triggerDownloadFlow(void);
 static void onFloatButtonTap(void);
 static void showFloatButton(void);
@@ -61,6 +74,43 @@ static UIViewController * topViewController(void) {
         }
     }
     return vc;
+}
+
+static NSInteger currentNavStackCount(void) {
+    UIViewController *vc = topViewController();
+    if (!vc) return 0;
+    UINavigationController *nav = nil;
+    if ([vc isKindOfClass:[UINavigationController class]]) {
+        nav = (UINavigationController *)vc;
+    } else if (vc.navigationController) {
+        nav = vc.navigationController;
+    } else {
+        // Try to find nav from root
+        UIWindow *window = nil;
+        if (@available(iOS 13.0, *)) {
+            for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
+                if (scene.activationState == UISceneActivationStateForegroundActive) {
+                    window = scene.windows.firstObject;
+                    break;
+                }
+            }
+        }
+        if (!window) window = [[UIApplication sharedApplication] keyWindow];
+        if (window && window.rootViewController) {
+            UIViewController *root = window.rootViewController;
+            while (root.presentedViewController) root = root.presentedViewController;
+            if ([root isKindOfClass:[UINavigationController class]]) {
+                nav = (UINavigationController *)root;
+            } else if ([root isKindOfClass:[UITabBarController class]]) {
+                UIViewController *sel = [(UITabBarController *)root selectedViewController];
+                if ([sel isKindOfClass:[UINavigationController class]]) {
+                    nav = (UINavigationController *)sel;
+                }
+            }
+        }
+    }
+    if (nav) return nav.viewControllers.count;
+    return 1;
 }
 
 static NSString * strictEncodeURIComponent(NSString *str) {
@@ -178,28 +228,23 @@ static NSString * extractPathFromVC(UIViewController *vc) {
 static NSString * buildPathFromNavStack(void) {
     UIViewController *vc = topViewController();
     if (!vc) return nil;
-
     NSString *path = extractPathFromVC(vc);
     if (path && path.length > 0 && ![path isEqualToString:@"/"]) return path;
-
     UINavigationController *nav = nil;
     if ([vc isKindOfClass:[UINavigationController class]]) {
         nav = (UINavigationController *)vc;
     } else if (vc.navigationController) {
         nav = vc.navigationController;
     }
-
     if (nav) {
         UIViewController *topVC = nav.topViewController;
         NSString *topPath = extractPathFromVC(topVC);
         if (topPath && topPath.length > 0 && ![topPath isEqualToString:@"/"]) return topPath;
-
         NSArray *vcs = nav.viewControllers;
         for (NSInteger i = vcs.count - 1; i >= 0; i--) {
             NSString *p = extractPathFromVC(vcs[i]);
             if (p && p.length > 0 && ![p isEqualToString:@"/"]) return p;
         }
-
         NSMutableArray *components = [NSMutableArray array];
         for (UIViewController *controller in vcs) {
             NSString *title = controller.title;
@@ -232,7 +277,6 @@ static void autoDetectPathAndToken(void) {
     }
     if (!gBdstoken) gBdstoken = scanMemoryForBdstoken();
     if (!gBdstoken) DLog(@"WARNING: No token detected");
-
     NSHTTPCookieStorage *cookieStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
     for (NSHTTPCookie *cookie in [cookieStorage cookies]) {
         if ([cookie.name isEqualToString:@"BDUSS"]) { gBDUSS = cookie.value; DLog(@"Got BDUSS from cookie"); break; }
@@ -296,11 +340,9 @@ static void showToast(NSString *msg) {
     }
     if (!window) window = [[UIApplication sharedApplication] keyWindow];
     if (!window) return;
-
     for (UIView *sub in window.subviews) {
         if (sub.tag == 0xBDF0) [sub removeFromSuperview];
     }
-
     UILabel *toast = [[UILabel alloc] init];
     toast.tag = 0xBDF0;
     toast.text = msg;
@@ -400,7 +442,6 @@ static void simulatePullToRefreshOnScrollView(UIScrollView *scrollView) {
     if (!scrollView) return;
     DLog(@"Simulating pull-to-refresh gesture");
     CGPoint originalOffset = scrollView.contentOffset;
-
     SEL willBeginDragging = @selector(scrollViewWillBeginDragging:);
     if (scrollView.delegate && [scrollView.delegate respondsToSelector:willBeginDragging]) {
         #pragma clang diagnostic push
@@ -408,9 +449,7 @@ static void simulatePullToRefreshOnScrollView(UIScrollView *scrollView) {
         [scrollView.delegate performSelector:willBeginDragging withObject:scrollView];
         #pragma clang diagnostic pop
     }
-
     [scrollView setContentOffset:CGPointMake(originalOffset.x, -150) animated:NO];
-
     SEL didScroll = @selector(scrollViewDidScroll:);
     if (scrollView.delegate && [scrollView.delegate respondsToSelector:didScroll]) {
         #pragma clang diagnostic push
@@ -418,7 +457,6 @@ static void simulatePullToRefreshOnScrollView(UIScrollView *scrollView) {
         [scrollView.delegate performSelector:didScroll withObject:scrollView];
         #pragma clang diagnostic pop
     }
-
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         SEL didEndDragging = @selector(scrollViewDidEndDragging:willDecelerate:);
         if (scrollView.delegate && [scrollView.delegate respondsToSelector:didEndDragging]) {
@@ -427,7 +465,6 @@ static void simulatePullToRefreshOnScrollView(UIScrollView *scrollView) {
             [scrollView.delegate performSelector:didEndDragging withObject:scrollView withObject:@(NO)];
             #pragma clang diagnostic pop
         }
-
         SEL didEndDecelerating = @selector(scrollViewDidEndDecelerating:);
         if (scrollView.delegate && [scrollView.delegate respondsToSelector:didEndDecelerating]) {
             #pragma clang diagnostic push
@@ -435,7 +472,6 @@ static void simulatePullToRefreshOnScrollView(UIScrollView *scrollView) {
             [scrollView.delegate performSelector:didEndDecelerating withObject:scrollView];
             #pragma clang diagnostic pop
         }
-
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [UIView animateWithDuration:0.3 animations:^{
                 scrollView.contentOffset = originalOffset;
@@ -446,7 +482,6 @@ static void simulatePullToRefreshOnScrollView(UIScrollView *scrollView) {
 
 static void tryRefreshOnScrollView(UIScrollView *scrollView) {
     if (!scrollView) return;
-
     if (scrollView.refreshControl) {
         DLog(@"Triggering UIRefreshControl");
         [scrollView.refreshControl beginRefreshing];
@@ -459,7 +494,6 @@ static void tryRefreshOnScrollView(UIScrollView *scrollView) {
         });
         return;
     }
-
     id mjHeader = nil;
     id mjFooter = nil;
     @try {
@@ -468,9 +502,7 @@ static void tryRefreshOnScrollView(UIScrollView *scrollView) {
     } @catch (NSException *e) {}
     if (mjHeader) { triggerMJRefresh(mjHeader); return; }
     if (mjFooter) { triggerMJRefresh(mjFooter); return; }
-
     simulatePullToRefreshOnScrollView(scrollView);
-
     for (UIView *subview in scrollView.subviews) {
         NSString *className = NSStringFromClass([subview class]);
         if ([className containsString:@"RefreshHeader"] ||
@@ -495,7 +527,6 @@ static void tryRefreshOnScrollView(UIScrollView *scrollView) {
 
 static void refreshVC(UIViewController *vc) {
     if (!vc) return;
-
     NSArray *baiduSelectors = @[
         @"refreshFileList", @"reloadFileList", @"updateFileList",
         @"refreshData", @"reloadData", @"updateData",
@@ -516,7 +547,6 @@ static void refreshVC(UIViewController *vc) {
             return;
         }
     }
-
     if ([vc.view isKindOfClass:[UITableView class]]) {
         [(UITableView *)vc.view reloadData];
         return;
@@ -525,13 +555,11 @@ static void refreshVC(UIViewController *vc) {
         [(UICollectionView *)vc.view reloadData];
         return;
     }
-
     UIScrollView *sv = findScrollViewInView(vc.view);
     if (sv) {
         tryRefreshOnScrollView(sv);
         return;
     }
-
     if ([vc isKindOfClass:[UINavigationController class]]) {
         for (UIViewController *child in [(UINavigationController *)vc viewControllers]) refreshVC(child);
     } else if ([vc isKindOfClass:[UITabBarController class]]) {
@@ -539,7 +567,6 @@ static void refreshVC(UIViewController *vc) {
     } else if ([vc isKindOfClass:[UISplitViewController class]]) {
         for (UIViewController *child in [(UISplitViewController *)vc viewControllers]) refreshVC(child);
     }
-
     refreshVC(vc.presentedViewController);
 }
 
@@ -556,9 +583,95 @@ static void forceRefreshFileList(void) {
     triggerNotificationFallback();
 }
 
-// ========== Ultra-minimal flow ==========
+static void scrollToTopInVC(UIViewController *vc) {
+    if (!vc) return;
+    UIScrollView *sv = findScrollViewInView(vc.view);
+    if (sv) {
+        [sv setContentOffset:CGPointMake(0, -sv.contentInset.top) animated:YES];
+        DLog(@"Scrolled to top");
+    }
+}
 
-static void runUltraMinimalFlow(NSString *fileName, NSString *filePath, NSString *fileId) {
+// ========== Tap Detection ==========
+
+static void executeRestore(void) {
+    if (!gPendingRestoreFileId || !gPendingRestorePdfPath || !gPendingRestoreOriginalName) {
+        stopTapDetection();
+        return;
+    }
+    DLog(@"Executing restore: %@ -> %@", gPendingRestorePdfPath, gPendingRestoreOriginalName);
+    renameFile(gPendingRestoreFileId, gPendingRestorePdfPath, gPendingRestoreOriginalName, ^(BOOL ok, NSError *e) {
+        if (ok) {
+            showToast(@"✅ 已自动恢复原名");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                forceRefreshFileList();
+            });
+        } else {
+            showToast([NSString stringWithFormat:@"恢复原名失败: %@", e.localizedDescription]);
+        }
+        gPendingRestoreFileId = nil;
+        gPendingRestorePdfPath = nil;
+        gPendingRestoreOriginalName = nil;
+        gIsWaitingForTap = NO;
+    });
+}
+
+static void stopTapDetection(void) {
+    if (gTapDetectionTimer) {
+        [gTapDetectionTimer invalidate];
+        gTapDetectionTimer = nil;
+    }
+    gIsWaitingForTap = NO;
+}
+
+static void checkIfFileOpened(void) {
+    if (!gIsWaitingForTap) return;
+    NSInteger currentCount = currentNavStackCount();
+    DLog(@"Tap detection: nav count %ld -> %ld", (long)gNavStackCount, (long)currentCount);
+    if (currentCount > gNavStackCount) {
+        DLog(@"File opened detected! Restoring name...");
+        stopTapDetection();
+        showToast(@"检测到文件已打开，正在恢复原名...");
+        executeRestore();
+    }
+}
+
+static void startTapDetection(void) {
+    stopTapDetection();
+    gIsWaitingForTap = YES;
+    gNavStackCount = currentNavStackCount();
+    DLog(@"Started tap detection, initial nav count: %ld", (long)gNavStackCount);
+    showToast(@"请点击改名后的文件，打开后自动恢复原名");
+
+    // Check every 0.5 seconds for nav stack change
+    gTapDetectionTimer = [NSTimer scheduledTimerWithTimeInterval:0.5
+                                                            target:[NSBlockOperation blockOperationWithBlock:^{
+                                                                checkIfFileOpened();
+                                                            }]
+                                                          selector:@selector(main)
+                                                          userInfo:nil
+                                                           repeats:YES];
+
+    // Safety timeout: auto-restore after 60 seconds regardless
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (gIsWaitingForTap) {
+            DLog(@"Tap detection timeout, forcing restore");
+            stopTapDetection();
+            showToast(@"等待超时，自动恢复原名");
+            executeRestore();
+        }
+    });
+}
+
+// ========== Smart Flow ==========
+
+static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileId) {
+    // Cancel any pending detection
+    stopTapDetection();
+    gPendingRestoreFileId = nil;
+    gPendingRestorePdfPath = nil;
+    gPendingRestoreOriginalName = nil;
+
     NSString *ext = fileName.pathExtension.lowercaseString;
     if ([ext isEqualToString:@"pdf"]) {
         showToast(@"文件已是PDF，无需处理");
@@ -575,25 +688,21 @@ static void runUltraMinimalFlow(NSString *fileName, NSString *filePath, NSString
             return;
         }
 
+        gPendingRestoreFileId = fileId;
+        gPendingRestorePdfPath = pdfPath;
+        gPendingRestoreOriginalName = fileName;
+
         showToast(@"2. 刷新第1次...");
         forceRefreshFileList();
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            showToast(@"3. 刷新第2次...");
+            showToast(@"3. 刷新第2次并置顶...");
             forceRefreshFileList();
+            scrollToTopInVC(topViewController());
 
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                showToast(@"4. 恢复原名...");
-                renameFile(fileId, pdfPath, fileName, ^(BOOL success2, NSError *err2) {
-                    if (success2) {
-                        showToast(@"✅ 已恢复原名");
-                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                            forceRefreshFileList();
-                        });
-                    } else {
-                        showToast([NSString stringWithFormat:@"恢复原名失败: %@", err2.localizedDescription]);
-                    }
-                });
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                showToast(@"4. 请点击文件打开下载，打开后自动恢复原名");
+                startTapDetection();
             });
         });
     });
@@ -611,20 +720,17 @@ static void triggerDownloadFlow(void) {
             showToast(err ? err.localizedDescription : @"文件夹为空");
             return;
         }
-
         NSMutableArray *fileItems = [NSMutableArray array];
         for (NSDictionary *file in files) {
             NSNumber *isdir = file[@"isdir"];
             if (!isdir || [isdir integerValue] == 0) [fileItems addObject:file];
         }
-
         if (fileItems.count == 0) {
             showToast(@"当前文件夹没有可下载的文件");
             return;
         }
-
         UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"选择文件"
-                                                                       message:@"选择后自动重命名为.pdf并刷新，随后自动恢复原名"
+                                                                       message:@"选择后自动重命名为.pdf并刷新，点击文件打开后自动恢复原名"
                                                                 preferredStyle:UIAlertControllerStyleActionSheet];
         for (NSDictionary *file in fileItems) {
             NSString *name = file[@"server_filename"];
@@ -639,7 +745,7 @@ static void triggerDownloadFlow(void) {
             UIAlertAction *action = [UIAlertAction actionWithTitle:title
                                                                style:UIAlertActionStyleDefault
                                                              handler:^(UIAlertAction *action) {
-                runUltraMinimalFlow(name, path, fid);
+                runSmartFlow(name, path, fid);
             }];
             [sheet addAction:action];
         }
@@ -647,7 +753,6 @@ static void triggerDownloadFlow(void) {
                                                                style:UIAlertActionStyleCancel
                                                              handler:nil];
         [sheet addAction:cancelAction];
-
         UIViewController *vc = topViewController();
         if (vc) {
             if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
@@ -669,8 +774,8 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 8 ? 8 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v8.7.0"
-                                                                   message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n极简流程：改名->刷新2次->恢复原名", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v8.8.0"
+                                                                   message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n智能流程：改名->刷新2次->等待点击->检测打开->自动恢复", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件"
                                                              style:UIAlertActionStyleDefault
@@ -678,12 +783,10 @@ static void onFloatButtonTap(void) {
         triggerDownloadFlow();
     }];
     [alert addAction:downloadAction];
-
     UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"OK"
                                                        style:UIAlertActionStyleCancel
                                                      handler:nil];
     [alert addAction:okAction];
-
     UIViewController *vc = topViewController();
     if (vc) [vc presentViewController:alert animated:YES completion:nil];
 }
@@ -733,7 +836,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v8.7.0 loaded - Ultra-minimal Edition");
+    DLog(@"BaiduPan Troll v8.8.0 loaded - Smart Tap Detection Edition");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
