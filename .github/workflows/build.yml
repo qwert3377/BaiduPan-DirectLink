@@ -32,24 +32,21 @@ jobs:
         make clean
         make
         echo "=== Finding dylib ==="
-        find . -name "*.dylib" -type f 2>/dev/null
-        echo "=== Theos lib dir ==="
-        ls -la $HOME/theos/lib/ 2>/dev/null || true
-        echo "=== Current dir ==="
-        ls -la
-        echo "=== obj dir ==="
-        ls -la .theos/obj/ 2>/dev/null || true
-        ls -la obj/ 2>/dev/null || true
-        echo "=== Copy dylib to root ==="
-        find . -name "BaiduPanTroll*.dylib" -type f -exec cp {} . \; 2>/dev/null || true
-        ls -la *.dylib 2>/dev/null || true
+        find . -name "*.dylib" -type f
+
+    - name: Sign dylib
+      run: |
+        DYLIB=$(find . -name "BaiduPanTroll*.dylib" -type f | head -1)
+        echo "Found dylib: $DYLIB"
+        if [ -n "$DYLIB" ]; then
+          ldid -S "$DYLIB"
+          echo "Signed with ldid -S"
+          cp "$DYLIB" ./BaiduPanTroll.dylib
+        fi
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: BaiduPanTroll.dylib
-        path: |
-          *.dylib
-          .theos/obj/**/*.dylib
-          obj/**/*.dylib
+        path: BaiduPanTroll.dylib
         if-no-files-found: warn
