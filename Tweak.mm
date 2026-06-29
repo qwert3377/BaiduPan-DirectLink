@@ -948,7 +948,7 @@ static void scrollToRenamedFileAndAutoClick(NSString *ppName) {
         showToast(@"未找到文件列表");
         return;
     }
-    DLog(@"Found list view: %@", NSStringFromClass([listView class]]);
+    DLog(@"Found list view: %@", NSStringFromClass([listView class]));
 
     NSIndexPath *foundPath = nil;
     if ([listView isKindOfClass:[UITableView class]]) {
