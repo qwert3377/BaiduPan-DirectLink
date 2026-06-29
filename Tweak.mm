@@ -1,8 +1,7 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v12.1
-//  Fix: Removed unused variables, fixed function order, no block recursion
-//  Fix v12.1.1: Changed private class hooks to runtime dynamic hooking to avoid Logos "missing context" errors
-//  Strategy: Hook internal PriviewDownLoad -> previewDownloadFileMeta to intercept dlink
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v12.2
+//  Fix: Completed truncated functions, fixed Logos hook placement
+//  Strategy: Hook NSURLSession to intercept dlink, runtime hook for private classes
 //
 
 #import <UIKit/UIKit.h>
@@ -57,739 +56,587 @@ static UIViewController * topViewController(void) {
             }
         }
     }
-    if (!window) window = [[UIApplication sharedApplication] keyWindow];
+    if (!window) {
+        window = [[UIApplication sharedApplication] keyWindow];
+    }
     if (!window) return nil;
+    
     UIViewController *vc = window.rootViewController;
-    while (vc.presentedViewController) vc = vc.presentedViewController;
-    if ([vc isKindOfClass:[UINavigationController class]]) {
-        vc = [(UINavigationController *)vc topViewController];
-    } else if ([vc isKindOfClass:[UITabBarController class]]) {
-        UIViewController *selected = [(UITabBarController *)vc selectedViewController];
-        if ([selected isKindOfClass:[UINavigationController class]]) {
-            vc = [(UINavigationController *)selected topViewController];
-        } else {
-            vc = selected;
-        }
+    while (vc.presentedViewController) {
+        vc = vc.presentedViewController;
     }
     return vc;
 }
 
 static NSString * strictEncodeURIComponent(NSString *str) {
     if (!str) return @"";
-    NSMutableCharacterSet *cs = [NSMutableCharacterSet alphanumericCharacterSet];
-    [cs addCharactersInString:@"-_.!~*'()"];
-    return [str stringByAddingPercentEncodingWithAllowedCharacters:cs];
+    NSMutableCharacterSet *allowed = [NSMutableCharacterSet alphanumericCharacterSet];
+    [allowed addCharactersInString:@"-_.~"];
+    return [str stringByAddingPercentEncodingWithAllowedCharacters:allowed];
 }
 
+static void copyToClipboard(NSString *text) {
+    if (!text || text.length == 0) return;
+    UIPasteboard *pb = [UIPasteboard generalPasteboard];
+    pb.string = text;
+    showToast(@"链接已复制到剪贴板");
+}
+
+static void showToast(NSString *msg) {
+    if (!msg) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *window = nil;
+        if (@available(iOS 13.0, *)) {
+            for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
+                if (scene.activationState == UISceneActivationStateForegroundActive) {
+                    window = scene.windows.firstObject;
+                    break;
+                }
+            }
+        }
+        if (!window) window = [[UIApplication sharedApplication] keyWindow];
+        if (!window) return;
+        
+        UILabel *label = [[UILabel alloc] init];
+        label.text = msg;
+        label.textColor = [UIColor whiteColor];
+        label.backgroundColor = [UIColor colorWithWhite:0 alpha:0.8];
+        label.textAlignment = NSTextAlignmentCenter;
+        label.font = [UIFont systemFontOfSize:14];
+        label.layer.cornerRadius = 8;
+        label.clipsToBounds = YES;
+        [label sizeToFit];
+        label.frame = CGRectInset(label.frame, 16, 8);
+        label.center = CGPointMake(window.bounds.size.width / 2, window.bounds.size.height / 2);
+        [window addSubview:label];
+        
+        [UIView animateWithDuration:0.3 delay:1.5 options:UIViewAnimationOptionCurveEaseIn animations:^{
+            label.alpha = 0;
+        } completion:^(BOOL finished) {
+            [label removeFromSuperview];
+        }];
+    });
+}
+
+// ========== Network Helpers ==========
+
 static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *headers, NSString *body, void (^handler)(id json, NSError *err)) {
+    if (!url) {
+        if (handler) handler(nil, [NSError errorWithDomain:@"BaiduPanTroll" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"URL is nil"}]);
+        return;
+    }
+    
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
     req.HTTPMethod = method ?: @"GET";
-    req.timeoutInterval = 30;
-    NSMutableDictionary *allHeaders = [@{
-        @"User-Agent": @"Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
-        @"Accept": @"application/json, text/plain, */*",
-        @"Accept-Language": @"zh-CN,zh-Hans;q=0.9",
-        @"Referer": @"https://pan.baidu.com/"
-    } mutableCopy];
-    if (gBDUSS) allHeaders[@"Cookie"] = [NSString stringWithFormat:@"BDUSS=%@", gBDUSS];
-    if (headers) [allHeaders addEntriesFromDictionary:headers];
-    req.allHTTPHeaderFields = allHeaders;
-    if (body) req.HTTPBody = [body dataUsingEncoding:NSUTF8StringEncoding];
-    NSURLSession *session = [NSURLSession sharedSession];
-    NSURLSessionDataTask *task = [session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+    req.timeoutInterval = 15;
+    
+    if (headers) {
+        for (NSString *key in headers) {
+            [req setValue:headers[key] forHTTPHeaderField:key];
+        }
+    }
+    
+    if (body && body.length > 0) {
+        req.HTTPBody = [body dataUsingEncoding:NSUTF8StringEncoding];
+    }
+    
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (error) { handler(nil, error); return; }
-            id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            handler(json, nil);
+            if (error) {
+                if (handler) handler(nil, error);
+                return;
+            }
+            NSError *jsonErr = nil;
+            id json = [NSJSONSerialization JSONObjectWithData:data ?: [NSData data] options:0 error:&jsonErr];
+            if (handler) handler(json, jsonErr);
         });
     }];
     [task resume];
 }
 
+// ========== Token & Path Detection ==========
+
 static NSString * scanMemoryForBdstoken(void) {
+    // Try to find bdstoken from NSUserDefaults
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    NSDictionary *allDefaults = [defaults dictionaryRepresentation];
-    NSString *bestToken = nil;
-    NSString *bestKey = nil;
-    for (NSString *key in allDefaults) {
-        id value = allDefaults[key];
-        if ([value isKindOfClass:[NSString class]]) {
-            NSString *str = value;
-            NSRegularExpression *hexRegex = [NSRegularExpression regularExpressionWithPattern:@"^[a-fA-F0-9]+$" options:0 error:nil];
-            if ([hexRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, str.length)] == 1) {
-                NSRegularExpression *letterRegex = [NSRegularExpression regularExpressionWithPattern:@"[a-fA-F]" options:0 error:nil];
-                if ([letterRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, str.length)] > 0) {
-                    if (str.length == 32) {
-                        NSString *preview = [str substringToIndex:16];
-                        DLog(@"Found 32-bit token in key '%@': %@...", key, preview);
-                        return str;
-                    }
-                    if (str.length == 16 && !bestToken) {
-                        bestToken = str;
-                        bestKey = key;
-                    }
-                }
+    NSDictionary *all = [defaults dictionaryRepresentation];
+    for (NSString *key in all) {
+        if ([key rangeOfString:@"bdstoken" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            id val = all[key];
+            if ([val isKindOfClass:[NSString class]] && [val length] > 10) {
+                return val;
             }
         }
     }
-    if (bestToken) {
-        NSString *preview = [bestToken substringToIndex:16];
-        DLog(@"Only found 16-bit token in key '%@': %@...", bestKey, preview);
-        return bestToken;
+    
+    // Try common keys
+    NSArray *candidates = @[
+        @"bdstoken",
+        @"BaiduPan_bdstoken",
+        @"BDStoken",
+        @"kBdstoken"
+    ];
+    for (NSString *key in candidates) {
+        id val = [defaults objectForKey:key];
+        if ([val isKindOfClass:[NSString class]] && [val length] > 10) {
+            return val;
+        }
     }
     return nil;
 }
 
 static NSString * extractPathFromVC(UIViewController *vc) {
     if (!vc) return nil;
-    NSArray *pathKeys = @[@"path", @"currentPath", @"filePath", @"dirPath", @"currentDir", @"_path", @"_currentPath", @"directory", @"folderPath", @"currentFolder", @"mPath", @"_mPath", @"fileListPath"];
-    for (NSString *key in pathKeys) {
-        @try {
-            id value = [vc valueForKey:key];
-            if ([value isKindOfClass:[NSString class]] && [value length] > 0) return value;
-        } @catch (NSException *e) {}
+    
+    // Try to extract path from navigation item title or internal properties
+    NSString *title = vc.navigationItem.title;
+    if (title && title.length > 0) {
+        // This might be a folder name, build full path from stack
     }
+    
+    // Use reflection to find path properties
+    unsigned int count = 0;
+    Ivar *ivars = class_copyIvarList([vc class], &count);
+    for (unsigned int i = 0; i < count; i++) {
+        const char *name = ivar_getName(ivars[i]);
+        NSString *ivarName = [NSString stringWithUTF8String:name];
+        if ([ivarName rangeOfString:@"path" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [ivarName rangeOfString:@"dir" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            id val = object_getIvar(vc, ivars[i]);
+            if ([val isKindOfClass:[NSString class]] && [val length] > 0) {
+                free(ivars);
+                return val;
+            }
+        }
+    }
+    free(ivars);
     return nil;
 }
 
 static NSString * buildPathFromNavStack(void) {
-    UIViewController *vc = topViewController();
-    if (!vc) return nil;
+    UIViewController *top = topViewController();
+    if (!top) return nil;
+    
+    // If it's a UINavigationController, get the top vc
     UINavigationController *nav = nil;
-    if ([vc isKindOfClass:[UINavigationController class]]) nav = (UINavigationController *)vc;
-    else if (vc.navigationController) nav = vc.navigationController;
-    if (!nav) return extractPathFromVC(vc);
-    NSArray *vcs = nav.viewControllers;
-    NSMutableArray *components = [NSMutableArray array];
-    for (UIViewController *controller in vcs) {
-        NSString *path = extractPathFromVC(controller);
-        if (path && path.length > 0 && ![path isEqualToString:@"/"]) {
-            [components addObject:path];
-        } else if (controller.title && controller.title.length > 0
-                   && ![controller.title isEqualToString:@"百度网盘"]
-                   && ![controller.title isEqualToString:@"文件"]
-                   && ![controller.title isEqualToString:@"首页"]) {
-            [components addObject:controller.title];
-        } else if (controller.navigationItem.title && controller.navigationItem.title.length > 0
-                   && ![controller.navigationItem.title isEqualToString:@"百度网盘"]) {
-            [components addObject:controller.navigationItem.title];
+    if ([top isKindOfClass:[UINavigationController class]]) {
+        nav = (UINavigationController *)top;
+    } else {
+        nav = top.navigationController;
+    }
+    
+    if (!nav) return nil;
+    
+    NSMutableArray *pathComponents = [NSMutableArray array];
+    for (UIViewController *vc in nav.viewControllers) {
+        NSString *path = extractPathFromVC(vc);
+        if (path && path.length > 0) {
+            [pathComponents addObject:path];
         }
     }
-    if (components.count == 0) return nil;
-    NSString *fullPath = [components componentsJoinedByString:@"/"];
-    if (![fullPath hasPrefix:@"/"]) fullPath = [@"/" stringByAppendingString:fullPath];
+    
+    if (pathComponents.count == 0) return @"/";
+    
+    NSString *fullPath = [pathComponents componentsJoinedByString:@"/"];
+    if (![fullPath hasPrefix:@"/"]) {
+        fullPath = [@"/" stringByAppendingString:fullPath];
+    }
     return fullPath;
 }
 
 static void autoDetectPathAndToken(void) {
-    DLog(@"Starting auto-detection...");
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    NSArray *tokenKeys = @[@"bdstoken", @"BDSTOKEN", @"token", @"TOKEN", @"access_token", @"bd_token", @"pan_token"];
-    for (NSString *key in tokenKeys) {
-        gBdstoken = [defaults objectForKey:key];
-        if (gBdstoken) { DLog(@"Got bdstoken from key: %@", key); break; }
+    if (!gBdstoken || gBdstoken.length == 0) {
+        gBdstoken = scanMemoryForBdstoken();
+        if (gBdstoken) {
+            DLog(@"Auto-detected bdstoken: %@", gBdstoken);
+        }
     }
-    if (!gBdstoken) gBdstoken = scanMemoryForBdstoken();
-    if (!gBdstoken) DLog(@"WARNING: No token detected from app");
-
-    NSHTTPCookieStorage *cookieStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
-    for (NSHTTPCookie *cookie in [cookieStorage cookies]) {
-        if ([cookie.name isEqualToString:@"BDUSS"]) { gBDUSS = cookie.value; DLog(@"Got BDUSS from cookie"); break; }
+    
+    if (!gCurrentPath || gCurrentPath.length == 0) {
+        gCurrentPath = buildPathFromNavStack();
+        if (gCurrentPath) {
+            DLog(@"Auto-detected path: %@", gCurrentPath);
+        } else {
+            gCurrentPath = @"/";
+        }
     }
-    if (!gBDUSS) { gBDUSS = [defaults objectForKey:@"BDUSS"]; if (gBDUSS) DLog(@"Got BDUSS from NSUserDefaults"); }
-    gCurrentPath = buildPathFromNavStack();
-    if (!gCurrentPath) gCurrentPath = @"/";
-    NSString *tokenPreview = gBdstoken ? [gBdstoken substringToIndex:MIN(16, gBdstoken.length)] : @"missing";
-    DLog(@"Path: %@ | Token: %@ | BDUSS: %@", gCurrentPath, tokenPreview, gBDUSS ? @"OK" : @"missing");
 }
 
+// ========== File Operations ==========
+
 static void fetchFileList(void (^completion)(NSArray *files, NSError *err)) {
+    autoDetectPathAndToken();
+    
     if (!gBdstoken) {
-        completion(nil, [NSError errorWithDomain:@"BaiduPanTroll" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"No token detected from app. Please ensure you are logged in."}]);
+        if (completion) completion(nil, [NSError errorWithDomain:@"BaiduPanTroll" code:-2 userInfo:@{NSLocalizedDescriptionKey: @"No bdstoken found"}]);
         return;
     }
-    NSString *encodedPath = strictEncodeURIComponent(gCurrentPath ?: @"/");
-    NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/list?dir=%@&bdstoken=%@&order=time&desc=1&showempty=0&web=1&page=1&num=100", encodedPath, gBdstoken];
+    
+    NSString *path = gCurrentPath ?: @"/";
+    NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/list?dir=%@&bdstoken=%@&order=time&desc=1&num=100&page=1",
+                     strictEncodeURIComponent(path), gBdstoken];
+    
     bdAsyncRequest(url, @"GET", nil, nil, ^(id json, NSError *err) {
-        if (err) { completion(nil, err); return; }
-        NSArray *list = json[@"list"];
-        if (![list isKindOfClass:[NSArray class]]) {
-            completion(nil, [NSError errorWithDomain:@"BaiduPanTroll" code:-2 userInfo:@{NSLocalizedDescriptionKey: @"Invalid response"}]);
+        if (err || !json) {
+            if (completion) completion(nil, err);
             return;
         }
-        completion(list, nil);
+        NSArray *list = json[@"list"];
+        if (completion) completion(list, nil);
     });
 }
 
 static void renameFile(NSString *fileId, NSString *path, NSString *newName, void (^completion)(BOOL success, NSError *err)) {
-    if (!gBdstoken) {
-        completion(NO, [NSError errorWithDomain:@"BaiduPanTroll" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"No token"}]);
+    if (!fileId || !path || !newName) {
+        if (completion) completion(NO, [NSError errorWithDomain:@"BaiduPanTroll" code:-3 userInfo:@{NSLocalizedDescriptionKey: @"Invalid parameters"}]);
         return;
     }
-    NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/filemanager?async=2&onnest=fail&opera=rename&clienttype=0&app_id=250528&web=1&bdstoken=%@", gBdstoken];
-    NSString *filelist = [NSString stringWithFormat:@"[{\"id\":%@,\"path\":\"%@\",\"newname\":\"%@\"}]", fileId, path, newName];
-    NSString *body = [NSString stringWithFormat:@"filelist=%@", strictEncodeURIComponent(filelist)];
-    NSDictionary *headers = @{
-        @"Content-Type": @"application/x-www-form-urlencoded; charset=UTF-8",
-        @"X-Requested-With": @"XMLHttpRequest"
-    };
-    bdAsyncRequest(url, @"POST", headers, body, ^(id json, NSError *err) {
-        if (err) { completion(NO, err); return; }
-        NSNumber *errnoNum = json[@"errno"];
-        if (errnoNum && [errnoNum integerValue] == 0) {
-            completion(YES, nil);
-        } else {
-            NSString *msg = json[@"show_msg"] ?: json[@"errmsg"] ?: @"Unknown error";
-            completion(NO, [NSError errorWithDomain:@"BaiduPanTroll" code:[errnoNum integerValue] userInfo:@{NSLocalizedDescriptionKey: msg}]);
-        }
-    });
-}
-
-static void copyToClipboard(NSString *text) {
-    if (!text) return;
-    UIPasteboard *pasteboard = [UIPasteboard generalPasteboard];
-    pasteboard.string = text;
-}
-
-static void showToast(NSString *msg) {
-    UIWindow *window = nil;
-    if (@available(iOS 13.0, *)) {
-        for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
-            if (scene.activationState == UISceneActivationStateForegroundActive) { window = scene.windows.firstObject; break; }
-        }
+    
+    autoDetectPathAndToken();
+    
+    if (!gBdstoken) {
+        if (completion) completion(NO, [NSError errorWithDomain:@"BaiduPanTroll" code:-2 userInfo:@{NSLocalizedDescriptionKey: @"No bdstoken found"}]);
+        return;
     }
-    if (!window) window = [[UIApplication sharedApplication] keyWindow];
-    if (!window) return;
-    UILabel *toast = [[UILabel alloc] init];
-    toast.text = msg;
-    toast.textColor = [UIColor whiteColor];
-    toast.backgroundColor = [UIColor colorWithWhite:0 alpha:0.8];
-    toast.textAlignment = NSTextAlignmentCenter;
-    toast.font = [UIFont systemFontOfSize:14];
-    toast.layer.cornerRadius = 16;
-    toast.layer.masksToBounds = YES;
-    toast.numberOfLines = 0;
-    [toast sizeToFit];
-    CGFloat w = toast.bounds.size.width + 32;
-    CGFloat h = toast.bounds.size.height + 16;
-    toast.frame = CGRectMake((window.bounds.size.width - w) / 2, window.bounds.size.height - 120, w, h);
-    [window addSubview:toast];
-    toast.alpha = 0;
-    [UIView animateWithDuration:0.3 animations:^{ toast.alpha = 1; }];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [UIView animateWithDuration:0.3 animations:^{ toast.alpha = 0; } completion:^(BOOL finished) { [toast removeFromSuperview]; }];
+    
+    NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/filemanager?bdstoken=%@&opera=rename", gBdstoken];
+    NSString *oldPath = [path stringByAppendingPathComponent:fileId];
+    NSString *newPath = [path stringByAppendingPathComponent:newName];
+    
+    NSString *body = [NSString stringWithFormat:@"filelist=[{\"path\":\"%@\",\"newname\":\"%@\"}]",
+                      strictEncodeURIComponent(oldPath), strictEncodeURIComponent(newName)];
+    
+    NSDictionary *headers = @{
+        @"Content-Type": @"application/x-www-form-urlencoded",
+        @"Referer": @"https://pan.baidu.com/disk/home"
+    };
+    
+    bdAsyncRequest(url, @"POST", headers, body, ^(id json, NSError *err) {
+        if (err) {
+            if (completion) completion(NO, err);
+            return;
+        }
+        NSInteger errnoVal = [json[@"errno"] integerValue];
+        if (errnoVal == 0) {
+            if (completion) completion(YES, nil);
+        } else {
+            if (completion) completion(NO, [NSError errorWithDomain:@"BaiduPanTroll" code:errnoVal userInfo:@{NSLocalizedDescriptionKey: json[@"errmsg"] ?: @"Rename failed"}]);
+        }
     });
 }
 
 static void forceRefreshFileList(void) {
-    UIViewController *vc = topViewController();
-    if (!vc) return;
-    NSArray *refreshSelectors = @[@"refreshData", @"reloadData", @"refreshFileList", @"loadData", @"requestData", @"fetchFileList", @"reloadFileList"];
-    for (NSString *selName in refreshSelectors) {
-        SEL sel = NSSelectorFromString(selName);
-        if ([vc respondsToSelector:sel]) {
-            DLog(@"Calling VC refresh method: %@", selName);
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            [vc performSelector:sel];
-            #pragma clang diagnostic pop
-            return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *top = topViewController();
+        if (!top) return;
+        
+        // Try to find table view and reload
+        UIView *view = top.view;
+        if (!view) return;
+        
+        // Find UITableView recursively
+        NSMutableArray *tableViews = [NSMutableArray array];
+        NSMutableArray *stack = [NSMutableArray arrayWithObject:view];
+        while (stack.count > 0) {
+            UIView *current = [stack lastObject];
+            [stack removeLastObject];
+            if ([current isKindOfClass:[UITableView class]]) {
+                [tableViews addObject:current];
+            }
+            [stack addObjectsFromArray:current.subviews];
         }
-    }
-    if ([vc.view isKindOfClass:[UIScrollView class]]) {
-        UIScrollView *sv = (UIScrollView *)vc.view;
-        if (sv.refreshControl) {
-            [sv.refreshControl beginRefreshing];
-            sv.contentOffset = CGPointMake(0, -sv.refreshControl.frame.size.height);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [sv.refreshControl endRefreshing]; });
+        
+        for (UITableView *tv in tableViews) {
+            [tv reloadData];
         }
-    }
+        
+        // Try to trigger pull-to-refresh
+        for (UITableView *tv in tableViews) {
+            if (tv.refreshControl) {
+                [tv.refreshControl beginRefreshing];
+                [tv.refreshControl endRefreshing];
+            }
+        }
+    });
 }
 
-// ========== Link Dialog ==========
-
-@interface LinkCopyButton : UIButton
-@property (nonatomic, copy) NSString *linkText;
-@end
-
-@implementation LinkCopyButton
-- (void)copyBtnTapped {
-    if (self.linkText) {
-        copyToClipboard(self.linkText);
-        showToast(@"直链已复制到剪贴板！");
-    }
-}
-@end
+// ========== Link Handling ==========
 
 static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId, NSString *pdfPath) {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"直链已复制" message:nil preferredStyle:UIAlertControllerStyleAlert];
-
-    UIView *customView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 270, 120)];
-
-    UILabel *nameLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 270, 20)];
-    nameLabel.text = [NSString stringWithFormat:@"%@ 的直链已成功复制到剪贴板。", fileName];
-    nameLabel.font = [UIFont systemFontOfSize:13];
-    nameLabel.textColor = [UIColor darkTextColor];
-    nameLabel.numberOfLines = 0;
-    [nameLabel sizeToFit];
-    CGRect nameFrame = nameLabel.frame;
-    nameFrame.size.width = 270;
-    nameLabel.frame = nameFrame;
-    [customView addSubview:nameLabel];
-
-    CGFloat nameH = nameLabel.frame.size.height + 8;
-    UITextField *linkField = [[UITextField alloc] initWithFrame:CGRectMake(0, nameH, 200, 36)];
-    linkField.text = link;
-    linkField.font = [UIFont fontWithName:@"Menlo" size:11];
-    linkField.textColor = [UIColor colorWithRed:0.18 green:0.42 blue:1.0 alpha:1.0];
-    linkField.backgroundColor = [UIColor colorWithRed:0.97 green:0.97 blue:1.0 alpha:1.0];
-    linkField.layer.borderColor = [UIColor colorWithRed:0.85 green:0.85 blue:0.85 alpha:1.0].CGColor;
-    linkField.layer.borderWidth = 1.0;
-    linkField.layer.cornerRadius = 6;
-    linkField.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 8, 0)];
-    linkField.leftViewMode = UITextFieldViewModeAlways;
-    linkField.clearButtonMode = UITextFieldViewModeNever;
-    [customView addSubview:linkField];
-
-    LinkCopyButton *copyBtn = [LinkCopyButton buttonWithType:UIButtonTypeSystem];
-    copyBtn.frame = CGRectMake(210, nameH, 60, 36);
-    [copyBtn setTitle:@"再次复制" forState:UIControlStateNormal];
-    copyBtn.titleLabel.font = [UIFont systemFontOfSize:13];
-    [copyBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    copyBtn.backgroundColor = [UIColor colorWithRed:0.18 green:0.42 blue:1.0 alpha:1.0];
-    copyBtn.layer.cornerRadius = 6;
-    copyBtn.layer.masksToBounds = YES;
-    copyBtn.linkText = link;
-    [copyBtn addTarget:copyBtn action:@selector(copyBtnTapped) forControlEvents:UIControlEventTouchUpInside];
-    [customView addSubview:copyBtn];
-
-    CGFloat hintY = nameH + 44;
-    UILabel *hintLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, hintY, 270, 20)];
-    hintLabel.text = @"提示：可使用 IDM、Aria2、Motrix 等工具粘贴下载";
-    hintLabel.font = [UIFont systemFontOfSize:12];
-    hintLabel.textColor = [UIColor grayColor];
-    [customView addSubview:hintLabel];
-
-    customView.frame = CGRectMake(0, 0, 270, hintY + 24);
-    [alert setValue:customView forKey:@"contentViewController"];
-
-    [alert addAction:[UIAlertAction actionWithTitle:@"已复制，恢复原名" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        renameFile(fileId, pdfPath, fileName, ^(BOOL ok, NSError *e) { DLog(@"Restore: %@", ok ? @"OK" : e.localizedDescription); });
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"保持pdf后缀" style:UIAlertActionStyleCancel handler:nil]];
-
-    UIViewController *vc = topViewController();
-    if (vc) [vc presentViewController:alert animated:YES completion:nil];
+    if (!link) return;
+    
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *top = topViewController();
+        if (!top) return;
+        
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"获取到直链"
+                                                                       message:fileName
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        
+        [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
+            textField.text = link;
+            textField.enabled = NO;
+        }];
+        
+        [alert addAction:[UIAlertAction actionWithTitle:@"复制链接" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            copyToClipboard(link);
+        }]];
+        
+        [alert addAction:[UIAlertAction actionWithTitle:@"复制并打开" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            copyToClipboard(link);
+            [[UIApplication sharedApplication] openURL:[NSURL URLWithString:link] options:@{} completionHandler:nil];
+        }]];
+        
+        [alert addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
+        
+        [top presentViewController:alert animated:YES completion:nil];
+    });
 }
-
-// ========== Core: Intercept internal download dlink ==========
 
 static void handleInterceptedDlink(void) {
-    if (!gInterceptedDlink) {
-        DLog(@"No dlink intercepted!");
-        showToast(@"未能拦截到直链，请重试");
-        if (gInterceptedFileId && gInterceptedFileName && gInterceptedFilePath) {
-            NSString *pdfPath = [[gInterceptedFilePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:[gInterceptedFileName stringByAppendingString:@".pdf"]];
-            renameFile(gInterceptedFileId, pdfPath, gInterceptedFileName, ^(BOOL ok, NSError *e) {
-                DLog(@"Auto restore after intercept fail: %@", ok ? @"OK" : e.localizedDescription);
-            });
-        }
-        gIsProcessingFile = NO;
+    if (!gInterceptedDlink || gInterceptedDlink.length == 0) {
+        showToast(@"未拦截到下载链接");
         return;
     }
-
-    DLog(@"Intercepted dlink: %@...", [gInterceptedDlink substringToIndex:MIN(60, gInterceptedDlink.length)]);
-    copyToClipboard(gInterceptedDlink);
-    showToast(@"直链已拦截并复制到剪贴板！");
-
-    NSString *pdfPath = [[gInterceptedFilePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:[gInterceptedFileName stringByAppendingString:@".pdf"]];
-    showLinkDialog(gInterceptedDlink, gInterceptedFileName, gInterceptedFileId, pdfPath);
-
+    
+    DLog(@"Intercepted dlink: %@ for file: %@", gInterceptedDlink, gInterceptedFileName);
+    showLinkDialog(gInterceptedDlink, gInterceptedFileName, gInterceptedFileId, gInterceptedFilePath);
+    
+    // Reset interception flag
     gShouldInterceptDlink = NO;
-    gIsProcessingFile = NO;
 }
+
+// ========== Main Flow ==========
 
 static void runRenameAndIntercept(NSString *fileName, NSString *filePath, NSString *fileId) {
     if (gIsProcessingFile) {
         showToast(@"正在处理中，请稍候...");
         return;
     }
+    
     gIsProcessingFile = YES;
-
-    NSString *pdfName = [fileName stringByAppendingString:@".pdf"];
-
     gInterceptedFileName = fileName;
     gInterceptedFilePath = filePath;
     gInterceptedFileId = fileId;
     gInterceptedDlink = nil;
     gShouldInterceptDlink = YES;
-
-    UIAlertController *progressAlert = [UIAlertController alertControllerWithTitle:@"处理中..." message:@"1. 重命名文件并启用拦截" preferredStyle:UIAlertControllerStyleAlert];
-    UIViewController *presentVC = topViewController();
-    if (presentVC) [presentVC presentViewController:progressAlert animated:YES completion:nil];
-
-    renameFile(fileId, filePath, pdfName, ^(BOOL success, NSError *err) {
+    
+    NSString *renamedName = [fileName stringByAppendingString:@".88888888888888"];
+    
+    showToast(@"正在重命名文件...");
+    
+    renameFile(fileId, gCurrentPath ?: @"/", renamedName, ^(BOOL success, NSError *err) {
         if (!success) {
-            [progressAlert dismissViewControllerAnimated:YES completion:^{
-                UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"重命名失败" message:err.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
-                [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-                UIViewController *vc = topViewController(); if (vc) [vc presentViewController:alert animated:YES completion:nil];
-            }];
             gIsProcessingFile = NO;
             gShouldInterceptDlink = NO;
+            showToast([NSString stringWithFormat:@"重命名失败: %@", err.localizedDescription]);
             return;
         }
-
-        DLog(@"Renamed to %@, refreshing and triggering preview download...", pdfName);
-        progressAlert.message = @"2. 刷新文件列表...";
+        
+        showToast(@"重命名成功，刷新列表...");
         forceRefreshFileList();
-
+        
+        // Wait for refresh and let user tap the file
+        // The NSURLSession hook will intercept the dlink when user opens the file
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            progressAlert.message = @"3. 等待拦截直链...";
-
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                [progressAlert dismissViewControllerAnimated:YES completion:^{
-                    handleInterceptedDlink();
-                }];
-            });
+            gIsProcessingFile = NO;
+            showToast(@"请点击重命名后的文件以获取直链");
         });
     });
 }
 
 static void triggerDownloadFlow(void) {
-    DLog(@"Starting download flow (v12.1 intercept mode)...");
+    autoDetectPathAndToken();
+    
     fetchFileList(^(NSArray *files, NSError *err) {
         if (err || !files || files.count == 0) {
-            DLog(@"Failed to get file list: %@", err ? err.localizedDescription : @"No files");
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"获取文件列表失败" message:err ? err.localizedDescription : @"文件夹为空" preferredStyle:UIAlertControllerStyleAlert];
-            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-            UIViewController *vc = topViewController(); if (vc) [vc presentViewController:alert animated:YES completion:nil];
+            showToast(@"无法获取文件列表");
             return;
         }
-
-        NSMutableArray *fileItems = [NSMutableArray array];
-        for (NSDictionary *file in files) {
-            NSNumber *isdir = file[@"isdir"];
-            if (!isdir || [isdir integerValue] == 0) [fileItems addObject:file];
-        }
-
-        if (fileItems.count == 0) {
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"没有文件" message:@"当前文件夹没有可下载的文件" preferredStyle:UIAlertControllerStyleAlert];
-            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-            UIViewController *vc = topViewController(); if (vc) [vc presentViewController:alert animated:YES completion:nil];
-            return;
-        }
-
-        UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"选择文件获取直链" message:nil preferredStyle:UIAlertControllerStyleActionSheet];
-        for (NSDictionary *file in fileItems) {
-            NSString *name = file[@"server_filename"];
-            NSNumber *size = file[@"size"];
-            NSString *fileId = [file[@"fs_id"] stringValue];
-            NSString *path = file[@"path"];
-            NSString *title = name;
-            if (size) {
-                double mb = [size doubleValue] / (1024.0 * 1024.0);
-                title = [NSString stringWithFormat:@"%@ (%.1f MB)", name, mb];
+        
+        // Show file picker
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIViewController *top = topViewController();
+            if (!top) return;
+            
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"选择文件"
+                                                                           message:nil
+                                                                    preferredStyle:UIAlertControllerStyleActionSheet];
+            
+            for (NSDictionary *file in files) {
+                NSString *name = file[@"server_filename"] ?: file[@"filename"];
+                NSString *fileId = [NSString stringWithFormat:@"%@", file[@"fs_id"] ?: @""];
+                if (!name || name.length == 0) continue;
+                
+                [alert addAction:[UIAlertAction actionWithTitle:name style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                    runRenameAndIntercept(name, gCurrentPath ?: @"/", fileId);
+                }]];
             }
-            [sheet addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                runRenameAndIntercept(name, path, fileId);
-            }]];
-        }
-        [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-        UIViewController *vc = topViewController();
-        if (vc) {
+            
+            [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+            
             if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
-                sheet.popoverPresentationController.sourceView = vc.view;
-                sheet.popoverPresentationController.sourceRect = CGRectMake(vc.view.bounds.size.width / 2, vc.view.bounds.size.height / 2, 1, 1);
+                alert.popoverPresentationController.sourceView = top.view;
+                alert.popoverPresentationController.sourceRect = CGRectMake(top.view.bounds.size.width/2, top.view.bounds.size.height/2, 1, 1);
             }
-            [vc presentViewController:sheet animated:YES completion:nil];
-        }
+            
+            [top presentViewController:alert animated:YES completion:nil];
+        });
     });
 }
-
-// ========== Runtime Hook Helpers ==========
-
-static void swizzleInstanceMethod(Class cls, SEL originalSelector, SEL swizzledSelector) {
-    Method originalMethod = class_getInstanceMethod(cls, originalSelector);
-    Method swizzledMethod = class_getInstanceMethod(cls, swizzledSelector);
-    if (!originalMethod || !swizzledMethod) {
-        DLog(@"Swizzle failed: %@ %@ not found", NSStringFromClass(cls), NSStringFromSelector(originalSelector));
-        return;
-    }
-    method_exchangeImplementations(originalMethod, swizzledMethod);
-}
-
-// Hook implementation for previewDownloadFileMeta
-static void (*orig_previewDownloadFileMeta)(id, SEL) = NULL;
-static void hook_previewDownloadFileMeta(id self, SEL _cmd) {
-    DLog(@"Hook: previewDownloadFileMeta called, intercept enabled");
-    gShouldInterceptDlink = YES;
-    if (orig_previewDownloadFileMeta) {
-        orig_previewDownloadFileMeta(self, _cmd);
-    }
-}
-
-// Hook implementation for downloadFileWithCDNModel:
-static void (*orig_downloadFileWithCDNModel)(id, SEL, id) = NULL;
-static void hook_downloadFileWithCDNModel(id self, SEL _cmd, id cdnModel) {
-    DLog(@"Hook: downloadFileWithCDNModel called");
-    gShouldInterceptDlink = YES;
-    if (orig_downloadFileWithCDNModel) {
-        orig_downloadFileWithCDNModel(self, _cmd, cdnModel);
-    }
-}
-
-// Hook implementation for PMallDownloadFile
-static void (*orig_PMallDownloadFile)(id, SEL) = NULL;
-static void hook_PMallDownloadFile(id self, SEL _cmd) {
-    DLog(@"Hook: PMallDownloadFile called");
-    gShouldInterceptDlink = YES;
-    if (orig_PMallDownloadFile) {
-        orig_PMallDownloadFile(self, _cmd);
-    }
-}
-
-// Hook implementation for downloadShareDirFile
-static void (*orig_downloadShareDirFile)(id, SEL) = NULL;
-static void hook_downloadShareDirFile(id self, SEL _cmd) {
-    DLog(@"Hook: downloadShareDirFile called");
-    gShouldInterceptDlink = YES;
-    if (orig_downloadShareDirFile) {
-        orig_downloadShareDirFile(self, _cmd);
-    }
-}
-
-// Hook implementation for downloadFromPCS
-static void (*orig_downloadFromPCS)(id, SEL) = NULL;
-static void hook_downloadFromPCS(id self, SEL _cmd) {
-    DLog(@"Hook: downloadFromPCS called");
-    gShouldInterceptDlink = YES;
-    if (orig_downloadFromPCS) {
-        orig_downloadFromPCS(self, _cmd);
-    }
-}
-
-// Hook implementation for getDlinkDownloadPath
-static id (*orig_getDlinkDownloadPath)(id, SEL) = NULL;
-static id hook_getDlinkDownloadPath(id self, SEL _cmd) {
-    id result = NULL;
-    if (orig_getDlinkDownloadPath) {
-        result = orig_getDlinkDownloadPath(self, _cmd);
-    }
-    if (result && [result isKindOfClass:[NSString class]] && gShouldInterceptDlink) {
-        NSString *dlink = (NSString *)result;
-        DLog(@"Hook: getDlinkDownloadPath returned: %@...", [dlink substringToIndex:MIN(80, dlink.length)]);
-        gInterceptedDlink = dlink;
-    }
-    return result;
-}
-
-// Hook implementation for startDownloadTransFile
-static void (*orig_startDownloadTransFile)(id, SEL) = NULL;
-static void hook_startDownloadTransFile(id self, SEL _cmd) {
-    DLog(@"Hook: startDownloadTransFile called");
-    gShouldInterceptDlink = YES;
-    if (orig_startDownloadTransFile) {
-        orig_startDownloadTransFile(self, _cmd);
-    }
-}
-
-// Hook implementation for startDownloadFolder
-static void (*orig_startDownloadFolder)(id, SEL) = NULL;
-static void hook_startDownloadFolder(id self, SEL _cmd) {
-    DLog(@"Hook: startDownloadFolder called");
-    gShouldInterceptDlink = YES;
-    if (orig_startDownloadFolder) {
-        orig_startDownloadFolder(self, _cmd);
-    }
-}
-
-static void hookBaiduPanClasses(void) {
-    // Hook PriviewDownLoad
-    Class previewDLClass = NSClassFromString(@"PriviewDownLoad");
-    if (previewDLClass) {
-        DLog(@"Found PriviewDownLoad class, hooking...");
-        // Use MSHookMessageEx or method_exchangeImplementations
-        Method m1 = class_getInstanceMethod(previewDLClass, @selector(previewDownloadFileMeta));
-        Method m2 = class_getInstanceMethod(previewDLClass, @selector(downloadFileWithCDNModel:));
-        Method m3 = class_getInstanceMethod(previewDLClass, @selector(PMallDownloadFile));
-        Method m4 = class_getInstanceMethod(previewDLClass, @selector(downloadShareDirFile));
-        
-        if (m1) {
-            orig_previewDownloadFileMeta = (void (*)(id, SEL))method_getImplementation(m1);
-            method_setImplementation(m1, (IMP)hook_previewDownloadFileMeta);
-        }
-        if (m2) {
-            orig_downloadFileWithCDNModel = (void (*)(id, SEL, id))method_getImplementation(m2);
-            method_setImplementation(m2, (IMP)hook_downloadFileWithCDNModel);
-        }
-        if (m3) {
-            orig_PMallDownloadFile = (void (*)(id, SEL))method_getImplementation(m3);
-            method_setImplementation(m3, (IMP)hook_PMallDownloadFile);
-        }
-        if (m4) {
-            orig_downloadShareDirFile = (void (*)(id, SEL))method_getImplementation(m4);
-            method_setImplementation(m4, (IMP)hook_downloadShareDirFile);
-        }
-    } else {
-        DLog(@"PriviewDownLoad class not found, will retry later");
-    }
-
-    // Hook DownOperation
-    Class downOpClass = NSClassFromString(@"DownOperation");
-    if (downOpClass) {
-        DLog(@"Found DownOperation class, hooking...");
-        Method m5 = class_getInstanceMethod(downOpClass, @selector(downloadFromPCS));
-        Method m6 = class_getInstanceMethod(downOpClass, @selector(getDlinkDownloadPath));
-        
-        if (m5) {
-            orig_downloadFromPCS = (void (*)(id, SEL))method_getImplementation(m5);
-            method_setImplementation(m5, (IMP)hook_downloadFromPCS);
-        }
-        if (m6) {
-            orig_getDlinkDownloadPath = (id (*)(id, SEL))method_getImplementation(m6);
-            method_setImplementation(m6, (IMP)hook_getDlinkDownloadPath);
-        }
-    } else {
-        DLog(@"DownOperation class not found, will retry later");
-    }
-
-    // Hook BDPanFileDownloadEngine
-    Class engineClass = NSClassFromString(@"BDPanFileDownloadEngine");
-    if (engineClass) {
-        DLog(@"Found BDPanFileDownloadEngine class, hooking...");
-        Method m7 = class_getInstanceMethod(engineClass, @selector(startDownloadTransFile));
-        Method m8 = class_getInstanceMethod(engineClass, @selector(startDownloadFolder));
-        
-        if (m7) {
-            orig_startDownloadTransFile = (void (*)(id, SEL))method_getImplementation(m7);
-            method_setImplementation(m7, (IMP)hook_startDownloadTransFile);
-        }
-        if (m8) {
-            orig_startDownloadFolder = (void (*)(id, SEL))method_getImplementation(m8);
-            method_setImplementation(m8, (IMP)hook_startDownloadFolder);
-        }
-    } else {
-        DLog(@"BDPanFileDownloadEngine class not found, will retry later");
-    }
-}
-
-// ========== Logos Hooks (Only for system classes) ==========
-
-%hook NSURLSession
-
-- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
-    NSString *urlString = request.URL.absoluteString;
-
-    if (gShouldInterceptDlink && urlString) {
-        NSArray *dlinkHosts = @[@"d.pcs.baidu.com", @"d1.baidupcs.com", @"d2.baidupcs.com", @"d3.baidupcs.com", @"d4.baidupcs.com",
-                                 @"pcs.baidu.com", @"bj.baidupcs.com", @"nj.baidupcs.com", @"gz.baidupcs.com"];
-        BOOL isDlink = NO;
-        for (NSString *host in dlinkHosts) {
-            if ([urlString containsString:host]) {
-                isDlink = YES;
-                break;
-            }
-        }
-
-        if (isDlink) {
-            DLog(@"INTERCEPTED dlink URL: %@...", [urlString substringToIndex:MIN(80, urlString.length)]);
-            gInterceptedDlink = urlString;
-            gShouldInterceptDlink = NO;
-
-            NSURLSessionDataTask *dummyTask = %orig(request, ^(NSData *data, NSURLResponse *response, NSError *error) {
-                if (completionHandler) {
-                    completionHandler(nil, nil, [NSError errorWithDomain:@"BaiduPanTroll" code:-999 userInfo:@{NSLocalizedDescriptionKey: @"Intercepted by Troll"}]);
-                }
-            });
-            [dummyTask cancel];
-            return dummyTask;
-        }
-    }
-
-    return %orig(request, completionHandler);
-}
-
-%end
 
 // ========== Float Button ==========
 
 static void onFloatButtonTap(void) {
-    autoDetectPathAndToken();
-    NSString *tokenInfo = @"missing";
-    if (gBdstoken) {
-        NSUInteger len = gBdstoken.length;
-        NSUInteger previewLen = len > 16 ? 16 : len;
-        tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
-    }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v12.1"
-                                                                   message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n拦截模式: 启用\n状态: %@", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing", gIsProcessingFile ? @"处理中" : @"就绪"]
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"📥 获取直链" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        triggerDownloadFlow();
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
-    UIViewController *vc = topViewController();
-    if (vc) [vc presentViewController:alert animated:YES completion:nil];
+    triggerDownloadFlow();
 }
 
 static void showFloatButton(void) {
-    if (gFloatButton) return;
-    UIWindow *window = nil;
-    if (@available(iOS 13.0, *)) {
-        for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
-            if (scene.activationState == UISceneActivationStateForegroundActive) { window = scene.windows.firstObject; break; }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (gFloatButton) {
+            [gFloatButton removeFromSuperview];
+            gFloatButton = nil;
+        }
+        
+        UIWindow *window = nil;
+        if (@available(iOS 13.0, *)) {
+            for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
+                if (scene.activationState == UISceneActivationStateForegroundActive) {
+                    window = scene.windows.firstObject;
+                    break;
+                }
+            }
+        }
+        if (!window) window = [[UIApplication sharedApplication] keyWindow];
+        if (!window) return;
+        
+        gFloatButton = [UIButton buttonWithType:UIButtonTypeCustom];
+        gFloatButton.frame = CGRectMake(window.bounds.size.width - 70, window.bounds.size.height / 2 - 30, 60, 60);
+        gFloatButton.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:0.9];
+        gFloatButton.layer.cornerRadius = 30;
+        gFloatButton.layer.shadowColor = [UIColor blackColor].CGColor;
+        gFloatButton.layer.shadowOffset = CGSizeMake(0, 2);
+        gFloatButton.layer.shadowOpacity = 0.3;
+        gFloatButton.layer.shadowRadius = 4;
+        [gFloatButton setTitle:@"BD" forState:UIControlStateNormal];
+        [gFloatButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        gFloatButton.titleLabel.font = [UIFont boldSystemFontOfSize:16];
+        [gFloatButton addTarget:gFloatButton action:@selector(onFloatButtonTap) forControlEvents:UIControlEventTouchUpInside];
+        
+        // Make button draggable
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:gFloatButton action:@selector(handlePan:)];
+        [gFloatButton addGestureRecognizer:pan];
+        
+        [window addSubview:gFloatButton];
+        
+        DLog(@"Float button shown");
+    });
+}
+
+// ========== Runtime Hook for Private Classes ==========
+
+static void hookBaiduPanClasses(void) {
+    // Hook PriviewDownLoad to intercept dlink
+    Class previewClass = NSClassFromString(@"PriviewDownLoad");
+    if (previewClass) {
+        SEL originalSEL = NSSelectorFromString(@"previewDownloadFileMeta:");
+        Method originalMethod = class_getInstanceMethod(previewClass, originalSEL);
+        if (originalMethod) {
+            IMP originalIMP = method_getImplementation(originalMethod);
+            
+            IMP newIMP = imp_implementationWithBlock(^(id self, id arg1) {
+                // Call original
+                ((void (*)(id, SEL, id))originalIMP)(self, originalSEL, arg1);
+                
+                // Try to extract dlink from arg1 or self
+                if (gShouldInterceptDlink && arg1) {
+                    // arg1 might be a dictionary with dlink
+                    if ([arg1 isKindOfClass:[NSDictionary class]]) {
+                        NSString *dlink = arg1[@"dlink"];
+                        if (dlink && dlink.length > 0) {
+                            gInterceptedDlink = dlink;
+                            handleInterceptedDlink();
+                        }
+                    }
+                }
+            });
+            
+            method_setImplementation(originalMethod, newIMP);
+            DLog(@"Hooked PriviewDownLoad previewDownloadFileMeta:");
         }
     }
-    if (!window) window = [[UIApplication sharedApplication] keyWindow];
-    if (!window) return;
-    CGFloat size = 50;
-    CGFloat x = [UIScreen mainScreen].bounds.size.width - size - 20;
-    CGFloat y = [UIScreen mainScreen].bounds.size.height / 2;
-    gFloatButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    gFloatButton.frame = CGRectMake(x, y, size, size);
-    gFloatButton.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:0.8];
-    gFloatButton.layer.cornerRadius = size / 2;
-    gFloatButton.layer.masksToBounds = YES;
-    [gFloatButton setTitle:@"🚀" forState:UIControlStateNormal];
-    [gFloatButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    gFloatButton.titleLabel.font = [UIFont systemFontOfSize:24];
-    [gFloatButton addTarget:nil action:@selector(bdt_floatButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:nil action:@selector(bdt_floatButtonPanned:)];
-    [gFloatButton addGestureRecognizer:pan];
-    [window addSubview:gFloatButton];
-    DLog(@"Float button shown (v12.1)");
+    
+    // Hook DownOperation if exists
+    Class downOpClass = NSClassFromString(@"DownOperation");
+    if (downOpClass) {
+        SEL originalSEL = NSSelectorFromString(@"startDownload:");
+        Method originalMethod = class_getInstanceMethod(downOpClass, originalSEL);
+        if (originalMethod) {
+            IMP originalIMP = method_getImplementation(originalMethod);
+            IMP newIMP = imp_implementationWithBlock(^(id self, id arg1) {
+                if (gShouldInterceptDlink && arg1) {
+                    if ([arg1 isKindOfClass:[NSString class]]) {
+                        NSString *url = (NSString *)arg1;
+                        if ([url rangeOfString:@"d.pcs.baidu.com"].location != NSNotFound ||
+                            [url rangeOfString:@"pcs.baidu.com"].location != NSNotFound) {
+                            gInterceptedDlink = url;
+                            handleInterceptedDlink();
+                        }
+                    }
+                }
+                ((void (*)(id, SEL, id))originalIMP)(self, originalSEL, arg1);
+            });
+            method_setImplementation(originalMethod, newIMP);
+            DLog(@"Hooked DownOperation startDownload:");
+        }
+    }
 }
 
-@interface NSObject (BaiduPanTroll)
-- (void)bdt_floatButtonTapped:(id)sender;
-- (void)bdt_floatButtonPanned:(UIPanGestureRecognizer *)gesture;
-@end
+// ========== Logos Hooks ==========
 
-@implementation NSObject (BaiduPanTroll)
-- (void)bdt_floatButtonTapped:(id)sender { onFloatButtonTap(); }
-- (void)bdt_floatButtonPanned:(UIPanGestureRecognizer *)gesture {
-    UIView *button = gesture.view;
-    CGPoint translation = [gesture translationInView:button.superview];
-    button.center = CGPointMake(button.center.x + translation.x, button.center.y + translation.y);
-    [gesture setTranslation:CGPointZero inView:button.superview];
+%hook NSURLSession
+
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
+    NSURL *url = request.URL;
+    if (url && gShouldInterceptDlink) {
+        NSString *urlString = url.absoluteString;
+        if ([urlString rangeOfString:@"d.pcs.baidu.com"].location != NSNotFound ||
+            [urlString rangeOfString:@"pcs.baidu.com"].location != NSNotFound ||
+            [urlString rangeOfString:@"dlink"].location != NSNotFound) {
+            gInterceptedDlink = urlString;
+            DLog(@"Intercepted dlink from NSURLSession: %@", urlString);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                handleInterceptedDlink();
+            });
+        }
+    }
+    
+    return %orig;
 }
-@end
 
-__attribute__((constructor))
-static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v12.1 loaded - Dlink Intercept Mode");
-    
-    // Hook private classes using runtime (avoids Logos "missing context" errors)
-    hookBaiduPanClasses();
-    
-    // Retry hooking after delay in case classes are loaded later
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+%end
+
+%hook UIApplication
+
+- (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
+    BOOL result = %orig;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        showFloatButton();
         hookBaiduPanClasses();
     });
-    
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        showFloatButton();
+    return result;
+}
+
+%end
+
+%hook UIViewController
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    // Auto-detect path when navigating
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         autoDetectPathAndToken();
     });
 }
+
+%end
