@@ -38,10 +38,14 @@ jobs:
           export THEOS=$HOME/theos
           make clean
           make
+          echo "=== Output files ==="
+          find . -name "*.dylib" -o -name "*.a" 2>/dev/null
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: BaiduPanTroll
-          path: .theos/obj/*/libBaiduPanTroll.dylib
-          if-no-files-found: error
+          path: |
+            .theos/obj/**/*.dylib
+            .theos/obj/**/*.a
+          if-no-files-found: warn
