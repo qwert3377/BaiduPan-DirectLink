@@ -16,7 +16,20 @@ jobs:
 
     - name: Setup Theos
       run: |
-        bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
+        # Clone Theos
+        git clone --recursive https://github.com/theos/theos.git $HOME/theos
+
+        # Download iOS SDK
+        mkdir -p $HOME/theos/sdks
+        curl -L -o $HOME/theos/sdks/iPhoneOS14.5.sdk.tbz2 https://github.com/theos/sdks/archive/refs/tags/iPhoneOS14.5.sdk.tbz2 || true
+
+        # Alternative: use Xcode SDK
+        if [ ! -d "$HOME/theos/sdks/iPhoneOS14.5.sdk" ]; then
+          echo "Using Xcode SDK as fallback"
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          ln -s "$SDK_PATH" $HOME/theos/sdks/iPhoneOS.sdk
+        fi
+
         echo "THEOS=$HOME/theos" >> $GITHUB_ENV
 
     - name: Build
