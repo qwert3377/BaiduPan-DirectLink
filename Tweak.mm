@@ -1,8 +1,8 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.32
-//  Flow: select -> rename to .88888888888888 -> refresh x2 (0.5s gap) -> scroll to file
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.33
+//  Flow: select -> rename to .88888888888888 -> NO REFRESH -> scroll to file
 //        -> restore original name (NO refresh) -> AUTO CLICK visible cell
-//  CHANGELOG v10.32: Fix UITable/UICollection typo, 0.5s between refreshes
+//  CHANGELOG v10.33: Removed double refresh, rename goes directly to scroll
 //
 
 #import <UIKit/UIKit.h>
@@ -335,7 +335,7 @@ static void renameFile(NSString *fileId, NSString *path, NSString *newName, void
     }
     NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/filemanager?async=2&onnest=fail&opera=rename&clienttype=0&app_id=250528&web=1&bdstoken=%@", gBdstoken];
     NSString *filelist = [NSString stringWithFormat:@"[{\"id\":%@,\"path\":\"%@\",\"newname\":\"%@\"}]", fileId, path, newName];
-    NSString *body = [NSString stringWithFormat:@"filelist=%@", strictEncodeURIComponent(filelist)];
+    NSString *body = [NSString stringWithFormat:@"filelist=%@", strictEncodeURIComponent(filelist));
     DLog(@"RENAME body: %@", body);
     DLog(@"RENAME filelist raw: %@", filelist);
     NSDictionary *headers = @{
@@ -756,11 +756,11 @@ static void autoClickVisibleCell(NSString *ppName, UIScrollView *listView) {
 
     if (!gHasRestored && gPendingRestoreFileId && gPendingRestorePdfPath && gPendingRestoreOriginalName) {
         gHasRestored = YES;
-        showToast(@"5. 恢复原名...");
+        showToast(@"3. 恢复原名...");
         executeRestoreWithoutRefresh(^(BOOL success) {
             if (success) {
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    showToast(@"6. 自动打开文件...");
+                    showToast(@"4. 自动打开文件...");
                     autoClickVisibleCell(ppName, listView);
                 });
             } else {
@@ -932,7 +932,7 @@ static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInt
 
 static void scrollToRenamedFileAndAutoClick(NSString *ppName) {
     if (!ppName) return;
-    DLog(@"v10.32 Scrolling to file and auto-click: %@", ppName);
+    DLog(@"v10.33 Scrolling to file and auto-click: %@", ppName);
 
     UIScrollView *listView = findListViewGlobally();
     if (!listView) {
@@ -1105,7 +1105,7 @@ static void startTapDetection(void) {
     });
 }
 
-// v10.32: Confirmed - 0.5s between refresh 1 and 2, 0.5s after refresh 2 before scroll
+// v10.33: NO REFRESH - rename -> directly scroll
 static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileId, NSNumber *fileSize) {
     if (fileSize && [fileSize doubleValue] >= 300.0 * 1024.0 * 1024.0) {
         showToast(@"⚠️ 该文件超过300MB，无法下载");
@@ -1138,20 +1138,9 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
         gPendingRestorePdfPath = ppPath;
         gPendingRestoreOriginalName = fileName;
 
-        showToast(@"2. 刷新第1次...");
-        forceRefreshFileList();
-
-        // 0.5s after refresh 1 -> refresh 2
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            showToast(@"3. 刷新第2次...");
-            forceRefreshFileList();
-
-            // 0.5s after refresh 2 -> scroll
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                showToast(@"4. 滚动到文件...");
-                scrollToRenamedFileAndAutoClick(ppName);
-            });
-        });
+        // v10.33: No refresh, go directly to scroll
+        showToast(@"2. 滚动到文件...");
+        scrollToRenamedFileAndAutoClick(ppName);
     });
 }
 
@@ -1227,8 +1216,8 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 8 ? 8 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.32"
-                                                                   message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n快速流程：改名->刷新x2(0.5s间隔)->滚动->恢复原名->自动点击", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.33"
+                                                                   message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n快速流程：改名->滚动->恢复原名->自动点击", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件"
                                                              style:UIAlertActionStyleDefault
@@ -1289,7 +1278,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v10.32 loaded - Fast Edition");
+    DLog(@"BaiduPan Troll v10.33 loaded - No Refresh Edition");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
