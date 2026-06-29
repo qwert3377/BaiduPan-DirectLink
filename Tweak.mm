@@ -1,13 +1,7 @@
 //
 //  Tweak.mm
-//  BaiduNetDiskPlugin - Pure Backstage v11.0
+//  BaiduPanTroll - Pure Backstage v11.0
 //  Theos Logos 单文件版本
-//
-//  编译要求：
-//  1. 文件后缀必须是 .mm（支持 Objective-C++）
-//  2. 所有 %hook 必须在文件顶层
-//  3. @interface/@implementation 不能嵌套在 %hook 内部
-//  4. static 函数必须在 %hook 之前定义
 //
 
 #import <UIKit/UIKit.h>
@@ -27,7 +21,7 @@ static NSString *const kKeyLastOriginalName = @"BNDP_Last_OriginalName";
 static BOOL g_autoProcessEnabled = YES;
 static BOOL g_isProcessing = NO;
 
-// ==================== 辅助函数：获取 bdstoken ====================
+// ==================== 辅助函数 ====================
 static NSString* getBdstoken(void) {
     NSString *bdstoken = nil;
     @try {
@@ -42,7 +36,6 @@ static NSString* getBdstoken(void) {
     return bdstoken;
 }
 
-// ==================== 辅助函数：后台重命名 ====================
 static void renameFileAPI(NSString *path, NSString *originalName, void (^completion)(BOOL success, NSString *newPath)) {
     NSString *bdstoken = getBdstoken();
     if (!bdstoken || !path || !originalName) {
@@ -89,7 +82,6 @@ static void renameFileAPI(NSString *path, NSString *originalName, void (^complet
     [task resume];
 }
 
-// ==================== 辅助函数：后台恢复文件名 ====================
 static void restoreFileNameAPI(NSString *path, NSString *originalName) {
     if (!path || !originalName) return;
     NSString *bdstoken = getBdstoken();
@@ -118,7 +110,6 @@ static void restoreFileNameAPI(NSString *path, NSString *originalName) {
     [task resume];
 }
 
-// ==================== 辅助函数：获取下载直链 ====================
 static void fetchDownloadLinkAPI(NSString *fileId, NSString *path, void (^completion)(NSString *dlink)) {
     NSString *bdstoken = getBdstoken();
     if (!bdstoken || !fileId) {
@@ -156,7 +147,6 @@ static void fetchDownloadLinkAPI(NSString *fileId, NSString *path, void (^comple
     [task resume];
 }
 
-// ==================== 辅助函数：通过消息发送打开文件 ====================
 static void openFileViaMessage(NSString *fileId, NSString *path) {
     if (!fileId || !path) return;
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -227,7 +217,6 @@ static void openFileViaMessage(NSString *fileId, NSString *path) {
     });
 }
 
-// ==================== 辅助函数：保存记录 ====================
 static void saveProcessingRecord(NSString *fileId, NSString *path, NSString *originalName) {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     [defaults setObject:fileId forKey:kKeyLastFileId];
@@ -245,7 +234,6 @@ static void savePendingRestore(NSString *fileId, NSString *path, NSString *origi
     [defaults synchronize];
 }
 
-// ==================== 辅助函数：检查并恢复 ====================
 static void checkAndRestorePending(void) {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSString *fileId = [defaults objectForKey:kKeyPendingFileId];
@@ -290,7 +278,6 @@ static void checkAndRestorePending(void) {
     }
 }
 
-// ==================== 辅助函数：从 Cell 提取文件信息 ====================
 static void extractFileInfoFromCell(UITableViewCell *cell, NSString **outFileId, NSString **outPath, NSString **outName) {
     *outFileId = nil;
     *outPath = nil;
@@ -330,7 +317,6 @@ static void extractFileInfoFromCell(UITableViewCell *cell, NSString **outFileId,
     }
 }
 
-// ==================== 核心处理流程 ====================
 static void processBackstage(NSString *fileId, NSString *path, NSString *originalName) {
     if (g_isProcessing) {
         NSLog(@"[BNDP] Already processing, skip");
@@ -376,12 +362,13 @@ static void processBackstage(NSString *fileId, NSString *path, NSString *origina
     });
 }
 
-// ==================== 悬浮球类声明（必须在 %hook 之前）====================
+// ==================== 悬浮球类声明（必须在所有 %hook 之前）====================
 @interface BNDPFloatingBall : UIView
 @property (nonatomic, strong) UILabel *titleLabel;
 @end
 
-// ==================== Logos Hook 1：UITableView ====================
+// ==================== Logos Hook 块（必须在 @implementation 之前）====================
+
 %hook UITableView
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -410,7 +397,6 @@ static void processBackstage(NSString *fileId, NSString *path, NSString *origina
 
 %end
 
-// ==================== Logos Hook 2：UITableViewCell ====================
 %hook UITableViewCell
 
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
@@ -432,7 +418,6 @@ static void processBackstage(NSString *fileId, NSString *path, NSString *origina
 
 %end
 
-// ==================== Logos Hook 3：NSURLSession ====================
 %hook NSURLSession
 
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request {
