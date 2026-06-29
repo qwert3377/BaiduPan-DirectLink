@@ -732,8 +732,11 @@ static void showFloatButton(void) {
     [gFloatButton setTitle:@"🚀" forState:UIControlStateNormal];
     [gFloatButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     gFloatButton.titleLabel.font = [UIFont systemFontOfSize:24];
-    [gFloatButton addTarget:self action:@selector(bdt_floatButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(bdt_floatButtonPanned:)];
+    
+    // 【关键修改】将 self 替换为 [UIApplication sharedApplication]，以避免静态函数报错
+    [gFloatButton addTarget:[UIApplication sharedApplication] action:@selector(bdt_floatButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:[UIApplication sharedApplication] action:@selector(bdt_floatButtonPanned:)];
+    
     [gFloatButton addGestureRecognizer:pan];
     [window addSubview:gFloatButton];
     DLog(@"Float button shown (v12.1)");
