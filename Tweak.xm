@@ -1,7 +1,7 @@
 //
 //  Tweak.xm
-//  BaiduPanTroll - Pure Backstage v11.1
-//  修复：重命名后自动刷新文件列表
+//  BaiduPanTroll - TrollStore Edition v11.2
+//  使用 Method Swizzling 替代 %hook，无 libsubstrate 依赖
 //
 
 #import <UIKit/UIKit.h>
@@ -20,6 +20,18 @@ static NSString *const kKeyLastOriginalName = @"BNDP_Last_OriginalName";
 
 static BOOL g_autoProcessEnabled = YES;
 static BOOL g_isProcessing = NO;
+
+// ==================== Method Swizzling 工具 ====================
+static void swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelector) {
+    Method originalMethod = class_getInstanceMethod(cls, originalSelector);
+    Method swizzledMethod = class_getInstanceMethod(cls, swizzledSelector);
+    if (originalMethod && swizzledMethod) {
+        method_exchangeImplementations(originalMethod, swizzledMethod);
+        NSLog(@"[BNDP] Swizzled: %@ -> %@", NSStringFromSelector(originalSelector), NSStringFromSelector(swizzledSelector));
+    } else {
+        NSLog(@"[BNDP] Failed to swizzle: %@", NSStringFromSelector(originalSelector));
+    }
+}
 
 // ==================== 辅助函数：获取当前文件列表 VC ====================
 static UIViewController* getCurrentFileListVC(void) {
@@ -56,7 +68,6 @@ static void refreshFileList(void) {
 
     NSLog(@"[BNDP] Refreshing file list...");
 
-    // 方法1：尝试调用常见的刷新方法
     SEL refreshSelectors[] = {
         NSSelectorFromString(@"reloadFileList"),
         NSSelectorFromString(@"refreshData"),
@@ -81,7 +92,6 @@ static void refreshFileList(void) {
         }
     }
 
-    // 方法2：查找 UITableView 并 reloadData
     NSArray *subviews = [vc.view subviews];
     NSMutableArray *queue = [NSMutableArray arrayWithArray:subviews];
     while ([queue count] > 0) {
@@ -96,7 +106,6 @@ static void refreshFileList(void) {
         [queue addObjectsFromArray:[view subviews]];
     }
 
-    // 方法3：发送通知
     [[NSNotificationCenter defaultCenter] postNotificationName:@"BNDP_RefreshFileList"
                                                         object:nil
                                                       userInfo:nil];
@@ -376,7 +385,6 @@ static void extractFileInfoFromCell(UITableViewCell *cell, NSString **outFileId,
     }
 }
 
-// ==================== 核心处理：重命名 + 刷新 + 打开 ====================
 static void processBackstage(NSString *fileId, NSString *path, NSString *originalName) {
     if (g_isProcessing) {
         NSLog(@"[BNDP] Already processing, skip");
@@ -393,7 +401,6 @@ static void processBackstage(NSString *fileId, NSString *path, NSString *origina
     NSLog(@"[BNDP] FileId: %@", fileId);
     saveProcessingRecord(fileId, path, originalName);
 
-    // 步骤1：后台重命名
     renameFileAPI(path, originalName, ^(BOOL success, NSString *newPath) {
         if (!success) {
             NSLog(@"[BNDP] Rename failed, abort");
@@ -402,21 +409,17 @@ static void processBackstage(NSString *fileId, NSString *path, NSString *origina
         }
         NSLog(@"[BNDP] Step 1: Rename success");
 
-        // 步骤2：刷新文件列表（关键修复）
         refreshFileList();
         NSLog(@"[BNDP] Step 2: File list refreshed");
 
-        // 步骤3：延迟打开文件，等刷新完成
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             openFileViaMessage(fileId, newPath ?: path);
             NSLog(@"[BNDP] Step 3: Open file triggered");
         });
 
-        // 步骤4：保存待恢复状态
         savePendingRestore(fileId, path, originalName);
         NSLog(@"[BNDP] Step 4: Pending restore saved");
 
-        // 步骤5：获取下载直链
         fetchDownloadLinkAPI(fileId, path, ^(NSString *dlink) {
             if (dlink) {
                 NSLog(@"[BNDP] Step 5: Download link: %@", dlink);
@@ -437,79 +440,11 @@ static void processBackstage(NSString *fileId, NSString *path, NSString *origina
     });
 }
 
-// ==================== 悬浮球类声明（必须在所有 %hook 之前）====================
+// ==================== 悬浮球 ====================
 @interface BNDPFloatingBall : UIView
 @property (nonatomic, strong) UILabel *titleLabel;
 @end
 
-// ==================== Logos Hook 块 ====================
-%hook UITableView
-
-- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (!g_autoProcessEnabled) {
-        %orig;
-        return;
-    }
-    UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
-    if (!cell) {
-        %orig;
-        return;
-    }
-    NSString *fileId = nil;
-    NSString *path = nil;
-    NSString *originalName = nil;
-    extractFileInfoFromCell(cell, &fileId, &path, &originalName);
-    if (!fileId || !path || !originalName) {
-        NSLog(@"[BNDP] Cannot extract file info, fallback to original");
-        %orig;
-        return;
-    }
-    NSLog(@"[BNDP] Detected file click: %@", originalName);
-    [tableView deselectRowAtIndexPath:indexPath animated:NO];
-    processBackstage(fileId, path, originalName);
-}
-
-%end
-
-%hook UITableViewCell
-
-- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    if (!g_autoProcessEnabled) {
-        %orig;
-        return;
-    }
-    NSString *fileId = nil;
-    NSString *path = nil;
-    NSString *originalName = nil;
-    extractFileInfoFromCell(self, &fileId, &path, &originalName);
-    if (fileId && path && originalName) {
-        NSLog(@"[BNDP] Touch on file: %@, start backstage", originalName);
-        processBackstage(fileId, path, originalName);
-        return;
-    }
-    %orig;
-}
-
-%end
-
-%hook NSURLSession
-
-- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request {
-    NSURL *url = [request URL];
-    NSString *urlStr = [url absoluteString];
-    if ([urlStr containsString:@"d.pcs.baidu.com"] ||
-        [urlStr containsString:@"pcs.baidu.com"] ||
-        [urlStr containsString:@"cdn.baidupcs.com"] ||
-        [urlStr containsString:@"bj.bcebos.com"]) {
-        NSLog(@"[BNDP] Intercept download: %@", urlStr);
-        [[UIPasteboard generalPasteboard] setString:urlStr];
-    }
-    return %orig;
-}
-
-%end
-
-// ==================== 悬浮球实现 ====================
 @implementation BNDPFloatingBall
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -585,12 +520,101 @@ static void processBackstage(NSString *fileId, NSString *path, NSString *origina
 
 @end
 
-// ==================== 构造函数 ====================
-%ctor {
+// ==================== UITableView Hook（Method Swizzling）====================
+@interface UITableView (BNDP)
+- (void)bndp_tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath;
+@end
+
+@implementation UITableView (BNDP)
+
+- (void)bndp_tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (!g_autoProcessEnabled) {
+        [self bndp_tableView:tableView didSelectRowAtIndexPath:indexPath];
+        return;
+    }
+    UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+    if (!cell) {
+        [self bndp_tableView:tableView didSelectRowAtIndexPath:indexPath];
+        return;
+    }
+    NSString *fileId = nil;
+    NSString *path = nil;
+    NSString *originalName = nil;
+    extractFileInfoFromCell(cell, &fileId, &path, &originalName);
+    if (!fileId || !path || !originalName) {
+        NSLog(@"[BNDP] Cannot extract file info, fallback to original");
+        [self bndp_tableView:tableView didSelectRowAtIndexPath:indexPath];
+        return;
+    }
+    NSLog(@"[BNDP] Detected file click: %@", originalName);
+    [tableView deselectRowAtIndexPath:indexPath animated:NO];
+    processBackstage(fileId, path, originalName);
+}
+
+@end
+
+// ==================== UITableViewCell Hook（Method Swizzling）====================
+@interface UITableViewCell (BNDP)
+- (void)bndp_touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event;
+@end
+
+@implementation UITableViewCell (BNDP)
+
+- (void)bndp_touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event {
+    if (!g_autoProcessEnabled) {
+        [self bndp_touchesBegan:touches withEvent:event];
+        return;
+    }
+    NSString *fileId = nil;
+    NSString *path = nil;
+    NSString *originalName = nil;
+    extractFileInfoFromCell(self, &fileId, &path, &originalName);
+    if (fileId && path && originalName) {
+        NSLog(@"[BNDP] Touch on file: %@, start backstage", originalName);
+        processBackstage(fileId, path, originalName);
+        return;
+    }
+    [self bndp_touchesBegan:touches withEvent:event];
+}
+
+@end
+
+// ==================== NSURLSession Hook（Method Swizzling）====================
+@interface NSURLSession (BNDP)
+- (NSURLSessionDataTask *)bndp_dataTaskWithRequest:(NSURLRequest *)request;
+@end
+
+@implementation NSURLSession (BNDP)
+
+- (NSURLSessionDataTask *)bndp_dataTaskWithRequest:(NSURLRequest *)request {
+    NSURL *url = [request URL];
+    NSString *urlStr = [url absoluteString];
+    if ([urlStr containsString:@"d.pcs.baidu.com"] ||
+        [urlStr containsString:@"pcs.baidu.com"] ||
+        [urlStr containsString:@"cdn.baidupcs.com"] ||
+        [urlStr containsString:@"bj.bcebos.com"]) {
+        NSLog(@"[BNDP] Intercept download: %@", urlStr);
+        [[UIPasteboard generalPasteboard] setString:urlStr];
+    }
+    return [self bndp_dataTaskWithRequest:request];
+}
+
+@end
+
+// ==================== 构造函数：执行 Method Swizzling ====================
+__attribute__((constructor))
+static void bndp_initialize(void) {
     NSLog(@"[BNDP] ========================================");
-    NSLog(@"[BNDP] Pure Backstage Plugin v11.1 Loaded");
-    NSLog(@"[BNDP] Fix: Auto refresh file list after rename");
+    NSLog(@"[BNDP] TrollStore Edition v11.2 Loaded");
+    NSLog(@"[BNDP] Using Method Swizzling (no substrate)");
     NSLog(@"[BNDP] ========================================");
+
+    // Method Swizzling
+    swizzleMethod([UITableView class], @selector(tableView:didSelectRowAtIndexPath:), @selector(bndp_tableView:didSelectRowAtIndexPath:));
+    swizzleMethod([UITableViewCell class], @selector(touchesBegan:withEvent:), @selector(bndp_touchesBegan:withEvent:));
+    swizzleMethod([NSURLSession class], @selector(dataTaskWithRequest:), @selector(bndp_dataTaskWithRequest:));
+
+    // 显示悬浮球
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *window = [[UIApplication sharedApplication] keyWindow];
         if (!window) window = [[[UIApplication sharedApplication] windows] firstObject];
@@ -600,6 +624,8 @@ static void processBackstage(NSString *fileId, NSString *path, NSString *origina
         BNDPFloatingBall *ball = [[BNDPFloatingBall alloc] initWithFrame:CGRectMake(x, y, size, size)];
         [window addSubview:ball];
     });
+
+    // 注册前台通知
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
                                                         object:nil
                                                          queue:[NSOperationQueue mainQueue]
