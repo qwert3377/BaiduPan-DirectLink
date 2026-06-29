@@ -7,7 +7,6 @@ TWEAK_NAME = BaiduPanTroll
 
 BaiduPanTroll_FILES = Tweak.mm
 BaiduPanTroll_FRAMEWORKS = UIKit Foundation
-BaiduPanTroll_PRIVATE_FRAMEWORKS = 
 BaiduPanTroll_CFLAGS = -fobjc-arc -Wno-unused-function -Wno-unused-variable -Wno-unneeded-internal-declaration
 BaiduPanTroll_LDFLAGS = -Wl,-segalign,4000
 
