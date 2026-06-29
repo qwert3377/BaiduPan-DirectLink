@@ -624,3 +624,4 @@ static void hookBaiduPanClasses(void) {
         });
     }
 }
+
