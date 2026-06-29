@@ -1,52 +1,112 @@
-name: Build Tweak
+- name: Create Tweak.mm
+  run: |
+    cat > Tweak.mm << 'EOF'
+    //
+    // BaiduPan SVIP Direct Link Helper
+    //
 
-on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
-  workflow_dispatch:
+    #import <UIKit/UIKit.h>
+    #import <objc/runtime.h>
 
-jobs:
-  build:
-    runs-on: macos-latest
+    #define DLog(fmt, ...) NSLog(@"[BaiduPanTroll] " fmt, ##__VA_ARGS__)
 
-    steps:
-    - uses: actions/checkout@v4
+    static NSString *gInterceptedDlink = nil;
+    static NSString *gInterceptedFileName = nil;
+    static BOOL gShouldInterceptDlink = NO;
 
-    - name: Install dependencies
-      run: |
-        brew install ldid
+    static void showToast(NSString *msg) {
+        if (!msg) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIWindow *window = nil;
+            if (@available(iOS 13.0, *)) {
+                for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
+                    if (scene.activationState == UISceneActivationStateForegroundActive) {
+                        window = scene.windows.firstObject;
+                        break;
+                    }
+                }
+            }
+            if (!window) window = [[UIApplication sharedApplication] keyWindow];
+            if (!window) return;
 
-    - name: Setup Theos
-      run: |
-        git clone --recursive https://github.com/theos/theos.git $HOME/theos
-        mkdir -p $HOME/theos/sdks
-        SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
-        ln -s "$SDK_PATH" $HOME/theos/sdks/iPhoneOS.sdk
-        echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+            UILabel *label = [[UILabel alloc] init];
+            label.text = msg;
+            label.textColor = [UIColor whiteColor];
+            label.backgroundColor = [UIColor colorWithWhite:0 alpha:0.8];
+            label.textAlignment = NSTextAlignmentCenter;
+            label.font = [UIFont systemFontOfSize:14];
+            label.layer.cornerRadius = 8;
+            label.clipsToBounds = YES;
+            [label sizeToFit];
+            label.frame = CGRectInset(label.frame, 16, 8);
+            label.center = CGPointMake(window.bounds.size.width / 2, window.bounds.size.height / 2);
+            [window addSubview:label];
 
-    - name: Build
-      run: |
-        export THEOS=$HOME/theos
-        make clean
-        make
-        echo "=== Finding dylib ==="
-        find . -name "*.dylib" -type f
+            [UIView animateWithDuration:0.3 delay:1.5 options:UIViewAnimationOptionCurveEaseIn animations:^{
+                label.alpha = 0;
+            } completion:^(BOOL finished) {
+                [label removeFromSuperview];
+            }];
+        });
+    }
 
-    - name: Sign dylib
-      run: |
-        DYLIB=$(find . -name "BaiduPanTroll*.dylib" -type f | head -1)
-        echo "Found dylib: $DYLIB"
-        if [ -n "$DYLIB" ]; then
-          ldid -S "$DYLIB"
-          echo "Signed with ldid -S"
-          cp "$DYLIB" ./BaiduPanTroll.dylib
-        fi
+    static void handleInterceptedDlink(void) {
+        if (!gInterceptedDlink || gInterceptedDlink.length == 0) {
+            showToast(@"未拦截到下载链接");
+            return;
+        }
+        DLog(@"Intercepted dlink: %@", gInterceptedDlink);
+        UIPasteboard *pb = [UIPasteboard generalPasteboard];
+        pb.string = gInterceptedDlink;
+        showToast(@"直链已复制到剪贴板");
+        gShouldInterceptDlink = NO;
+    }
 
-    - name: Upload Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: BaiduPanTroll.dylib
-        path: BaiduPanTroll.dylib
-        if-no-files-found: warn
+    %hook NSURLSession
+
+    - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request {
+        NSURL *url = request.URL;
+        if (url && gShouldInterceptDlink) {
+            NSString *urlStr = url.absoluteString;
+            if ([urlStr containsString:@"d.pcs.baidu.com"] || [urlStr containsString:@"dlink"] || [urlStr containsString:@"pcs.baidu.com"]) {
+                DLog(@"Intercepted dlink: %@", urlStr);
+                gInterceptedDlink = urlStr;
+                gShouldInterceptDlink = NO;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    handleInterceptedDlink();
+                });
+            }
+        }
+        return %orig;
+    }
+
+    - (NSURLSessionDownloadTask *)downloadTaskWithRequest:(NSURLRequest *)request {
+        NSURL *url = request.URL;
+        if (url && gShouldInterceptDlink) {
+            NSString *urlStr = url.absoluteString;
+            if ([urlStr containsString:@"d.pcs.baidu.com"] || [urlStr containsString:@"dlink"] || [urlStr containsString:@"pcs.baidu.com"]) {
+                DLog(@"Intercepted download dlink: %@", urlStr);
+                gInterceptedDlink = urlStr;
+                gShouldInterceptDlink = NO;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    handleInterceptedDlink();
+                });
+            }
+        }
+        return %orig;
+    }
+
+    %end
+
+    %ctor {
+        @autoreleasepool {
+            DLog(@"BaiduPan Direct Link Helper loaded");
+        }
+    }
+    EOF
+
+- name: Build
+  run: |
+    export THEOS=$HOME/theos
+    make clean
+    make
