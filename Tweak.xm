@@ -1,5 +1,5 @@
 //
-//  Tweak.mm
+//  Tweak.xm
 //  BaiduPanTroll - Pure Backstage v11.0
 //  Theos Logos 单文件版本
 //
