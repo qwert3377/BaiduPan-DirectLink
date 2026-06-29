@@ -31,9 +31,10 @@ jobs:
         export THEOS=$HOME/theos
         make clean
         make
+        find . -name "*.dylib" -type f
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: BaiduPanTroll.dylib
-        path: obj/BaiduPanTroll.dylib
+        path: "**/*.dylib"
