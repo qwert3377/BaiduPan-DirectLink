@@ -1,6 +1,7 @@
 //
 //  Tweak.xm
-//  BaiduPanTroll - TrollStore Edition v11.2
+//  BaiduPanTroll - TrollStore Edition v11.3
+//  增强探测版：覆盖 TableView/CollectionView/UIView 多级 Hook
 //  使用 Method Swizzling 替代 %hook，无 libsubstrate 依赖
 //
 
@@ -27,9 +28,14 @@ static void swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelector)
     Method swizzledMethod = class_getInstanceMethod(cls, swizzledSelector);
     if (originalMethod && swizzledMethod) {
         method_exchangeImplementations(originalMethod, swizzledMethod);
-        NSLog(@"[BNDP] Swizzled: %@ -> %@", NSStringFromSelector(originalSelector), NSStringFromSelector(swizzledSelector));
-    } else {
-        NSLog(@"[BNDP] Failed to swizzle: %@", NSStringFromSelector(originalSelector));
+    }
+}
+
+static void swizzleClassMethod(Class cls, SEL originalSelector, SEL swizzledSelector) {
+    Method originalMethod = class_getClassMethod(cls, originalSelector);
+    Method swizzledMethod = class_getClassMethod(cls, swizzledSelector);
+    if (originalMethod && swizzledMethod) {
+        method_exchangeImplementations(originalMethod, swizzledMethod);
     }
 }
 
@@ -46,13 +52,33 @@ static UIViewController* getCurrentFileListVC(void) {
         for (UIViewController *vc in vcs) {
             NSString *className = NSStringFromClass([vc class]);
             if ([className containsString:@"FileList"] || [className containsString:@"FileView"] ||
-                [className containsString:@"BDFile"] || [className containsString:@"PanFile"]) {
+                [className containsString:@"BDFile"] || [className containsString:@"PanFile"] ||
+                [className containsString:@"Disk"] || [className containsString:@"Home"]) {
                 targetVC = vc;
                 break;
             }
         }
         if (!targetVC && [vcs count] > 0) {
             targetVC = [vcs lastObject];
+        }
+    } else if ([rootVC isKindOfClass:[UITabBarController class]]) {
+        UITabBarController *tab = (UITabBarController *)rootVC;
+        UIViewController *selected = [tab selectedViewController];
+        if ([selected isKindOfClass:[UINavigationController class]]) {
+            UINavigationController *nav = (UINavigationController *)selected;
+            NSArray *vcs = [nav viewControllers];
+            for (UIViewController *vc in vcs) {
+                NSString *className = NSStringFromClass([vc class]);
+                if ([className containsString:@"FileList"] || [className containsString:@"FileView"] ||
+                    [className containsString:@"BDFile"] || [className containsString:@"PanFile"] ||
+                    [className containsString:@"Disk"] || [className containsString:@"Home"]) {
+                    targetVC = vc;
+                    break;
+                }
+            }
+            if (!targetVC && [vcs count] > 0) {
+                targetVC = [vcs lastObject];
+            }
         }
     }
     return targetVC;
@@ -61,12 +87,7 @@ static UIViewController* getCurrentFileListVC(void) {
 // ==================== 辅助函数：刷新文件列表 ====================
 static void refreshFileList(void) {
     UIViewController *vc = getCurrentFileListVC();
-    if (!vc) {
-        NSLog(@"[BNDP] Cannot find file list VC to refresh");
-        return;
-    }
-
-    NSLog(@"[BNDP] Refreshing file list...");
+    if (!vc) return;
 
     SEL refreshSelectors[] = {
         NSSelectorFromString(@"reloadFileList"),
@@ -77,6 +98,9 @@ static void refreshFileList(void) {
         NSSelectorFromString(@"pullToRefresh"),
         NSSelectorFromString(@"onRefresh"),
         NSSelectorFromString(@"reloadData"),
+        NSSelectorFromString(@"refresh"),
+        NSSelectorFromString(@"requestData"),
+        NSSelectorFromString(@"loadFileList"),
         (SEL)0
     };
 
@@ -87,7 +111,6 @@ static void refreshFileList(void) {
             #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
             [vc performSelector:sel];
             #pragma clang diagnostic pop
-            NSLog(@"[BNDP] Refreshed via selector: %@", NSStringFromSelector(sel));
             return;
         }
     }
@@ -98,9 +121,11 @@ static void refreshFileList(void) {
         UIView *view = [queue objectAtIndex:0];
         [queue removeObjectAtIndex:0];
         if ([view isKindOfClass:[UITableView class]]) {
-            UITableView *tableView = (UITableView *)view;
-            [tableView reloadData];
-            NSLog(@"[BNDP] Refreshed via UITableView reloadData");
+            [(UITableView *)view reloadData];
+            return;
+        }
+        if ([view isKindOfClass:[UICollectionView class]]) {
+            [(UICollectionView *)view reloadData];
             return;
         }
         [queue addObjectsFromArray:[view subviews]];
@@ -109,7 +134,6 @@ static void refreshFileList(void) {
     [[NSNotificationCenter defaultCenter] postNotificationName:@"BNDP_RefreshFileList"
                                                         object:nil
                                                       userInfo:nil];
-    NSLog(@"[BNDP] Posted refresh notification");
 }
 
 // ==================== 辅助函数：获取 bdstoken ====================
@@ -122,6 +146,12 @@ static NSString* getBdstoken(void) {
         @try {
             id appDelegate = [[UIApplication sharedApplication] delegate];
             bdstoken = [appDelegate valueForKey:@"bdstoken"];
+        } @catch (NSException *e) {}
+    }
+    if (!bdstoken) {
+        @try {
+            id appDelegate = [[UIApplication sharedApplication] delegate];
+            bdstoken = [appDelegate valueForKey:@"_bdstoken"];
         } @catch (NSException *e) {}
     }
     return bdstoken;
@@ -151,7 +181,6 @@ static void renameFileAPI(NSString *path, NSString *originalName, void (^complet
     NSURLSessionDataTask *task = [session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (error) {
-                NSLog(@"[BNDP] Rename API error: %@", error);
                 if (completion) completion(NO, nil);
                 return;
             }
@@ -159,10 +188,8 @@ static void renameFileAPI(NSString *path, NSString *originalName, void (^complet
                 NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
                 NSInteger errno_val = [[json objectForKey:@"errno"] integerValue];
                 if (errno_val == 0) {
-                    NSLog(@"[BNDP] Rename success: %@ -> %@", originalName, newName);
                     if (completion) completion(YES, newPath);
                 } else {
-                    NSLog(@"[BNDP] Rename failed, errno: %ld", (long)errno_val);
                     if (completion) completion(NO, nil);
                 }
             } @catch (NSException *e) {
@@ -192,11 +219,7 @@ static void restoreFileNameAPI(NSString *path, NSString *originalName) {
     [request setHTTPBody:[bodyString dataUsingEncoding:NSUTF8StringEncoding]];
     NSURLSession *session = [NSURLSession sharedSession];
     NSURLSessionDataTask *task = [session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        if (!error) {
-            NSLog(@"[BNDP] Restore success: %@", originalName);
-        } else {
-            NSLog(@"[BNDP] Restore failed: %@", error);
-        }
+        // silent
     }];
     [task resume];
 }
@@ -226,7 +249,6 @@ static void fetchDownloadLinkAPI(NSString *fileId, NSString *path, void (^comple
                     NSDictionary *fileInfo = [list objectAtIndex:0];
                     NSString *dlink = [fileInfo objectForKey:@"dlink"];
                     if (dlink) {
-                        NSLog(@"[BNDP] Got dlink: %@", dlink);
                         if (completion) completion(dlink);
                         return;
                     }
@@ -254,6 +276,10 @@ static void openFileViaMessage(NSString *fileId, NSString *path) {
                 NSSelectorFromString(@"handleFileTap:"),
                 NSSelectorFromString(@"openFile:"),
                 NSSelectorFromString(@"previewDocument:"),
+                NSSelectorFromString(@"openDocument:"),
+                NSSelectorFromString(@"previewFile:"),
+                NSSelectorFromString(@"tapFile:"),
+                NSSelectorFromString(@"clickFile:"),
                 (SEL)0
             };
             for (int i = 0; selectors[i] != (SEL)0; i++) {
@@ -278,7 +304,6 @@ static void openFileViaMessage(NSString *fileId, NSString *path) {
                         [inv invoke];
                     }
                     #pragma clang diagnostic pop
-                    NSLog(@"[BNDP] Open file via selector: %@", NSStringFromSelector(sel));
                     return;
                 }
             }
@@ -286,7 +311,6 @@ static void openFileViaMessage(NSString *fileId, NSString *path) {
         [[NSNotificationCenter defaultCenter] postNotificationName:@"BNDP_OpenFileRequest"
                                                             object:nil
                                                           userInfo:@{@"fileId": fileId, @"path": path}];
-        NSLog(@"[BNDP] Open file via notification");
     });
 }
 
@@ -332,7 +356,8 @@ static void checkAndRestorePending(void) {
     if (vc) {
         NSString *className = NSStringFromClass([vc class]);
         if ([className containsString:@"FileList"] || [className containsString:@"FileView"] ||
-            [className containsString:@"Home"] || [className containsString:@"Main"]) {
+            [className containsString:@"Home"] || [className containsString:@"Main"] ||
+            [className containsString:@"Disk"]) {
             inFileList = YES;
         }
     }
@@ -346,7 +371,7 @@ static void checkAndRestorePending(void) {
     }
 }
 
-static void extractFileInfoFromCell(UITableViewCell *cell, NSString **outFileId, NSString **outPath, NSString **outName) {
+static void extractFileInfoFromCell(UIView *cell, NSString **outFileId, NSString **outPath, NSString **outName) {
     *outFileId = nil;
     *outPath = nil;
     *outName = nil;
@@ -355,19 +380,25 @@ static void extractFileInfoFromCell(UITableViewCell *cell, NSString **outFileId,
         if (!fileInfo) fileInfo = [cell valueForKey:@"fileInfo"];
         if (!fileInfo) fileInfo = [cell valueForKey:@"_data"];
         if (!fileInfo) fileInfo = [cell valueForKey:@"data"];
+        if (!fileInfo) fileInfo = [cell valueForKey:@"_fileData"];
+        if (!fileInfo) fileInfo = [cell valueForKey:@"fileData"];
+        if (!fileInfo) fileInfo = [cell valueForKey:@"_item"];
+        if (!fileInfo) fileInfo = [cell valueForKey:@"item"];
         if (fileInfo) {
             *outFileId = [fileInfo valueForKey:@"fid"];
             if (!*outFileId) *outFileId = [fileInfo valueForKey:@"fileId"];
             if (!*outFileId) *outFileId = [fileInfo valueForKey:@"id"];
             if (!*outFileId) *outFileId = [fileInfo valueForKey:@"fs_id"];
+            if (!*outFileId) *outFileId = [fileInfo valueForKey:@"fsid"];
             *outPath = [fileInfo valueForKey:@"path"];
             *outName = [fileInfo valueForKey:@"name"];
             if (!*outName) *outName = [fileInfo valueForKey:@"server_filename"];
+            if (!*outName) *outName = [fileInfo valueForKey:@"filename"];
         }
     } @catch (NSException *e) {}
     if (!*outName) {
         @try {
-            NSArray *subviews = [cell.contentView subviews];
+            NSArray *subviews = [cell subviews];
             NSMutableArray *queue = [NSMutableArray arrayWithArray:subviews];
             while ([queue count] > 0) {
                 UIView *view = [queue objectAtIndex:0];
@@ -386,43 +417,27 @@ static void extractFileInfoFromCell(UITableViewCell *cell, NSString **outFileId,
 }
 
 static void processBackstage(NSString *fileId, NSString *path, NSString *originalName) {
-    if (g_isProcessing) {
-        NSLog(@"[BNDP] Already processing, skip");
-        return;
-    }
-    if (!fileId || !path || !originalName) {
-        NSLog(@"[BNDP] Invalid parameters");
-        return;
-    }
+    if (g_isProcessing) return;
+    if (!fileId || !path || !originalName) return;
     g_isProcessing = YES;
-    NSLog(@"[BNDP] ====== Start Backstage Processing ======");
-    NSLog(@"[BNDP] File: %@", originalName);
-    NSLog(@"[BNDP] Path: %@", path);
-    NSLog(@"[BNDP] FileId: %@", fileId);
     saveProcessingRecord(fileId, path, originalName);
 
     renameFileAPI(path, originalName, ^(BOOL success, NSString *newPath) {
         if (!success) {
-            NSLog(@"[BNDP] Rename failed, abort");
             g_isProcessing = NO;
             return;
         }
-        NSLog(@"[BNDP] Step 1: Rename success");
 
         refreshFileList();
-        NSLog(@"[BNDP] Step 2: File list refreshed");
 
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             openFileViaMessage(fileId, newPath ?: path);
-            NSLog(@"[BNDP] Step 3: Open file triggered");
         });
 
         savePendingRestore(fileId, path, originalName);
-        NSLog(@"[BNDP] Step 4: Pending restore saved");
 
         fetchDownloadLinkAPI(fileId, path, ^(NSString *dlink) {
             if (dlink) {
-                NSLog(@"[BNDP] Step 5: Download link: %@", dlink);
                 [[UIPasteboard generalPasteboard] setString:dlink];
                 dispatch_async(dispatch_get_main_queue(), ^{
                     UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"下载直链已复制"
@@ -436,8 +451,30 @@ static void processBackstage(NSString *fileId, NSString *path, NSString *origina
         });
 
         g_isProcessing = NO;
-        NSLog(@"[BNDP] ====== Processing Complete ======");
     });
+}
+
+// ==================== 核心：尝试从任意 View 提取文件信息并处理 ====================
+static void tryProcessView(UIView *view) {
+    if (!g_autoProcessEnabled) return;
+    if (!view) return;
+
+    // 向上查找 cell
+    UIView *cell = view;
+    while (cell && ![cell isKindOfClass:[UITableViewCell class]] && ![cell isKindOfClass:[UICollectionViewCell class]]) {
+        cell = [cell superview];
+        if (!cell) return;
+    }
+    if (!cell) return;
+
+    NSString *fileId = nil;
+    NSString *path = nil;
+    NSString *originalName = nil;
+    extractFileInfoFromCell(cell, &fileId, &path, &originalName);
+
+    if (fileId && path && originalName) {
+        processBackstage(fileId, path, originalName);
+    }
 }
 
 // ==================== 悬浮球 ====================
@@ -520,7 +557,7 @@ static void processBackstage(NSString *fileId, NSString *path, NSString *origina
 
 @end
 
-// ==================== UITableView Hook（Method Swizzling）====================
+// ==================== Hook 1: UITableView delegate ====================
 @interface UITableView (BNDP)
 - (void)bndp_tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath;
 @end
@@ -542,44 +579,80 @@ static void processBackstage(NSString *fileId, NSString *path, NSString *origina
     NSString *originalName = nil;
     extractFileInfoFromCell(cell, &fileId, &path, &originalName);
     if (!fileId || !path || !originalName) {
-        NSLog(@"[BNDP] Cannot extract file info, fallback to original");
         [self bndp_tableView:tableView didSelectRowAtIndexPath:indexPath];
         return;
     }
-    NSLog(@"[BNDP] Detected file click: %@", originalName);
     [tableView deselectRowAtIndexPath:indexPath animated:NO];
     processBackstage(fileId, path, originalName);
 }
 
 @end
 
-// ==================== UITableViewCell Hook（Method Swizzling）====================
-@interface UITableViewCell (BNDP)
-- (void)bndp_touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event;
+// ==================== Hook 2: UICollectionView delegate ====================
+@interface UICollectionView (BNDP)
+- (void)bndp_collectionView:(UICollectionView *)collectionView didSelectItemAtIndexPath:(NSIndexPath *)indexPath;
 @end
 
-@implementation UITableViewCell (BNDP)
+@implementation UICollectionView (BNDP)
 
-- (void)bndp_touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event {
+- (void)bndp_collectionView:(UICollectionView *)collectionView didSelectItemAtIndexPath:(NSIndexPath *)indexPath {
     if (!g_autoProcessEnabled) {
-        [self bndp_touchesBegan:touches withEvent:event];
+        [self bndp_collectionView:collectionView didSelectItemAtIndexPath:indexPath];
+        return;
+    }
+    UICollectionViewCell *cell = [collectionView cellForItemAtIndexPath:indexPath];
+    if (!cell) {
+        [self bndp_collectionView:collectionView didSelectItemAtIndexPath:indexPath];
         return;
     }
     NSString *fileId = nil;
     NSString *path = nil;
     NSString *originalName = nil;
-    extractFileInfoFromCell(self, &fileId, &path, &originalName);
-    if (fileId && path && originalName) {
-        NSLog(@"[BNDP] Touch on file: %@, start backstage", originalName);
-        processBackstage(fileId, path, originalName);
+    extractFileInfoFromCell(cell, &fileId, &path, &originalName);
+    if (!fileId || !path || !originalName) {
+        [self bndp_collectionView:collectionView didSelectItemAtIndexPath:indexPath];
         return;
     }
-    [self bndp_touchesBegan:touches withEvent:event];
+    processBackstage(fileId, path, originalName);
 }
 
 @end
 
-// ==================== NSURLSession Hook（Method Swizzling）====================
+// ==================== Hook 3: UIView touchesBegan（最底层拦截）====================
+@interface UIView (BNDP)
+- (void)bndp_touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event;
+- (void)bndp_touchesEnded:(NSSet *)touches withEvent:(UIEvent *)event;
+@end
+
+@implementation UIView (BNDP)
+
+- (void)bndp_touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event {
+    tryProcessView(self);
+    [self bndp_touchesBegan:touches withEvent:event];
+}
+
+- (void)bndp_touchesEnded:(NSSet *)touches withEvent:(UIEvent *)event {
+    tryProcessView(self);
+    [self bndp_touchesEnded:touches withEvent:event];
+}
+
+@end
+
+// ==================== Hook 4: UIControl sendAction（按钮点击）====================
+@interface UIControl (BNDP)
+- (void)bndp_sendAction:(SEL)action to:(id)target forEvent:(UIEvent *)event;
+@end
+
+@implementation UIControl (BNDP)
+
+- (void)bndp_sendAction:(SEL)action to:(id)target forEvent:(UIEvent *)event {
+    tryProcessView(self);
+    [self bndp_sendAction:action to:target forEvent:event];
+}
+
+@end
+
+// ==================== Hook 5: NSURLSession 下载拦截 ====================
 @interface NSURLSession (BNDP)
 - (NSURLSessionDataTask *)bndp_dataTaskWithRequest:(NSURLRequest *)request;
 @end
@@ -593,7 +666,6 @@ static void processBackstage(NSString *fileId, NSString *path, NSString *origina
         [urlStr containsString:@"pcs.baidu.com"] ||
         [urlStr containsString:@"cdn.baidupcs.com"] ||
         [urlStr containsString:@"bj.bcebos.com"]) {
-        NSLog(@"[BNDP] Intercept download: %@", urlStr);
         [[UIPasteboard generalPasteboard] setString:urlStr];
     }
     return [self bndp_dataTaskWithRequest:request];
@@ -601,17 +673,15 @@ static void processBackstage(NSString *fileId, NSString *path, NSString *origina
 
 @end
 
-// ==================== 构造函数：执行 Method Swizzling ====================
+// ==================== 构造函数 ====================
 __attribute__((constructor))
 static void bndp_initialize(void) {
-    NSLog(@"[BNDP] ========================================");
-    NSLog(@"[BNDP] TrollStore Edition v11.2 Loaded");
-    NSLog(@"[BNDP] Using Method Swizzling (no substrate)");
-    NSLog(@"[BNDP] ========================================");
-
     // Method Swizzling
     swizzleMethod([UITableView class], @selector(tableView:didSelectRowAtIndexPath:), @selector(bndp_tableView:didSelectRowAtIndexPath:));
-    swizzleMethod([UITableViewCell class], @selector(touchesBegan:withEvent:), @selector(bndp_touchesBegan:withEvent:));
+    swizzleMethod([UICollectionView class], @selector(collectionView:didSelectItemAtIndexPath:), @selector(bndp_collectionView:didSelectItemAtIndexPath:));
+    swizzleMethod([UIView class], @selector(touchesBegan:withEvent:), @selector(bndp_touchesBegan:withEvent:));
+    swizzleMethod([UIView class], @selector(touchesEnded:withEvent:), @selector(bndp_touchesEnded:withEvent:));
+    swizzleMethod([UIControl class], @selector(sendAction:to:forEvent:), @selector(bndp_sendAction:to:forEvent:));
     swizzleMethod([NSURLSession class], @selector(dataTaskWithRequest:), @selector(bndp_dataTaskWithRequest:));
 
     // 显示悬浮球
@@ -632,4 +702,4 @@ static void bndp_initialize(void) {
                                                     usingBlock:^(NSNotification *note) {
         checkAndRestorePending();
     }];
-} 
+}
