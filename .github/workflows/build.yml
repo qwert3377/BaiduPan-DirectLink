@@ -1,31 +1,49 @@
-name: Build
+name: Build Tweak
 
 on:
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: macos-latest
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        brew install ldid
 
     - name: Setup Theos
       run: |
         git clone --recursive https://github.com/theos/theos.git $HOME/theos
+        mkdir -p $HOME/theos/sdks
+        SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+        ln -s "$SDK_PATH" $HOME/theos/sdks/iPhoneOS.sdk
         echo "THEOS=$HOME/theos" >> $GITHUB_ENV
-
-    - name: Install ldid
-      run: |
-        brew install ldid
-        which ldid
 
     - name: Build
       run: |
         export THEOS=$HOME/theos
         make clean
-        make
+        make package
+
+    - name: Find and copy dylib
+      run: |
+        find . -name "BaiduPanTroll*.dylib" -type f
+        DYLIB=$(find . -name "BaiduPanTroll*.dylib" -type f | head -1)
+        if [ -n "$DYLIB" ]; then
+          cp "$DYLIB" ./BaiduPanTroll.dylib
+          ldid -S ./BaiduPanTroll.dylib
+        fi
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: BaiduPanTroll.dylib
+        path: BaiduPanTroll.dylib
+        if-no-files-found: warn
