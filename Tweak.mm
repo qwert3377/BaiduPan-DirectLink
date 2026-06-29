@@ -335,7 +335,7 @@ static void renameFile(NSString *fileId, NSString *path, NSString *newName, void
     }
     NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/filemanager?async=2&onnest=fail&opera=rename&clienttype=0&app_id=250528&web=1&bdstoken=%@", gBdstoken];
     NSString *filelist = [NSString stringWithFormat:@"[{\"id\":%@,\"path\":\"%@\",\"newname\":\"%@\"}]", fileId, path, newName];
-    NSString *body = [NSString stringWithFormat:@"filelist=%@", strictEncodeURIComponent(filelist));
+    NSString *body = [NSString stringWithFormat:@"filelist=%@", strictEncodeURIComponent(filelist)];
     DLog(@"RENAME body: %@", body);
     DLog(@"RENAME filelist raw: %@", filelist);
     NSDictionary *headers = @{
