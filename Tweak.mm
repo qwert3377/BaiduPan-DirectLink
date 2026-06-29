@@ -1,8 +1,8 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.33
-//  Flow: select -> rename to .88888888888888 -> NO REFRESH -> scroll to file
-//        -> restore original name (NO refresh) -> AUTO CLICK visible cell
-//  CHANGELOG v10.33: Removed double refresh, rename goes directly to scroll
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.34
+//  Flow: select -> rename to .88888888888888 -> REFRESH ONCE -> scroll to file
+//        -> restore original name -> AUTO CLICK visible cell
+//  CHANGELOG v10.34: Added single refresh after rename to ensure renamed file appears in list
 //
 
 #import <UIKit/UIKit.h>
@@ -315,10 +315,17 @@ static void fetchFileList(void (^completion)(NSArray *files, NSError *err)) {
         return;
     }
     NSString *encodedPath = strictEncodeURIComponent(gCurrentPath ?: @"/");
-    NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/list?dir=%@&bdstoken=%@&order=time&desc=1&showempty=0&web=1&page=1&num=100", encodedPath, gBdstoken];
+    NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/list?dir=%@&bdstoken=%@&order=time&desc=1&showempty=0&web=1&page=1&num=100&app_id=250528", encodedPath, gBdstoken];
     DLog(@"fetchFileList URL: %@", url);
     bdAsyncRequest(url, @"GET", nil, nil, ^(id json, NSError *err) {
         if (err) { completion(nil, err); return; }
+        NSNumber *errnoNum = json[@"errno"];
+        if (errnoNum && [errnoNum integerValue] != 0) {
+            NSString *errMsg = json[@"errmsg"] ?: [NSString stringWithFormat:@"API errno=%@", errnoNum];
+            DLog(@"fetchFileList API error: %@", errMsg);
+            completion(nil, [NSError errorWithDomain:@"BaiduPanTroll" code:[errnoNum integerValue] userInfo:@{NSLocalizedDescriptionKey: errMsg}]);
+            return;
+        }
         NSArray *list = json[@"list"];
         if (![list isKindOfClass:[NSArray class]]) {
             completion(nil, [NSError errorWithDomain:@"BaiduPanTroll" code:-2 userInfo:@{NSLocalizedDescriptionKey: @"Invalid response"}]);
@@ -756,11 +763,11 @@ static void autoClickVisibleCell(NSString *ppName, UIScrollView *listView) {
 
     if (!gHasRestored && gPendingRestoreFileId && gPendingRestorePdfPath && gPendingRestoreOriginalName) {
         gHasRestored = YES;
-        showToast(@"3. 恢复原名...");
+        showToast(@"4. 恢复原名...");
         executeRestoreWithoutRefresh(^(BOOL success) {
             if (success) {
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    showToast(@"4. 自动打开文件...");
+                    showToast(@"5. 自动打开文件...");
                     autoClickVisibleCell(ppName, listView);
                 });
             } else {
@@ -932,7 +939,7 @@ static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInt
 
 static void scrollToRenamedFileAndAutoClick(NSString *ppName) {
     if (!ppName) return;
-    DLog(@"v10.33 Scrolling to file and auto-click: %@", ppName);
+    DLog(@"v10.34 Scrolling to file and auto-click: %@", ppName);
 
     UIScrollView *listView = findListViewGlobally();
     if (!listView) {
@@ -1105,7 +1112,7 @@ static void startTapDetection(void) {
     });
 }
 
-// v10.33: NO REFRESH - rename -> directly scroll
+// v10.34: rename -> refresh once -> scroll -> restore -> auto click
 static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileId, NSNumber *fileSize) {
     if (fileSize && [fileSize doubleValue] >= 300.0 * 1024.0 * 1024.0) {
         showToast(@"⚠️ 该文件超过300MB，无法下载");
@@ -1138,9 +1145,22 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
         gPendingRestorePdfPath = ppPath;
         gPendingRestoreOriginalName = fileName;
 
-        // v10.33: No refresh, go directly to scroll
-        showToast(@"2. 滚动到文件...");
-        scrollToRenamedFileAndAutoClick(ppName);
+        // v10.34: Refresh once after rename so the renamed file appears in the list
+        showToast(@"2. 刷新列表...");
+        forceRefreshFileList();
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            // Extra reloadData to ensure the list view picks up the new data source
+            UIScrollView *listView = findListViewGlobally();
+            if ([listView isKindOfClass:[UITableView class]]) {
+                [(UITableView *)listView reloadData];
+            } else if ([listView isKindOfClass:[UICollectionView class]]) {
+                [(UICollectionView *)listView reloadData];
+            }
+
+            showToast(@"3. 滚动到文件...");
+            scrollToRenamedFileAndAutoClick(ppName);
+        });
     });
 }
 
@@ -1150,10 +1170,15 @@ static void triggerDownloadFlow(void) {
         showToast(@"未检测到登录状态");
         return;
     }
-
+    showToast(@"正在获取文件列表...");
     fetchFileList(^(NSArray *files, NSError *err) {
-        if (err || !files || files.count == 0) {
-            showToast(err ? err.localizedDescription : @"文件夹为空");
+        if (err) {
+            DLog(@"fetchFileList error: %@", err);
+            showToast([NSString stringWithFormat:@"获取失败: %@", err.localizedDescription]);
+            return;
+        }
+        if (!files || files.count == 0) {
+            showToast(@"文件夹为空");
             return;
         }
         NSMutableArray *fileItems = [NSMutableArray array];
@@ -1197,14 +1222,20 @@ static void triggerDownloadFlow(void) {
                                                                style:UIAlertActionStyleCancel
                                                              handler:nil];
         [sheet addAction:cancelAction];
-        UIViewController *vc = topViewController();
-        if (vc) {
-            if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
-                sheet.popoverPresentationController.sourceView = vc.view;
-                sheet.popoverPresentationController.sourceRect = CGRectMake(vc.view.bounds.size.width / 2, vc.view.bounds.size.height / 2, 1, 1);
+        
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            UIViewController *vc = topViewController();
+            if (vc) {
+                if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
+                    sheet.popoverPresentationController.sourceView = vc.view;
+                    sheet.popoverPresentationController.sourceRect = CGRectMake(vc.view.bounds.size.width / 2, vc.view.bounds.size.height / 2, 1, 1);
+                }
+                [vc presentViewController:sheet animated:YES completion:nil];
+            } else {
+                DLog(@"No top VC to present action sheet");
+                showToast(@"无法弹出选择界面");
             }
-            [vc presentViewController:sheet animated:YES completion:nil];
-        }
+        });
     });
 }
 
@@ -1216,13 +1247,15 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 8 ? 8 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.33"
-                                                                   message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n快速流程：改名->滚动->恢复原名->自动点击", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.34"
+                                                                   message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n快速流程：改名->刷新->滚动->恢复原名->自动点击", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件"
                                                              style:UIAlertActionStyleDefault
                                                            handler:^(UIAlertAction *action) {
-        triggerDownloadFlow();
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            triggerDownloadFlow();
+        });
     }];
     [alert addAction:downloadAction];
     UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"OK"
@@ -1278,7 +1311,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v10.33 loaded - No Refresh Edition");
+    DLog(@"BaiduPan Troll v10.34 loaded - Single Refresh Edition");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
