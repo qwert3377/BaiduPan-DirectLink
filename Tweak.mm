@@ -1295,6 +1295,6 @@ static void baiduPanTrollInit(void) {
     DLog(@"BaiduPan Troll v10.28 loaded - Auto-Click Edition");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
-        autoDetectPathAndToken();
+        autoDetectPathAndToken(); 
     });
 }
