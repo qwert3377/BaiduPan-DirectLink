@@ -1,4 +1,5 @@
-name: Build Tweak
+# .github/workflows/build.yml
+name: Build & Release
 
 on:
   push:
@@ -10,40 +11,31 @@ on:
 jobs:
   build:
     runs-on: macos-latest
-
     steps:
-    - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Install dependencies
-      run: |
-        brew install ldid
+      - name: Setup Theos
+        uses: Randomblock1/theos-action@v1
+        with:
+          theos-dir: theos
 
-    - name: Setup Theos
-      run: |
-        git clone --recursive https://github.com/theos/theos.git $HOME/theos
-        mkdir -p $HOME/theos/sdks
-        SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
-        ln -s "$SDK_PATH" $HOME/theos/sdks/iPhoneOS.sdk
-        echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+      - name: Build Package
+        run: |
+          export THEOS=./theos
+          make clean
+          make package FINALPACKAGE=1
 
-    - name: Build
-      run: |
-        export THEOS=$HOME/theos
-        make clean
-        make package
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BaiduPanTroll
+          path: packages/*.deb
+          if-no-files-found: error
 
-    - name: Find and copy dylib
-      run: |
-        find . -name "BaiduPanTroll*.dylib" -type f
-        DYLIB=$(find . -name "BaiduPanTroll*.dylib" -type f | head -1)
-        if [ -n "$DYLIB" ]; then
-          cp "$DYLIB" ./BaiduPanTroll.dylib
-          ldid -S ./BaiduPanTroll.dylib
-        fi
-
-    - name: Upload Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: BaiduPanTroll.dylib
-        path: BaiduPanTroll.dylib
-        if-no-files-found: warn
+      - name: Release
+        if: github.event_name == 'push' && contains(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: packages/*.deb
+          generate_release_notes: true
