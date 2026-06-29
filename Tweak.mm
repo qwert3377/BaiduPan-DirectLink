@@ -710,59 +710,52 @@ static void simulateTouchOnCell(UIView *cell) {
     if (!cell) return;
     DLog(@"Simulating touch on visible cell: %@", NSStringFromClass([cell class]));
 
-    // Create a dummy UIEvent using runtime (avoids nil for nonnull parameter)
-    UIEvent *dummyEvent = nil;
-    @try {
-        dummyEvent = [[UIEvent alloc] init];
-    } @catch (NSException *e) {
-        DLog(@"Failed to create dummy event: %@", e);
+    // Method 1: If cell is a UIControl, send action directly
+    if ([cell isKindOfClass:[UIControl class]]) {
+        UIControl *control = (UIControl *)cell;
+        [control sendActionsForControlEvents:UIControlEventTouchUpInside];
+        DLog(@"Sent UIControl action");
     }
 
-    // Get the cell's center point in its own coordinate system
-    CGPoint center = CGPointMake(cell.bounds.size.width / 2.0, cell.bounds.size.height / 2.0);
-
-    // Create touch event
-    UITouch *touch = [[UITouch alloc] init];
-    // Use KVC to set private properties
-    @try {
-        [touch setValue:@(UITouchPhaseBegan) forKey:@"phase"];
-        [touch setValue:cell.window forKey:@"window"];
-        [touch setValue:cell forKey:@"view"];
-        [touch setValue:[NSValue valueWithCGPoint:center] forKey:@"locationInWindow"];
-        [touch setValue:@(1) forKey:@"tapCount"];
-        [touch setValue:@(0) forKey:@"phase"]; // began = 0
-    } @catch (NSException *e) {
-        DLog(@"KVC touch setup failed: %@", e);
-    }
-
-    // Method 1: Direct touchesBegan/touchesEnded on cell
-    @try {
-        NSSet *touchSet = [NSSet setWithObject:touch];
-        [cell touchesBegan:touchSet withEvent:dummyEvent];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    // Method 2: Trigger tap gesture recognizers on the cell
+    for (UIGestureRecognizer *gr in cell.gestureRecognizers) {
+        if ([gr isKindOfClass:[UITapGestureRecognizer class]]) {
+            DLog(@"Triggering tap gesture on cell");
             @try {
-                [touch setValue:@(3) forKey:@"phase"]; // ended = 3
-                [cell touchesEnded:touchSet withEvent:dummyEvent];
-            } @catch (NSException *e2) {}
-        });
-        DLog(@"Touch simulation sent to cell");
-    } @catch (NSException *e) {
-        DLog(@"Direct touch simulation failed: %@", e);
-    }
-
-    // Method 2: Try to find and call the cell's action handler
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        // Try gesture recognizers
-        for (UIGestureRecognizer *gr in cell.gestureRecognizers) {
-            if ([gr isKindOfClass:[UITapGestureRecognizer class]]) {
-                DLog(@"Triggering tap gesture on cell");
-                @try {
-                    [gr touchesBegan:[NSSet setWithObject:touch] withEvent:dummyEvent];
-                    [gr touchesEnded:[NSSet setWithObject:touch] withEvent:dummyEvent];
-                } @catch (NSException *e) {}
+                // Use performSelector to bypass nonnull check
+                SEL sel = NSSelectorFromString(@"_touchesEnded:withEvent:");
+                if ([gr respondsToSelector:sel]) {
+                    #pragma clang diagnostic push
+                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                    [gr performSelector:sel withObject:[NSSet set] withObject:nil];
+                    #pragma clang diagnostic pop
+                }
+            } @catch (NSException *e) {
+                DLog(@"Gesture trigger failed: %@", e);
             }
         }
-    });
+    }
+
+    // Method 3: Try to use cell's target-action mechanism
+    @try {
+        // Look for any buttons inside the cell and trigger them
+        for (UIView *sub in cell.subviews) {
+            if ([sub isKindOfClass:[UIButton class]]) {
+                UIButton *btn = (UIButton *)sub;
+                [btn sendActionsForControlEvents:UIControlEventTouchUpInside];
+                DLog(@"Triggered button inside cell");
+            }
+        }
+    } @catch (NSException *e) {}
+
+    // Method 4: Post a tap notification to the cell's window
+    @try {
+        CGPoint center = CGPointMake(cell.bounds.size.width / 2.0, cell.bounds.size.height / 2.0);
+        CGPoint windowPoint = [cell convertPoint:center toView:nil];
+        // Use UIApplication to send action
+        [[UIApplication sharedApplication] sendAction:@selector(touchesEnded:withEvent:) to:cell from:nil forEvent:nil];
+        DLog(@"Sent action via UIApplication");
+    } @catch (NSException *e) {}
 }
 
 // v10.28: Auto-click after ensuring cell is VISIBLE
@@ -1153,7 +1146,7 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
             showToast(@"3. 刷新第2次...");
             forceRefreshFileList();
 
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 showToast(@"4. 自动滚动并打开文件...");
                 startTapDetection();
                 // v10.28: Auto scroll + auto click when cell becomes visible
