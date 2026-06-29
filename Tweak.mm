@@ -710,6 +710,14 @@ static void simulateTouchOnCell(UIView *cell) {
     if (!cell) return;
     DLog(@"Simulating touch on visible cell: %@", NSStringFromClass([cell class]));
 
+    // Create a dummy UIEvent using runtime (avoids nil for nonnull parameter)
+    UIEvent *dummyEvent = nil;
+    @try {
+        dummyEvent = [[UIEvent alloc] init];
+    } @catch (NSException *e) {
+        DLog(@"Failed to create dummy event: %@", e);
+    }
+
     // Get the cell's center point in its own coordinate system
     CGPoint center = CGPointMake(cell.bounds.size.width / 2.0, cell.bounds.size.height / 2.0);
 
@@ -730,11 +738,11 @@ static void simulateTouchOnCell(UIView *cell) {
     // Method 1: Direct touchesBegan/touchesEnded on cell
     @try {
         NSSet *touchSet = [NSSet setWithObject:touch];
-        [cell touchesBegan:touchSet withEvent:nil];
+        [cell touchesBegan:touchSet withEvent:dummyEvent];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             @try {
                 [touch setValue:@(3) forKey:@"phase"]; // ended = 3
-                [cell touchesEnded:touchSet withEvent:nil];
+                [cell touchesEnded:touchSet withEvent:dummyEvent];
             } @catch (NSException *e2) {}
         });
         DLog(@"Touch simulation sent to cell");
@@ -749,9 +757,8 @@ static void simulateTouchOnCell(UIView *cell) {
             if ([gr isKindOfClass:[UITapGestureRecognizer class]]) {
                 DLog(@"Triggering tap gesture on cell");
                 @try {
-                    CGPoint loc = CGPointMake(cell.bounds.size.width/2, cell.bounds.size.height/2);
-                    [gr touchesBegan:[NSSet setWithObject:touch] withEvent:nil];
-                    [gr touchesEnded:[NSSet setWithObject:touch] withEvent:nil];
+                    [gr touchesBegan:[NSSet setWithObject:touch] withEvent:dummyEvent];
+                    [gr touchesEnded:[NSSet setWithObject:touch] withEvent:dummyEvent];
                 } @catch (NSException *e) {}
             }
         }
@@ -1295,6 +1302,6 @@ static void baiduPanTrollInit(void) {
     DLog(@"BaiduPan Troll v10.28 loaded - Auto-Click Edition");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
-        autoDetectPathAndToken(); 
+        autoDetectPathAndToken();
     });
 }
