@@ -1,22 +1,21 @@
 //
-//  Tweak.xm
-//  BaiduPanTroll - TrollStore Edition v12.0
-//  基于 v10.28 成熟逻辑，改为 Method Swizzling 无 substrate 依赖
-//  核心改进：后台无感操作，用户看不到刷新和滚动
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.28
+//  Flow: select -> rename to .88888888888888 -> refresh x2 -> AUTO SCROLL & CLICK renamed file
+//        -> detect preview opened -> auto back -> wait 1s -> re-click -> restore name
+//  CHANGELOG v10.28: Auto-click uses real touch simulation on VISIBLE cell after scrolling
 //
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
-#import <objc/message.h>
 
-#define DLog(fmt, ...) NSLog(@"[BNDP] " fmt, ##__VA_ARGS__)
+#define DLog(fmt, ...) NSLog(@"[BaiduPanTroll] " fmt, ##__VA_ARGS__)
 
 static NSString *gCurrentPath = nil;
 static NSString *gBdstoken = nil;
 static NSString *gBDUSS = nil;
 static UIButton *gFloatButton = nil;
 
-// 状态机
+// State machine for two-phase flow
 static NSString *gPendingRestoreFileId = nil;
 static NSString *gPendingRestorePdfPath = nil;
 static NSString *gPendingRestoreOriginalName = nil;
@@ -27,16 +26,52 @@ static BOOL gHasOpenedFile = NO;
 static NSString *gInitialTopVCClass = nil;
 static NSString *gInitialTopVCTitle = nil;
 
-// ========== Method Swizzling 工具 ==========
-static void swizzleMethod(Class cls, SEL originalSelector, SEL swizzledSelector) {
-    Method originalMethod = class_getInstanceMethod(cls, originalSelector);
-    Method swizzledMethod = class_getInstanceMethod(cls, swizzledSelector);
-    if (originalMethod && swizzledMethod) {
-        method_exchangeImplementations(originalMethod, swizzledMethod);
-    }
-}
+// ========== Forward declarations ==========
+static UIViewController * topViewController(void);
+static NSInteger currentNavStackCount(void);
+static NSString * strictEncodeURIComponent(NSString *str);
+static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *headers, NSString *body, void (^handler)(id json, NSError *err));
+static NSString * scanMemoryForBdstoken(void);
+static NSString * extractPathFromVC(UIViewController *vc);
+static NSString * buildPathFromNavStack(void);
+static void autoDetectPathAndToken(void);
+static void fetchFileList(void (^completion)(NSArray *files, NSError *err));
+static void renameFile(NSString *fileId, NSString *path, NSString *newName, void (^completion)(BOOL success, NSError *err));
+static void showToast(NSString *msg);
+static void forceRefreshFileList(void);
+static void refreshVC(UIViewController *vc);
+static UIScrollView * findScrollViewInView(UIView *view);
+static void simulatePullToRefreshOnScrollView(UIScrollView *scrollView);
+static void tryRefreshOnScrollView(UIScrollView *scrollView);
+static void triggerMJRefresh(id headerOrFooter);
+static void triggerNotificationFallback(void);
+static void triggerEGORefresh(UIView *subview, UIScrollView *scrollView);
+static void triggerBDWalletRefresh(UIView *subview, UIScrollView *scrollView);
+static BOOL viewContainsText(UIView *view, NSString *text);
+static void startTapDetection(void);
+static void stopTapDetection(void);
+static void checkIfFileOpened(void);
+static void executeRestore(void);
+static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileId, NSNumber *fileSize);
+static void triggerDownloadFlow(void);
+static void onFloatButtonTap(void);
+static void showFloatButton(void);
 
-// ========== 获取顶层 VC ==========
+// v10.28 Auto-click helpers - SCROLL + VISIBLE CELL TOUCH
+static UIScrollView * findListViewInHierarchy(UIView *root);
+static UIScrollView * findListViewGlobally(void);
+static NSIndexPath * searchFileInTableView(NSString *targetName, UITableView *tv);
+static NSIndexPath * searchFileInCollectionView(NSString *targetName, UICollectionView *cv);
+static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInteger attempt, NSInteger maxAttempts, CGFloat scrollStep);
+static void scrollToRenamedFileAndAutoClick(NSString *ppName);
+static void simulateTouchOnCell(UIView *cell);
+static void autoClickVisibleCell(NSString *ppName, UIScrollView *listView);
+static void invokeOpenFileMethodOnVC(UIViewController *vc, NSString *fileName, NSString *filePath);
+static NSString * topVCClassName(void);
+static NSString * topVCTitle(void);
+
+// ========== Implementations ==========
+
 static UIViewController * topViewController(void) {
     UIWindow *window = nil;
     if (@available(iOS 13.0, *)) {
@@ -100,20 +135,6 @@ static NSInteger currentNavStackCount(void) {
     return 1;
 }
 
-static NSString * topVCClassName(void) {
-    UIViewController *vc = topViewController();
-    return vc ? NSStringFromClass([vc class]) : @"nil";
-}
-
-static NSString * topVCTitle(void) {
-    UIViewController *vc = topViewController();
-    if (!vc) return @"nil";
-    NSString *title = vc.title;
-    if (!title || title.length == 0) title = vc.navigationItem.title;
-    return title ?: @"nil";
-}
-
-// ========== 编码工具 ==========
 static NSString * strictEncodeURIComponent(NSString *str) {
     if (!str) return @"";
     NSMutableCharacterSet *cs = [NSMutableCharacterSet alphanumericCharacterSet];
@@ -121,7 +142,6 @@ static NSString * strictEncodeURIComponent(NSString *str) {
     return [str stringByAddingPercentEncodingWithAllowedCharacters:cs];
 }
 
-// ========== 网络请求 ==========
 static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *headers, NSString *body, void (^handler)(id json, NSError *err)) {
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
     req.HTTPMethod = method ?: @"GET";
@@ -147,10 +167,11 @@ static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *header
     [task resume];
 }
 
-// ========== Token 检测 ==========
 static NSString * scanMemoryForBdstoken(void) {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSDictionary *allDefaults = [defaults dictionaryRepresentation];
+    NSString *bestToken = nil;
+    NSString *bestKey = nil;
 
     NSArray *preferredKeys = @[@"bdstoken", @"BDSTOKEN", @"token", @"TOKEN",
                                 @"access_token", @"bd_token", @"pan_token", @"panToken",
@@ -164,6 +185,7 @@ static NSString * scanMemoryForBdstoken(void) {
                 if ([hexRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, str.length)] == 1) {
                     NSRegularExpression *letterRegex = [NSRegularExpression regularExpressionWithPattern:@"[a-fA-F]" options:0 error:nil];
                     if ([letterRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, str.length)] > 0) {
+                        DLog(@"Found 32-bit token in preferred key '%@': %@...", key, [str substringToIndex:8]);
                         return str;
                     }
                 }
@@ -187,9 +209,81 @@ static NSString * scanMemoryForBdstoken(void) {
             if ([hexRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, str.length)] == 1) {
                 NSRegularExpression *letterRegex = [NSRegularExpression regularExpressionWithPattern:@"[a-fA-F]" options:0 error:nil];
                 if ([letterRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, str.length)] > 0) {
-                    if (str.length == 32) return str;
+                    if (str.length == 32) {
+                        DLog(@"Found 32-bit token in key '%@': %@...", key, [str substringToIndex:8]);
+                        return str;
+                    }
+                    if (str.length == 16 && !bestToken) {
+                        bestToken = str;
+                        bestKey = key;
+                    }
                 }
             }
+        }
+    }
+    if (bestToken) {
+        DLog(@"Only found 16-bit token in key '%@': %@...", bestKey, [bestToken substringToIndex:8]);
+        return bestToken;
+    }
+    return nil;
+}
+
+static NSString * extractPathFromVC(UIViewController *vc) {
+    if (!vc) return nil;
+    NSArray *pathKeys = @[@"path", @"currentPath", @"filePath", @"dirPath", @"currentDir",
+                          @"_path", @"_currentPath", @"directory", @"folderPath", @"currentFolder",
+                          @"mPath", @"_mPath", @"fileListPath", @"currentDirectory", @"directoryPath",
+                          @"currentDirPath", @"_directory", @"_dirPath"];
+    for (NSString *key in pathKeys) {
+        @try {
+            id value = [vc valueForKey:key];
+            if ([value isKindOfClass:[NSString class]] && [value length] > 0) {
+                NSString *path = (NSString *)value;
+                if (![path hasPrefix:@"/"]) path = [@"/" stringByAppendingString:path];
+                return path;
+            }
+        } @catch (NSException *e) {}
+    }
+    return nil;
+}
+
+static NSString * buildPathFromNavStack(void) {
+    UIViewController *vc = topViewController();
+    if (!vc) return nil;
+    NSString *path = extractPathFromVC(vc);
+    if (path && path.length > 0 && ![path isEqualToString:@"/"]) return path;
+    UINavigationController *nav = nil;
+    if ([vc isKindOfClass:[UINavigationController class]]) {
+        nav = (UINavigationController *)vc;
+    } else if (vc.navigationController) {
+        nav = vc.navigationController;
+    }
+    if (nav) {
+        UIViewController *topVC = nav.topViewController;
+        NSString *topPath = extractPathFromVC(topVC);
+        if (topPath && topPath.length > 0 && ![topPath isEqualToString:@"/"]) return topPath;
+        NSArray *vcs = nav.viewControllers;
+        for (NSInteger i = vcs.count - 1; i >= 0; i--) {
+            NSString *p = extractPathFromVC(vcs[i]);
+            if (p && p.length > 0 && ![p isEqualToString:@"/"]) return p;
+        }
+        NSMutableArray *components = [NSMutableArray array];
+        for (UIViewController *controller in vcs) {
+            NSString *title = controller.title;
+            if (!title || title.length == 0) title = controller.navigationItem.title;
+            if (title && title.length > 0
+                && ![title isEqualToString:@"百度网盘"]
+                && ![title isEqualToString:@"文件"]
+                && ![title isEqualToString:@"首页"]) {
+                if (components.count == 0 || ![components.lastObject isEqualToString:title]) {
+                    [components addObject:title];
+                }
+            }
+        }
+        if (components.count > 0) {
+            NSString *fullPath = [components componentsJoinedByString:@"/"];
+            if (![fullPath hasPrefix:@"/"]) fullPath = [@"/" stringByAppendingString:fullPath];
+            return fullPath;
         }
     }
     return nil;
@@ -201,77 +295,73 @@ static void autoDetectPathAndToken(void) {
     NSArray *tokenKeys = @[@"bdstoken", @"BDSTOKEN", @"token", @"TOKEN", @"access_token", @"bd_token", @"pan_token"];
     for (NSString *key in tokenKeys) {
         gBdstoken = [defaults objectForKey:key];
-        if (gBdstoken) break;
+        if (gBdstoken) { DLog(@"Got bdstoken from key: %@", key); break; }
     }
     if (!gBdstoken) gBdstoken = scanMemoryForBdstoken();
+    if (!gBdstoken) DLog(@"WARNING: No token detected");
     NSHTTPCookieStorage *cookieStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
     for (NSHTTPCookie *cookie in [cookieStorage cookies]) {
-        if ([cookie.name isEqualToString:@"BDUSS"]) { gBDUSS = cookie.value; break; }
+        if ([cookie.name isEqualToString:@"BDUSS"]) { gBDUSS = cookie.value; DLog(@"Got BDUSS from cookie"); break; }
     }
-    if (!gBDUSS) gBDUSS = [defaults objectForKey:@"BDUSS"];
-    gCurrentPath = @"/";
-    UIViewController *vc = topViewController();
-    if (vc) {
-        NSArray *pathKeys = @[@"path", @"currentPath", @"filePath", @"dirPath", @"currentDir",
-                              @"_path", @"_currentPath", @"directory", @"folderPath", @"currentFolder"];
-        for (NSString *key in pathKeys) {
-            @try {
-                id value = [vc valueForKey:key];
-                if ([value isKindOfClass:[NSString class]] && [value length] > 0) {
-                    gCurrentPath = value;
-                    if (![gCurrentPath hasPrefix:@"/"]) gCurrentPath = [@"/" stringByAppendingString:gCurrentPath];
-                    break;
-                }
-            } @catch (NSException *e) {}
-        }
-    }
+    if (!gBDUSS) { gBDUSS = [defaults objectForKey:@"BDUSS"]; if (gBDUSS) DLog(@"Got BDUSS from NSUserDefaults"); }
+    gCurrentPath = buildPathFromNavStack();
+    if (!gCurrentPath) gCurrentPath = @"/";
+    NSString *tokenPreview = gBdstoken ? [gBdstoken substringToIndex:MIN(8, gBdstoken.length)] : @"missing";
+    DLog(@"Path: %@ | Token: %@ | BDUSS: %@", gCurrentPath, tokenPreview, gBDUSS ? @"OK" : @"missing");
 }
 
-// ========== 文件列表 ==========
 static void fetchFileList(void (^completion)(NSArray *files, NSError *err)) {
     if (!gBdstoken) {
-        completion(nil, [NSError errorWithDomain:@"BNDP" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"No token"}]);
+        completion(nil, [NSError errorWithDomain:@"BaiduPanTroll" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"No token detected."}]);
         return;
     }
     NSString *encodedPath = strictEncodeURIComponent(gCurrentPath ?: @"/");
     NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/list?dir=%@&bdstoken=%@&order=time&desc=1&showempty=0&web=1&page=1&num=100", encodedPath, gBdstoken];
+    DLog(@"fetchFileList URL: %@", url);
     bdAsyncRequest(url, @"GET", nil, nil, ^(id json, NSError *err) {
         if (err) { completion(nil, err); return; }
         NSArray *list = json[@"list"];
         if (![list isKindOfClass:[NSArray class]]) {
-            completion(nil, [NSError errorWithDomain:@"BNDP" code:-2 userInfo:@{NSLocalizedDescriptionKey: @"Invalid response"}]);
+            completion(nil, [NSError errorWithDomain:@"BaiduPanTroll" code:-2 userInfo:@{NSLocalizedDescriptionKey: @"Invalid response"}]);
             return;
         }
         completion(list, nil);
     });
 }
 
-// ========== 重命名 ==========
 static void renameFile(NSString *fileId, NSString *path, NSString *newName, void (^completion)(BOOL success, NSError *err)) {
     if (!gBdstoken) {
-        completion(NO, [NSError errorWithDomain:@"BNDP" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"No token"}]);
+        completion(NO, [NSError errorWithDomain:@"BaiduPanTroll" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"No token"}]);
         return;
     }
     NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/filemanager?async=2&onnest=fail&opera=rename&clienttype=0&app_id=250528&web=1&bdstoken=%@", gBdstoken];
     NSString *filelist = [NSString stringWithFormat:@"[{\"id\":%@,\"path\":\"%@\",\"newname\":\"%@\"}]", fileId, path, newName];
     NSString *body = [NSString stringWithFormat:@"filelist=%@", strictEncodeURIComponent(filelist)];
+    DLog(@"RENAME body: %@", body);
+    DLog(@"RENAME filelist raw: %@", filelist);
     NSDictionary *headers = @{
         @"Content-Type": @"application/x-www-form-urlencoded; charset=UTF-8",
         @"X-Requested-With": @"XMLHttpRequest"
     };
     bdAsyncRequest(url, @"POST", headers, body, ^(id json, NSError *err) {
-        if (err) { completion(NO, err); return; }
+        if (err) {
+            DLog(@"RENAME network error: %@", err);
+            completion(NO, err);
+            return;
+        }
+        DLog(@"RENAME response: %@", json);
         NSNumber *errnoNum = json[@"errno"];
         if (errnoNum && [errnoNum integerValue] == 0) {
             completion(YES, nil);
         } else {
             NSString *msg = json[@"show_msg"] ?: json[@"errmsg"] ?: @"Unknown error";
-            completion(NO, [NSError errorWithDomain:@"BNDP" code:[errnoNum integerValue] userInfo:@{NSLocalizedDescriptionKey: msg}]);
+            NSString *fullErr = [NSString stringWithFormat:@"errno=%@ | %@", errnoNum ?: @"nil", msg];
+            DLog(@"RENAME failed: %@", fullErr);
+            completion(NO, [NSError errorWithDomain:@"BaiduPanTroll" code:[errnoNum integerValue] userInfo:@{NSLocalizedDescriptionKey: fullErr}]);
         }
     });
 }
 
-// ========== Toast ==========
 static void showToast(NSString *msg) {
     UIWindow *window = nil;
     if (@available(iOS 13.0, *)) {
@@ -301,26 +391,186 @@ static void showToast(NSString *msg) {
     [window addSubview:toast];
     toast.alpha = 0;
     [UIView animateWithDuration:0.3 animations:^{ toast.alpha = 1; }];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [UIView animateWithDuration:0.3 animations:^{ toast.alpha = 0; } completion:^(BOOL finished) { [toast removeFromSuperview]; }];
     });
 }
 
-// ========== 刷新文件列表（后台无感） ==========
-static void forceRefreshFileList(void) {
-    UIViewController *vc = topViewController();
-    if (!vc) return;
+// ========== Refresh mechanism ==========
 
-    // 1. 尝试调用 VC 的刷新方法
-    NSArray *refreshSelectors = @[
+static UIScrollView * findScrollViewInView(UIView *view) {
+    if ([view isKindOfClass:[UIScrollView class]]) return (UIScrollView *)view;
+    for (UIView *subview in view.subviews) {
+        UIScrollView *found = findScrollViewInView(subview);
+        if (found) return found;
+    }
+    return nil;
+}
+
+static void triggerMJRefresh(id headerOrFooter) {
+    if (!headerOrFooter) return;
+    SEL beginSel = NSSelectorFromString(@"beginRefreshing");
+    SEL executeSel = NSSelectorFromString(@"executeRefreshingCallback");
+    if ([headerOrFooter respondsToSelector:beginSel]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        [headerOrFooter performSelector:beginSel];
+        #pragma clang diagnostic pop
+    }
+    if ([headerOrFooter respondsToSelector:executeSel]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        [headerOrFooter performSelector:executeSel];
+        #pragma clang diagnostic pop
+    }
+}
+
+static void triggerNotificationFallback(void) {
+    NSArray *notifNames = @[
+        @"BDPanRefreshFileListNotification",
+        @"BDPanReloadFileListNotification",
+        @"kRefreshFileListNotification",
+        @"kReloadDataNotification",
+        @"RefreshFileListNotification",
+        @"com.baidu.pan.refreshFileList",
+        @"BDPanFileListDidChangeNotification",
+        @"BDPanFileListNeedRefreshNotification"
+    ];
+    for (NSString *name in notifNames) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:name object:nil userInfo:@{@"path": gCurrentPath ?: @"/"}];
+    }
+}
+
+static void triggerEGORefresh(UIView *subview, UIScrollView *scrollView) {
+    SEL egoScrollSel = NSSelectorFromString(@"egoRefreshScrollViewDidScroll:");
+    SEL egoDragSel = NSSelectorFromString(@"egoRefreshScrollViewDidEndDragging:");
+    if ([subview respondsToSelector:egoScrollSel]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        [subview performSelector:egoScrollSel withObject:scrollView];
+        if ([subview respondsToSelector:egoDragSel]) {
+            [subview performSelector:egoDragSel withObject:scrollView];
+        }
+        #pragma clang diagnostic pop
+    }
+}
+
+static void triggerBDWalletRefresh(UIView *subview, UIScrollView *scrollView) {
+    SEL bdScrollSel = NSSelectorFromString(@"BDWalletRefreshScrollViewDidScroll:");
+    SEL bdDragSel = NSSelectorFromString(@"BDWalletRefreshScrollViewDidEndDragging:");
+    if ([subview respondsToSelector:bdScrollSel]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        [subview performSelector:bdScrollSel withObject:scrollView];
+        if ([subview respondsToSelector:bdDragSel]) {
+            [subview performSelector:bdDragSel withObject:scrollView];
+        }
+        #pragma clang diagnostic pop
+    }
+}
+
+static void simulatePullToRefreshOnScrollView(UIScrollView *scrollView) {
+    if (!scrollView) return;
+    DLog(@"Simulating pull-to-refresh gesture");
+    CGPoint originalOffset = scrollView.contentOffset;
+    SEL willBeginDragging = @selector(scrollViewWillBeginDragging:);
+    if (scrollView.delegate && [scrollView.delegate respondsToSelector:willBeginDragging]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        [scrollView.delegate performSelector:willBeginDragging withObject:scrollView];
+        #pragma clang diagnostic pop
+    }
+    [scrollView setContentOffset:CGPointMake(originalOffset.x, -150) animated:NO];
+    SEL didScroll = @selector(scrollViewDidScroll:);
+    if (scrollView.delegate && [scrollView.delegate respondsToSelector:didScroll]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        [scrollView.delegate performSelector:didScroll withObject:scrollView];
+        #pragma clang diagnostic pop
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        SEL didEndDragging = @selector(scrollViewDidEndDragging:willDecelerate:);
+        if (scrollView.delegate && [scrollView.delegate respondsToSelector:didEndDragging]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [scrollView.delegate performSelector:didEndDragging withObject:scrollView withObject:@(NO)];
+            #pragma clang diagnostic pop
+        }
+        SEL didEndDecelerating = @selector(scrollViewDidEndDecelerating:);
+        if (scrollView.delegate && [scrollView.delegate respondsToSelector:didEndDecelerating]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [scrollView.delegate performSelector:didEndDecelerating withObject:scrollView];
+            #pragma clang diagnostic pop
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [UIView animateWithDuration:0.3 animations:^{
+                scrollView.contentOffset = originalOffset;
+            }];
+        });
+    });
+}
+
+static void tryRefreshOnScrollView(UIScrollView *scrollView) {
+    if (!scrollView) return;
+    if (scrollView.refreshControl) {
+        DLog(@"Triggering UIRefreshControl");
+        [scrollView.refreshControl beginRefreshing];
+        CGPoint offset = scrollView.contentOffset;
+        [UIView animateWithDuration:0.25 animations:^{
+            scrollView.contentOffset = CGPointMake(offset.x, -scrollView.refreshControl.frame.size.height);
+        }];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [scrollView.refreshControl endRefreshing];
+        });
+        return;
+    }
+    id mjHeader = nil;
+    id mjFooter = nil;
+    @try {
+        mjHeader = [scrollView valueForKey:@"mj_header"];
+        mjFooter = [scrollView valueForKey:@"mj_footer"];
+    } @catch (NSException *e) {}
+    if (mjHeader) { triggerMJRefresh(mjHeader); return; }
+    if (mjFooter) { triggerMJRefresh(mjFooter); return; }
+    simulatePullToRefreshOnScrollView(scrollView);
+    for (UIView *subview in scrollView.subviews) {
+        NSString *className = NSStringFromClass([subview class]);
+        if ([className containsString:@"RefreshHeader"] ||
+            [className containsString:@"EGORefresh"] ||
+            [className containsString:@"BDWalletRefresh"] ||
+            [className containsString:@"BDPanRefresh"] ||
+            [className containsString:@"RadarRefresh"] ||
+            [className containsString:@"DimeCircleRefresh"]) {
+            DLog(@"Found refresh component: %@", className);
+            if ([subview respondsToSelector:@selector(beginRefreshing)]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                [subview performSelector:@selector(beginRefreshing)];
+                #pragma clang diagnostic pop
+                return;
+            }
+            triggerEGORefresh(subview, scrollView);
+            triggerBDWalletRefresh(subview, scrollView);
+        }
+    }
+}
+
+static void refreshVC(UIViewController *vc) {
+    if (!vc) return;
+    NSArray *baiduSelectors = @[
         @"refreshFileList", @"reloadFileList", @"updateFileList",
         @"refreshData", @"reloadData", @"updateData",
+        @"refreshContent", @"reloadContent", @"updateContent",
         @"requestFileList", @"fetchFileList", @"loadFileList",
-        @"refresh", @"reload", @"update", @"requestData", @"loadData"
+        @"beginRefreshing", @"beginRefresh:",
+        @"refresh", @"reload", @"update",
+        @"requestData", @"loadData", @"fetchData"
     ];
-    for (NSString *selName in refreshSelectors) {
+    for (NSString *selName in baiduSelectors) {
         SEL sel = NSSelectorFromString(selName);
         if ([vc respondsToSelector:sel]) {
+            DLog(@"Calling VC refresh method: %@ on %@", selName, NSStringFromClass([vc class]));
             #pragma clang diagnostic push
             #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
             [vc performSelector:sel];
@@ -328,67 +578,42 @@ static void forceRefreshFileList(void) {
             return;
         }
     }
-
-    // 2. 查找 TableView/CollectionView 直接 reload
-    UIScrollView *listView = nil;
-    for (UIView *sub in vc.view.subviews) {
-        if ([sub isKindOfClass:[UITableView class]] || [sub isKindOfClass:[UICollectionView class]]) {
-            listView = (UIScrollView *)sub;
-            break;
-        }
+    if ([vc.view isKindOfClass:[UITableView class]]) {
+        [(UITableView *)vc.view reloadData];
+        return;
     }
-    if (!listView) {
-        // 递归查找
-        NSMutableArray *queue = [NSMutableArray arrayWithArray:vc.view.subviews];
-        while ([queue count] > 0) {
-            UIView *v = [queue objectAtIndex:0];
-            [queue removeObjectAtIndex:0];
-            if ([v isKindOfClass:[UITableView class]] || [v isKindOfClass:[UICollectionView class]]) {
-                listView = (UIScrollView *)v;
-                break;
-            }
-            [queue addObjectsFromArray:v.subviews];
-        }
+    if ([vc.view isKindOfClass:[UICollectionView class]]) {
+        [(UICollectionView *)vc.view reloadData];
+        return;
     }
-    if ([listView isKindOfClass:[UITableView class]]) {
-        [(UITableView *)listView reloadData];
-    } else if ([listView isKindOfClass:[UICollectionView class]]) {
-        [(UICollectionView *)listView reloadData];
+    UIScrollView *sv = findScrollViewInView(vc.view);
+    if (sv) {
+        tryRefreshOnScrollView(sv);
+        return;
     }
-
-    // 3. 发送通知作为兜底
-    NSArray *notifNames = @[
-        @"BDPanRefreshFileListNotification",
-        @"BDPanReloadFileListNotification",
-        @"kRefreshFileListNotification",
-        @"RefreshFileListNotification"
-    ];
-    for (NSString *name in notifNames) {
-        [[NSNotificationCenter defaultCenter] postNotificationName:name object:nil userInfo:@{@"path": gCurrentPath ?: @"/"}];
+    if ([vc isKindOfClass:[UINavigationController class]]) {
+        for (UIViewController *child in [(UINavigationController *)vc viewControllers]) refreshVC(child);
+    } else if ([vc isKindOfClass:[UITabBarController class]]) {
+        for (UIViewController *child in [(UITabBarController *)vc viewControllers]) refreshVC(child);
+    } else if ([vc isKindOfClass:[UISplitViewController class]]) {
+        for (UIViewController *child in [(UISplitViewController *)vc viewControllers]) refreshVC(child);
     }
+    refreshVC(vc.presentedViewController);
 }
 
-// ========== 查找列表视图 ==========
-static UIScrollView * findListViewInVC(UIViewController *vc) {
-    if (!vc) return nil;
-    for (UIView *sub in vc.view.subviews) {
-        if ([sub isKindOfClass:[UITableView class]] || [sub isKindOfClass:[UICollectionView class]]) {
-            return (UIScrollView *)sub;
+static void forceRefreshFileList(void) {
+    UIViewController *vc = topViewController();
+    if (!vc) { DLog(@"No top VC for refresh"); return; }
+    DLog(@"Attempting refresh on top VC: %@", NSStringFromClass([vc class]));
+    refreshVC(vc);
+    for (UIWindow *window in [[UIApplication sharedApplication] windows]) {
+        if (window.rootViewController && window.rootViewController != vc) {
+            refreshVC(window.rootViewController);
         }
     }
-    NSMutableArray *queue = [NSMutableArray arrayWithArray:vc.view.subviews];
-    while ([queue count] > 0) {
-        UIView *v = [queue objectAtIndex:0];
-        [queue removeObjectAtIndex:0];
-        if ([v isKindOfClass:[UITableView class]] || [v isKindOfClass:[UICollectionView class]]) {
-            return (UIScrollView *)v;
-        }
-        [queue addObjectsFromArray:v.subviews];
-    }
-    return nil;
+    triggerNotificationFallback();
 }
 
-// ========== 查找 cell 包含指定文本 ==========
 static BOOL viewContainsText(UIView *view, NSString *text) {
     if (!view || !text) return NO;
     if ([view isKindOfClass:[UILabel class]]) {
@@ -405,249 +630,379 @@ static BOOL viewContainsText(UIView *view, NSString *text) {
     return NO;
 }
 
-// ========== 在 TableView 中搜索文件 ==========
+// ========== v10.28 Auto-click helpers ==========
+
+static UIScrollView * findListViewInHierarchy(UIView *root) {
+    if (!root) return nil;
+    if ([root isKindOfClass:[UITableView class]] || [root isKindOfClass:[UICollectionView class]]) {
+        return (UIScrollView *)root;
+    }
+    for (UIView *sub in root.subviews) {
+        UIScrollView *found = findListViewInHierarchy(sub);
+        if (found) return found;
+    }
+    return nil;
+}
+
+static UIScrollView * findListViewGlobally(void) {
+    UIViewController *vc = topViewController();
+    if (vc) {
+        UIScrollView *found = findListViewInHierarchy(vc.view);
+        if (found) return found;
+    }
+    for (UIWindow *window in [[UIApplication sharedApplication] windows]) {
+        UIScrollView *found = findListViewInHierarchy(window);
+        if (found) return found;
+    }
+    return nil;
+}
+
 static NSIndexPath * searchFileInTableView(NSString *targetName, UITableView *tv) {
     if (!targetName || !tv) return nil;
     NSInteger totalSections = 1;
     @try { totalSections = [tv numberOfSections]; } @catch (NSException *e) {}
+
     for (NSInteger section = 0; section < totalSections; section++) {
         NSInteger rows = 0;
         @try { rows = [tv numberOfRowsInSection:section]; } @catch (NSException *e) {}
+
         for (NSInteger row = rows - 1; row >= 0; row--) {
             NSIndexPath *ip = [NSIndexPath indexPathForRow:row inSection:section];
             @try {
                 UITableViewCell *cell = [tv cellForRowAtIndexPath:ip];
-                if (cell && viewContainsText(cell, targetName)) return ip;
+                if (!cell) continue;
+                if (viewContainsText(cell, targetName)) {
+                    DLog(@"Found cell at row %ld, section %ld", (long)row, (long)section);
+                    return ip;
+                }
             } @catch (NSException *e) {}
         }
     }
     return nil;
 }
 
-// ========== 在 CollectionView 中搜索文件 ==========
 static NSIndexPath * searchFileInCollectionView(NSString *targetName, UICollectionView *cv) {
     if (!targetName || !cv) return nil;
     NSInteger totalSections = 1;
     @try { totalSections = [cv numberOfSections]; } @catch (NSException *e) {}
+
     for (NSInteger section = 0; section < totalSections; section++) {
         NSInteger items = 0;
         @try { items = [cv numberOfItemsInSection:section]; } @catch (NSException *e) {}
+
         for (NSInteger item = items - 1; item >= 0; item--) {
             NSIndexPath *ip = [NSIndexPath indexPathForItem:item inSection:section];
             @try {
                 UICollectionViewCell *cell = [cv cellForItemAtIndexPath:ip];
-                if (cell && viewContainsText(cell, targetName)) return ip;
+                if (!cell) continue;
+                if (viewContainsText(cell, targetName)) {
+                    DLog(@"Found collection cell at item %ld, section %ld", (long)item, (long)section);
+                    return ip;
+                }
             } @catch (NSException *e) {}
         }
     }
     return nil;
 }
 
-// ========== 核心：后台无感打开文件 ==========
-static void openFileWithoutUserSeeing(NSString *targetName) {
-    if (!targetName) return;
-    DLog(@"Opening file without user seeing: %@", targetName);
+// v10.28: Simulate real touch events on a VISIBLE cell
+static void simulateTouchOnCell(UIView *cell) {
+    if (!cell) return;
+    DLog(@"Simulating touch on visible cell: %@", NSStringFromClass([cell class]));
 
-    UIViewController *vc = topViewController();
-    if (!vc) { DLog(@"No top VC"); return; }
-
-    UIScrollView *listView = findListViewInVC(vc);
-    if (!listView) { DLog(@"No list view found"); return; }
-
-    // 1. 先尝试直接查找（文件可能已在可见区域）
-    NSIndexPath *foundPath = nil;
-    if ([listView isKindOfClass:[UITableView class]]) {
-        foundPath = searchFileInTableView(targetName, (UITableView *)listView);
-    } else if ([listView isKindOfClass:[UICollectionView class]]) {
-        foundPath = searchFileInCollectionView(targetName, (UICollectionView *)listView);
+    // Method 1: If cell is a UIControl, send action directly
+    if ([cell isKindOfClass:[UIControl class]]) {
+        UIControl *control = (UIControl *)cell;
+        [control sendActionsForControlEvents:UIControlEventTouchUpInside];
+        DLog(@"Sent UIControl action");
     }
 
-    // 2. 如果没找到，瞬间滚动到顶部再查找
-    if (!foundPath) {
-        DLog(@"File not visible, instant scroll to top");
-        [listView setContentOffset:CGPointZero animated:NO];
-
-        // 强制刷新数据
-        if ([listView isKindOfClass:[UITableView class]]) {
-            [(UITableView *)listView reloadData];
-        } else if ([listView isKindOfClass:[UICollectionView class]]) {
-            [(UICollectionView *)listView reloadData];
-        }
-
-        // 等待一帧让 cell 渲染
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            NSIndexPath *ip = nil;
-            if ([listView isKindOfClass:[UITableView class]]) {
-                ip = searchFileInTableView(targetName, (UITableView *)listView);
-            } else if ([listView isKindOfClass:[UICollectionView class]]) {
-                ip = searchFileInCollectionView(targetName, (UICollectionView *)listView);
+    // Method 2: Trigger tap gesture recognizers on the cell
+    for (UIGestureRecognizer *gr in cell.gestureRecognizers) {
+        if ([gr isKindOfClass:[UITapGestureRecognizer class]]) {
+            DLog(@"Triggering tap gesture on cell");
+            @try {
+                // Use performSelector to bypass nonnull check
+                SEL sel = NSSelectorFromString(@"_touchesEnded:withEvent:");
+                if ([gr respondsToSelector:sel]) {
+                    #pragma clang diagnostic push
+                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                    [gr performSelector:sel withObject:[NSSet set] withObject:nil];
+                    #pragma clang diagnostic pop
+                }
+            } @catch (NSException *e) {
+                DLog(@"Gesture trigger failed: %@", e);
             }
+        }
+    }
 
-            if (ip) {
-                DLog(@"Found after reload, selecting...");
-                // 瞬间滚动到该位置（无动画）
-                if ([listView isKindOfClass:[UITableView class]]) {
-                    [(UITableView *)listView scrollToRowAtIndexPath:ip atScrollPosition:UITableViewScrollPositionMiddle animated:NO];
-                    // 直接调用 delegate
-                    id delegate = [(UITableView *)listView delegate];
-                    SEL sel = @selector(tableView:didSelectRowAtIndexPath:);
-                    if (delegate && [delegate respondsToSelector:sel]) {
+    // Method 3: Try to use cell's target-action mechanism
+    @try {
+        // Look for any buttons inside the cell and trigger them
+        for (UIView *sub in cell.subviews) {
+            if ([sub isKindOfClass:[UIButton class]]) {
+                UIButton *btn = (UIButton *)sub;
+                [btn sendActionsForControlEvents:UIControlEventTouchUpInside];
+                DLog(@"Triggered button inside cell");
+            }
+        }
+    } @catch (NSException *e) {}
+
+    // Method 4: Post a tap notification to the cell's window
+    @try {
+        CGPoint center = CGPointMake(cell.bounds.size.width / 2.0, cell.bounds.size.height / 2.0);
+        CGPoint windowPoint = [cell convertPoint:center toView:nil];
+        // Use UIApplication to send action
+        [[UIApplication sharedApplication] sendAction:@selector(touchesEnded:withEvent:) to:cell from:nil forEvent:nil];
+        DLog(@"Sent action via UIApplication");
+    } @catch (NSException *e) {}
+}
+
+// v10.28: Auto-click after ensuring cell is VISIBLE
+static void autoClickVisibleCell(NSString *ppName, UIScrollView *listView) {
+    if (!ppName || !listView) return;
+
+    NSIndexPath *foundPath = nil;
+    if ([listView isKindOfClass:[UITableView class]]) {
+        foundPath = searchFileInTableView(ppName, (UITableView *)listView);
+    } else if ([listView isKindOfClass:[UICollectionView class]]) {
+        foundPath = searchFileInCollectionView(ppName, (UICollectionView *)listView);
+    }
+
+    if (!foundPath) {
+        DLog(@"Cell still not visible after scroll, will retry...");
+        return;
+    }
+
+    // Get the ACTUAL visible cell
+    UIView *visibleCell = nil;
+    if ([listView isKindOfClass:[UITableView class]]) {
+        visibleCell = [(UITableView *)listView cellForRowAtIndexPath:foundPath];
+    } else if ([listView isKindOfClass:[UICollectionView class]]) {
+        visibleCell = [(UICollectionView *)listView cellForItemAtIndexPath:foundPath];
+    }
+
+    if (!visibleCell) {
+        DLog(@"Cell at path %@ is not visible (returns nil), cannot click", foundPath);
+        return;
+    }
+
+    DLog(@"Cell is VISIBLE, proceeding with auto-click");
+    showToast(@"正在自动打开文件...");
+
+    // Method A: Call delegate didSelect
+    id delegate = nil;
+    if ([listView isKindOfClass:[UITableView class]]) {
+        delegate = [(UITableView *)listView delegate];
+        SEL didSelect = @selector(tableView:didSelectRowAtIndexPath:);
+        if (delegate && [delegate respondsToSelector:didSelect]) {
+            DLog(@"Calling tableView:didSelectRowAtIndexPath:");
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [delegate performSelector:didSelect withObject:listView withObject:foundPath];
+            #pragma clang diagnostic pop
+        }
+    } else if ([listView isKindOfClass:[UICollectionView class]]) {
+        delegate = [(UICollectionView *)listView delegate];
+        SEL didSelect = @selector(collectionView:didSelectItemAtIndexPath:);
+        if (delegate && [delegate respondsToSelector:didSelect]) {
+            DLog(@"Calling collectionView:didSelectItemAtIndexPath:");
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [delegate performSelector:didSelect withObject:listView withObject:foundPath];
+            #pragma clang diagnostic pop
+        }
+    }
+
+    // Method B: Simulate real touch on the visible cell (more reliable)
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        simulateTouchOnCell(visibleCell);
+    });
+
+    // Method C: Try to find the file list VC and call its open method directly
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIViewController *vc = topViewController();
+        invokeOpenFileMethodOnVC(vc, ppName, gPendingRestorePdfPath);
+    });
+}
+
+// v10.28: Try to invoke internal open file methods on the VC
+static void invokeOpenFileMethodOnVC(UIViewController *vc, NSString *fileName, NSString *filePath) {
+    if (!vc) return;
+
+    NSArray *possibleSelectors = @[
+        @"openFile:", @"openFileWithId:", @"previewFile:", @"previewFileWithPath:",
+        @"didSelectFile:", @"handleFileTap:", @"fileCellClicked:", @"enterFileDetail:",
+        @"showFilePreview:", @"presentFileViewer:", @"routeToFileDetail:",
+        @"openDocument:", @"previewDocument:", @"showPreviewForFile:",
+        @"handleCellTap:", @"didTapFile:", @"onFileSelected:",
+        @"pushFileDetail:", @"presentFileDetail:", @"showFileDetail:"
+    ];
+
+    for (NSString *selName in possibleSelectors) {
+        SEL sel = NSSelectorFromString(selName);
+        if ([vc respondsToSelector:sel]) {
+            DLog(@"Found open file method: %@ on %@", selName, NSStringFromClass([vc class]));
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            // Try with fileName first, then filePath
+            @try {
+                [vc performSelector:sel withObject:fileName];
+                DLog(@"Called %@ with fileName", selName);
+                return;
+            } @catch (NSException *e) {
+                @try {
+                    [vc performSelector:sel withObject:filePath];
+                    DLog(@"Called %@ with filePath", selName);
+                    return;
+                } @catch (NSException *e2) {}
+            }
+            #pragma clang diagnostic pop
+        }
+    }
+
+    // Try to find file info in VC's properties and call methods with that
+    NSArray *filePropKeys = @[@"selectedFile", @"currentFile", @"fileItem", @"fileModel",
+                               @"selectedItem", @"currentItem", @"fileInfo", @"document"];
+    for (NSString *key in filePropKeys) {
+        @try {
+            id fileObj = [vc valueForKey:key];
+            if (fileObj) {
+                for (NSString *selName in possibleSelectors) {
+                    SEL sel = NSSelectorFromString(selName);
+                    if ([vc respondsToSelector:sel]) {
+                        DLog(@"Calling %@ with %@ object", selName, key);
                         #pragma clang diagnostic push
                         #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                        [delegate performSelector:sel withObject:listView withObject:ip];
+                        [vc performSelector:sel withObject:fileObj];
                         #pragma clang diagnostic pop
-                    }
-                } else if ([listView isKindOfClass:[UICollectionView class]]) {
-                    [(UICollectionView *)listView scrollToItemAtIndexPath:ip atScrollPosition:UICollectionViewScrollPositionCenteredVertically animated:NO];
-                    id delegate = [(UICollectionView *)listView delegate];
-                    SEL sel = @selector(collectionView:didSelectItemAtIndexPath:);
-                    if (delegate && [delegate respondsToSelector:sel]) {
-                        #pragma clang diagnostic push
-                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                        [delegate performSelector:sel withObject:listView withObject:ip];
-                        #pragma clang diagnostic pop
+                        return;
                     }
                 }
-            } else {
-                // 3. 如果还是没找到，逐个区域滚动查找（仍然无动画）
-                DLog(@"Not found after reload, scanning all sections...");
-                scanAllSectionsAndOpen(targetName, listView, 0);
             }
+        } @catch (NSException *e) {}
+    }
+
+    DLog(@"No internal open file method found on %@", NSStringFromClass([vc class]));
+}
+
+static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInteger attempt, NSInteger maxAttempts, CGFloat scrollStep) {
+    if (attempt >= maxAttempts) {
+        DLog(@"Max scroll attempts reached");
+        showToast(@"未找到文件，请手动查找");
+        return;
+    }
+
+    CGFloat currentY = listView.contentOffset.y;
+    CGFloat targetY = currentY + scrollStep;
+    CGFloat maxY = listView.contentSize.height - listView.bounds.size.height;
+    if (maxY < 0) maxY = 0;
+    if (targetY > maxY) targetY = maxY;
+
+    DLog(@"Scroll attempt %ld: %.0f -> %.0f (max %.0f)", (long)attempt, currentY, targetY, maxY);
+
+    if (targetY <= currentY && attempt > 0) {
+        DLog(@"Already at bottom, stopping scroll");
+        showToast(@"已滚动到底部，未找到文件");
+        return;
+    }
+
+    [UIView animateWithDuration:0.2 animations:^{
+        listView.contentOffset = CGPointMake(0, targetY);
+    }];
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        // After scroll + wait, try to auto-click if cell is now visible
+        autoClickVisibleCell(ppName, listView);
+
+        // Check if we found it
+        NSIndexPath *foundPath = nil;
+        if ([listView isKindOfClass:[UITableView class]]) {
+            foundPath = searchFileInTableView(ppName, (UITableView *)listView);
+        } else if ([listView isKindOfClass:[UICollectionView class]]) {
+            foundPath = searchFileInCollectionView(ppName, (UICollectionView *)listView);
+        }
+
+        if (foundPath) {
+            DLog(@"File found at attempt %ld, cell should be visible now", (long)attempt);
+            // Cell found and should be visible, autoClickVisibleCell already tried
+            // But let's retry once more after a bit more time for rendering
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                autoClickVisibleCell(ppName, listView);
+            });
+            return;
+        }
+
+        if (targetY >= maxY && maxY >= 0) {
+            showToast(@"已滚动到底部，未找到文件");
+            return;
+        }
+
+        showToast([NSString stringWithFormat:@"继续查找... (%ld/%ld)", (long)(attempt + 1), (long)maxAttempts]);
+        performScrollAttempt(ppName, listView, attempt + 1, maxAttempts, scrollStep);
+    });
+}
+
+// v10.28: Scroll to file AND auto-click when visible
+static void scrollToRenamedFileAndAutoClick(NSString *ppName) {
+    if (!ppName) return;
+    DLog(@"v10.28 Scrolling to file and auto-click: %@", ppName);
+
+    UIScrollView *listView = findListViewGlobally();
+    if (!listView) {
+        DLog(@"No list view found globally");
+        showToast(@"未找到文件列表");
+        return;
+    }
+    DLog(@"Found list view: %@", NSStringFromClass([listView class]));
+
+    // First try: check if already visible
+    NSIndexPath *foundPath = nil;
+    if ([listView isKindOfClass:[UITableView class]]) {
+        foundPath = searchFileInTableView(ppName, (UITableView *)listView);
+    } else if ([listView isKindOfClass:[UICollectionView class]]) {
+        foundPath = searchFileInCollectionView(ppName, (UICollectionView *)listView);
+    }
+
+    if (foundPath) {
+        DLog(@"File already visible, scrolling to position and auto-clicking...");
+        if ([listView isKindOfClass:[UITableView class]]) {
+            [(UITableView *)listView scrollToRowAtIndexPath:foundPath atScrollPosition:UITableViewScrollPositionMiddle animated:YES];
+        } else if ([listView isKindOfClass:[UICollectionView class]]) {
+            [(UICollectionView *)listView scrollToItemAtIndexPath:foundPath atScrollPosition:UICollectionViewScrollPositionCenteredVertically animated:YES];
+        }
+        // Wait for scroll animation + cell render, then auto-click
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            autoClickVisibleCell(ppName, listView);
         });
         return;
     }
 
-    // 文件已可见，直接打开
-    DLog(@"File already visible, selecting directly");
-    if ([listView isKindOfClass:[UITableView class]]) {
-        [(UITableView *)listView scrollToRowAtIndexPath:foundPath atScrollPosition:UITableViewScrollPositionMiddle animated:NO];
-        id delegate = [(UITableView *)listView delegate];
-        SEL sel = @selector(tableView:didSelectRowAtIndexPath:);
-        if (delegate && [delegate respondsToSelector:sel]) {
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            [delegate performSelector:sel withObject:listView withObject:foundPath];
-            #pragma clang diagnostic pop
-        }
-    } else if ([listView isKindOfClass:[UICollectionView class]]) {
-        [(UICollectionView *)listView scrollToItemAtIndexPath:foundPath atScrollPosition:UICollectionViewScrollPositionCenteredVertically animated:NO];
-        id delegate = [(UICollectionView *)listView delegate];
-        SEL sel = @selector(collectionView:didSelectItemAtIndexPath:);
-        if (delegate && [delegate respondsToSelector:sel]) {
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            [delegate performSelector:sel withObject:listView withObject:foundPath];
-            #pragma clang diagnostic pop
-        }
-    }
-}
+    DLog(@"File not visible, starting scroll search...");
+    showToast(@"正在查找并自动打开文件...");
 
-// 逐个区域扫描（无动画）
-static void scanAllSectionsAndOpen(NSString *targetName, UIScrollView *listView, NSInteger section) {
-    if (!targetName || !listView) return;
+    [listView setContentOffset:CGPointZero animated:YES];
 
-    NSInteger totalSections = 1;
-    if ([listView isKindOfClass:[UITableView class]]) {
-        @try { totalSections = [(UITableView *)listView numberOfSections]; } @catch (NSException *e) {}
-    } else if ([listView isKindOfClass:[UICollectionView class]]) {
-        @try { totalSections = [(UICollectionView *)listView numberOfSections]; } @catch (NSException *e) {}
-    }
-
-    if (section >= totalSections) {
-        DLog(@"Scanned all sections, file not found");
-        showToast(@"未找到文件，请手动打开");
-        return;
-    }
-
-    NSInteger totalItems = 0;
-    if ([listView isKindOfClass:[UITableView class]]) {
-        @try { totalItems = [(UITableView *)listView numberOfRowsInSection:section]; } @catch (NSException *e) {}
-    } else if ([listView isKindOfClass:[UICollectionView class]]) {
-        @try { totalItems = [(UICollectionView *)listView numberOfItemsInSection:section]; } @catch (NSException *e) {}
-    }
-
-    // 计算该 section 的滚动位置
-    CGFloat scrollY = 0;
-    if ([listView isKindOfClass:[UITableView class]]) {
-        @try {
-            NSIndexPath *firstIP = [NSIndexPath indexPathForRow:0 inSection:section];
-            scrollY = [(UITableView *)listView rectForRowAtIndexPath:firstIP].origin.y;
-        } @catch (NSException *e) {}
-    } else if ([listView isKindOfClass:[UICollectionView class]]) {
-        @try {
-            NSIndexPath *firstIP = [NSIndexPath indexPathForItem:0 inSection:section];
-            scrollY = [(UICollectionView *)listView layoutAttributesForItemAtIndexPath:firstIP].frame.origin.y;
-        } @catch (NSException *e) {}
-    }
-
-    [listView setContentOffset:CGPointMake(0, scrollY) animated:NO];
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        NSIndexPath *ip = nil;
-        if ([listView isKindOfClass:[UITableView class]]) {
-            ip = searchFileInTableView(targetName, (UITableView *)listView);
-        } else if ([listView isKindOfClass:[UICollectionView class]]) {
-            ip = searchFileInCollectionView(targetName, (UICollectionView *)listView);
-        }
-
-        if (ip) {
-            DLog(@"Found in section %ld, opening...", (long)section);
-            if ([listView isKindOfClass:[UITableView class]]) {
-                [(UITableView *)listView scrollToRowAtIndexPath:ip atScrollPosition:UITableViewScrollPositionMiddle animated:NO];
-                id delegate = [(UITableView *)listView delegate];
-                SEL sel = @selector(tableView:didSelectRowAtIndexPath:);
-                if (delegate && [delegate respondsToSelector:sel]) {
-                    #pragma clang diagnostic push
-                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                    [delegate performSelector:sel withObject:listView withObject:ip];
-                    #pragma clang diagnostic pop
-                }
-            } else if ([listView isKindOfClass:[UICollectionView class]]) {
-                [(UICollectionView *)listView scrollToItemAtIndexPath:ip atScrollPosition:UICollectionViewScrollPositionCenteredVertically animated:NO];
-                id delegate = [(UICollectionView *)listView delegate];
-                SEL sel = @selector(collectionView:didSelectItemAtIndexPath:);
-                if (delegate && [delegate respondsToSelector:sel]) {
-                    #pragma clang diagnostic push
-                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                    [delegate performSelector:sel withObject:listView withObject:ip];
-                    #pragma clang diagnostic pop
-                }
-            }
-            return;
-        }
-
-        scanAllSectionsAndOpen(targetName, listView, section + 1);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        CGFloat scrollStep = listView.bounds.size.height * 0.7;
+        if (scrollStep < 100) scrollStep = 100;
+        performScrollAttempt(ppName, listView, 0, 15, scrollStep);
     });
 }
 
-// ========== 检测文件是否已打开 ==========
-static void checkIfFileOpened(void) {
-    if (!gIsWaitingForTap) return;
+// ========== Tap Detection (Two-Phase) ==========
 
-    NSInteger currentCount = currentNavStackCount();
-    NSString *currentClass = topVCClassName();
-    NSString *currentTitle = topVCTitle();
+static NSString * topVCClassName(void) {
+    UIViewController *vc = topViewController();
+    return vc ? NSStringFromClass([vc class]) : @"nil";
+}
 
-    if (!gHasOpenedFile) {
-        BOOL opened = NO;
-        if (currentCount > gNavStackCount) {
-            opened = YES;
-        } else if (gInitialTopVCClass && ![gInitialTopVCClass isEqualToString:currentClass]) {
-            opened = YES;
-        } else if (currentTitle && ([currentTitle containsString:@"预览"] || [currentTitle containsString:@"下载"] || [currentTitle containsString:@"文件详情"])) {
-            opened = YES;
-        }
-
-        if (opened) {
-            gHasOpenedFile = YES;
-            showToast(@"已进入下载界面，恢复原名...");
-            if (gTapDetectionTimer) {
-                [gTapDetectionTimer invalidate];
-                gTapDetectionTimer = nil;
-            }
-            executeRestore();
-        }
-    }
+static NSString * topVCTitle(void) {
+    UIViewController *vc = topViewController();
+    if (!vc) return @"nil";
+    NSString *title = vc.title;
+    if (!title || title.length == 0) title = vc.navigationItem.title;
+    return title ?: @"nil";
 }
 
 static void executeRestore(void) {
@@ -655,13 +1010,13 @@ static void executeRestore(void) {
         stopTapDetection();
         return;
     }
-    DLog(@"Restoring: %@ -> %@", gPendingRestorePdfPath, gPendingRestoreOriginalName);
+    DLog(@"Executing restore: %@ -> %@", gPendingRestorePdfPath, gPendingRestoreOriginalName);
     renameFile(gPendingRestoreFileId, gPendingRestorePdfPath, gPendingRestoreOriginalName, ^(BOOL ok, NSError *e) {
         if (ok) {
-            showToast(@"已恢复原名");
+            showToast(@"✅ 已自动恢复原名");
             forceRefreshFileList();
         } else {
-            showToast([NSString stringWithFormat:@"恢复失败: %@", e.localizedDescription]);
+            showToast([NSString stringWithFormat:@"恢复原名失败: %@", e.localizedDescription]);
         }
         gPendingRestoreFileId = nil;
         gPendingRestorePdfPath = nil;
@@ -680,6 +1035,51 @@ static void stopTapDetection(void) {
     gHasOpenedFile = NO;
 }
 
+static void checkIfFileOpened(void) {
+    if (!gIsWaitingForTap) return;
+
+    NSInteger currentCount = currentNavStackCount();
+    NSString *currentClass = topVCClassName();
+    NSString *currentTitle = topVCTitle();
+
+    DLog(@"Tap detection: nav=%ld->%ld class=[%@]->[%@] title=[%@]->[%@] hasOpened=%d",
+         (long)gNavStackCount, (long)currentCount,
+         gInitialTopVCClass, currentClass,
+         gInitialTopVCTitle, currentTitle, gHasOpenedFile);
+
+    // Detect file opened (nav stack increased or VC changed to preview)
+    if (!gHasOpenedFile) {
+        BOOL opened = NO;
+
+        if (currentCount > gNavStackCount) {
+            DLog(@"File opened (nav stack increased)!");
+            opened = YES;
+        } else if (gInitialTopVCClass && ![gInitialTopVCClass isEqualToString:currentClass]) {
+            DLog(@"File opened (VC class changed)!");
+            opened = YES;
+        } else if (currentTitle && ([currentTitle containsString:@"预览"] || [currentTitle containsString:@"下载"] || [currentTitle containsString:@"文件详情"])) {
+            DLog(@"File opened (preview title)!");
+            opened = YES;
+        } else if (gPendingRestoreOriginalName && currentTitle && [currentTitle containsString:gPendingRestoreOriginalName]) {
+            DLog(@"File opened (title matches file name)!");
+            opened = YES;
+        }
+
+        if (opened) {
+            gHasOpenedFile = YES;
+            showToast(@"已进入下载界面，马上恢复原名...");
+
+            if (gTapDetectionTimer) {
+                [gTapDetectionTimer invalidate];
+                gTapDetectionTimer = nil;
+            }
+
+            executeRestore();
+            return;
+        }
+    }
+}
+
 static void startTapDetection(void) {
     stopTapDetection();
     gIsWaitingForTap = YES;
@@ -687,26 +1087,31 @@ static void startTapDetection(void) {
     gNavStackCount = currentNavStackCount();
     gInitialTopVCClass = topVCClassName();
     gInitialTopVCTitle = topVCTitle();
+    DLog(@"Started tap detection, nav=%ld class=%@ title=%@", (long)gNavStackCount, gInitialTopVCClass, gInitialTopVCTitle);
 
     gTapDetectionTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
-                                                            target:[NSBlockOperation blockOperationWithBlock:^{ checkIfFileOpened(); }]
+                                                            target:[NSBlockOperation blockOperationWithBlock:^{
+                                                                checkIfFileOpened();
+                                                            }]
                                                           selector:@selector(main)
                                                           userInfo:nil
                                                            repeats:YES];
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (gIsWaitingForTap) {
+            DLog(@"Tap detection timeout, forcing restore");
             stopTapDetection();
-            showToast(@"等待超时，恢复原名");
+            showToast(@"等待超时，自动恢复原名");
             executeRestore();
         }
     });
 }
 
-// ========== 核心流程 ==========
+// ========== Smart Flow ==========
+
 static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileId, NSNumber *fileSize) {
     if (fileSize && [fileSize doubleValue] >= 300.0 * 1024.0 * 1024.0) {
-        showToast(@"该文件超过300MB，无法下载");
+        showToast(@"⚠️ 该文件超过300MB，无法下载");
         return;
     }
     stopTapDetection();
@@ -716,14 +1121,14 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
 
     NSString *ext = fileName.pathExtension.lowercaseString;
     if ([ext isEqualToString:@"88888888888888"]) {
-        showToast(@"文件已是 .88888888888888，无需处理");
+        showToast(@"文件已是 .8888888888888888，无需处理");
         return;
     }
 
-    NSString *ppName = [fileName stringByAppendingString:@".88888888888888"];
+    NSString *ppName = [fileName stringByAppendingString:@".8888888888888888"];
     NSString *ppPath = [[filePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:ppName];
 
-    showToast(@"正在处理...");
+    showToast(@"1. 重命名...");
     renameFile(fileId, filePath, ppName, ^(BOOL success, NSError *err) {
         if (!success) {
             showToast([NSString stringWithFormat:@"重命名失败: %@", err.localizedDescription]);
@@ -734,23 +1139,23 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
         gPendingRestorePdfPath = ppPath;
         gPendingRestoreOriginalName = fileName;
 
-        // 后台刷新（无感）
+        showToast(@"2. 刷新第1次...");
         forceRefreshFileList();
 
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            showToast(@"3. 刷新第2次...");
             forceRefreshFileList();
 
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                // 启动检测
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                showToast(@"4. 自动滚动并打开文件...");
                 startTapDetection();
-                // 后台无感打开文件
-                openFileWithoutUserSeeing(ppName);
+                // v10.28: Auto scroll + auto click when cell becomes visible
+                scrollToRenamedFileAndAutoClick(ppName);
             });
         });
     });
 }
 
-// ========== 浮球点击 ==========
 static void triggerDownloadFlow(void) {
     autoDetectPathAndToken();
     if (!gBdstoken) {
@@ -773,7 +1178,7 @@ static void triggerDownloadFlow(void) {
             return;
         }
         UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"选择文件"
-                                                                       message:@"选择后自动处理"
+                                                                       message:@"选择后自动重命名为 文件名88888888888888，自动打开文件进入下载界面后自动恢复原名"
                                                                 preferredStyle:UIAlertControllerStyleActionSheet];
         for (NSDictionary *file in fileItems) {
             NSString *name = file[@"server_filename"];
@@ -790,7 +1195,7 @@ static void triggerDownloadFlow(void) {
                                                                style:UIAlertActionStyleDefault
                                                              handler:^(UIAlertAction *action) {
                 if (isTooLarge) {
-                    showToast(@"该文件超过300MB，无法下载");
+                    showToast(@"⚠️ 该文件超过300MB，无法下载");
                     return;
                 }
                 runSmartFlow(name, path, fid, size);
@@ -815,11 +1220,18 @@ static void triggerDownloadFlow(void) {
     });
 }
 
+// ========== Float button ==========
+
 static void onFloatButtonTap(void) {
     autoDetectPathAndToken();
-    NSString *tokenInfo = gBdstoken ? [NSString stringWithFormat:@"%@... (%lu位)", [gBdstoken substringToIndex:MIN(8, gBdstoken.length)], (unsigned long)gBdstoken.length] : @"missing";
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v12.0"
-                                                                   message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n选择文件后自动改名并打开", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
+    NSString *tokenInfo = @"missing";
+    if (gBdstoken) {
+        NSUInteger len = gBdstoken.length;
+        NSUInteger previewLen = len > 8 ? 8 : len;
+        tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
+    }
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.28"
+                                                                   message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n智能流程：改名->.88888888888888->刷新2次->自动滚动并打开文件->进入下载->自动恢复原名", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件"
                                                              style:UIAlertActionStyleDefault
@@ -828,14 +1240,13 @@ static void onFloatButtonTap(void) {
     }];
     [alert addAction:downloadAction];
     UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"OK"
-                                                         style:UIAlertActionStyleCancel
-                                                       handler:nil];
+                                                       style:UIAlertActionStyleCancel
+                                                     handler:nil];
     [alert addAction:okAction];
     UIViewController *vc = topViewController();
     if (vc) [vc presentViewController:alert animated:YES completion:nil];
 }
 
-// ========== 浮球 ==========
 static void showFloatButton(void) {
     if (gFloatButton) return;
     UIWindow *window = nil;
@@ -854,13 +1265,14 @@ static void showFloatButton(void) {
     gFloatButton.backgroundColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:0.8];
     gFloatButton.layer.cornerRadius = size / 2;
     gFloatButton.layer.masksToBounds = YES;
-    [gFloatButton setTitle:@"BD" forState:UIControlStateNormal];
+    [gFloatButton setTitle:@"🚀" forState:UIControlStateNormal];
     [gFloatButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    gFloatButton.titleLabel.font = [UIFont boldSystemFontOfSize:14];
+    gFloatButton.titleLabel.font = [UIFont systemFontOfSize:24];
     [gFloatButton addTarget:nil action:@selector(bdt_floatButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:nil action:@selector(bdt_floatButtonPanned:)];
     [gFloatButton addGestureRecognizer:pan];
     [window addSubview:gFloatButton];
+    DLog(@"Float button shown");
 }
 
 @interface NSObject (BaiduPanTroll)
@@ -878,10 +1290,9 @@ static void showFloatButton(void) {
 }
 @end
 
-// ========== 构造函数 ==========
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v12.0 loaded - Invisible Operation Edition");
+    DLog(@"BaiduPan Troll v10.28 loaded - Auto-Click Edition");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
