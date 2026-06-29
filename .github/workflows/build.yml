@@ -33,15 +33,15 @@ jobs:
           rm -rf $HOME/sdks.zip $HOME/sdks_tmp
           ls -la $HOME/theos/sdks/
 
-      - name: Build Package
+      - name: Build Library
         run: |
           export THEOS=$HOME/theos
           make clean
-          make package FINALPACKAGE=1
+          make
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: BaiduPanTroll
-          path: packages/*.deb
+          path: .theos/obj/*/libBaiduPanTroll.dylib
           if-no-files-found: error
