@@ -1,6 +1,6 @@
 //
-//  BaiduPan SVIP Direct Link Helper - Minimal Safe Version
-//  先确保编译通过，再逐步添加功能
+// BaiduPan SVIP Direct Link Helper - Minimal Safe Version
+// Fix: Ensure all imports and braces are correct
 //
 
 #import <UIKit/UIKit.h>
@@ -11,8 +11,6 @@
 static NSString *gInterceptedDlink = nil;
 static NSString *gInterceptedFileName = nil;
 static BOOL gShouldInterceptDlink = NO;
-
-// ========== Core Helpers ==========
 
 static void showToast(NSString *msg) {
     if (!msg) return;
@@ -28,7 +26,7 @@ static void showToast(NSString *msg) {
         }
         if (!window) window = [[UIApplication sharedApplication] keyWindow];
         if (!window) return;
-        
+
         UILabel *label = [[UILabel alloc] init];
         label.text = msg;
         label.textColor = [UIColor whiteColor];
@@ -41,7 +39,7 @@ static void showToast(NSString *msg) {
         label.frame = CGRectInset(label.frame, 16, 8);
         label.center = CGPointMake(window.bounds.size.width / 2, window.bounds.size.height / 2);
         [window addSubview:label];
-        
+
         [UIView animateWithDuration:0.3 delay:1.5 options:UIViewAnimationOptionCurveEaseIn animations:^{
             label.alpha = 0;
         } completion:^(BOOL finished) {
@@ -61,8 +59,6 @@ static void handleInterceptedDlink(void) {
     showToast(@"直链已复制到剪贴板");
     gShouldInterceptDlink = NO;
 }
-
-// ========== Logos Hooks ==========
 
 %hook NSURLSession
 
@@ -99,8 +95,6 @@ static void handleInterceptedDlink(void) {
 }
 
 %end
-
-// ========== Constructor ==========
 
 %ctor {
     @autoreleasepool {
