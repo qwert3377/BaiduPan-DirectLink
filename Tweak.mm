@@ -1,6 +1,9 @@
+//
 //  BaiduPan SVIP Direct Link Helper - TrollStore Edition v12.1
 //  Fix: Removed unused variables, fixed function order, no block recursion
+//  Fix v12.1.1: Changed private class hooks to runtime dynamic hooking to avoid Logos "missing context" errors
 //  Strategy: Hook internal PriviewDownLoad -> previewDownloadFileMeta to intercept dlink
+//
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -40,6 +43,7 @@ static void runRenameAndIntercept(NSString *fileName, NSString *filePath, NSStri
 static void triggerDownloadFlow(void);
 static void onFloatButtonTap(void);
 static void showFloatButton(void);
+static void hookBaiduPanClasses(void);
 
 // ========== UI Helpers ==========
 
@@ -258,7 +262,7 @@ static void showToast(NSString *msg) {
     if (!window) return;
     UILabel *toast = [[UILabel alloc] init];
     toast.text = msg;
-    toast.textColor = [UIColor whiteColor;
+    toast.textColor = [UIColor whiteColor];
     toast.backgroundColor = [UIColor colorWithWhite:0 alpha:0.8];
     toast.textAlignment = NSTextAlignmentCenter;
     toast.font = [UIFont systemFontOfSize:14];
@@ -503,7 +507,174 @@ static void triggerDownloadFlow(void) {
     });
 }
 
-// ========== Logos Hooks ==========
+// ========== Runtime Hook Helpers ==========
+
+static void swizzleInstanceMethod(Class cls, SEL originalSelector, SEL swizzledSelector) {
+    Method originalMethod = class_getInstanceMethod(cls, originalSelector);
+    Method swizzledMethod = class_getInstanceMethod(cls, swizzledSelector);
+    if (!originalMethod || !swizzledMethod) {
+        DLog(@"Swizzle failed: %@ %@ not found", NSStringFromClass(cls), NSStringFromSelector(originalSelector));
+        return;
+    }
+    method_exchangeImplementations(originalMethod, swizzledMethod);
+}
+
+// Hook implementation for previewDownloadFileMeta
+static void (*orig_previewDownloadFileMeta)(id, SEL) = NULL;
+static void hook_previewDownloadFileMeta(id self, SEL _cmd) {
+    DLog(@"Hook: previewDownloadFileMeta called, intercept enabled");
+    gShouldInterceptDlink = YES;
+    if (orig_previewDownloadFileMeta) {
+        orig_previewDownloadFileMeta(self, _cmd);
+    }
+}
+
+// Hook implementation for downloadFileWithCDNModel:
+static void (*orig_downloadFileWithCDNModel)(id, SEL, id) = NULL;
+static void hook_downloadFileWithCDNModel(id self, SEL _cmd, id cdnModel) {
+    DLog(@"Hook: downloadFileWithCDNModel called");
+    gShouldInterceptDlink = YES;
+    if (orig_downloadFileWithCDNModel) {
+        orig_downloadFileWithCDNModel(self, _cmd, cdnModel);
+    }
+}
+
+// Hook implementation for PMallDownloadFile
+static void (*orig_PMallDownloadFile)(id, SEL) = NULL;
+static void hook_PMallDownloadFile(id self, SEL _cmd) {
+    DLog(@"Hook: PMallDownloadFile called");
+    gShouldInterceptDlink = YES;
+    if (orig_PMallDownloadFile) {
+        orig_PMallDownloadFile(self, _cmd);
+    }
+}
+
+// Hook implementation for downloadShareDirFile
+static void (*orig_downloadShareDirFile)(id, SEL) = NULL;
+static void hook_downloadShareDirFile(id self, SEL _cmd) {
+    DLog(@"Hook: downloadShareDirFile called");
+    gShouldInterceptDlink = YES;
+    if (orig_downloadShareDirFile) {
+        orig_downloadShareDirFile(self, _cmd);
+    }
+}
+
+// Hook implementation for downloadFromPCS
+static void (*orig_downloadFromPCS)(id, SEL) = NULL;
+static void hook_downloadFromPCS(id self, SEL _cmd) {
+    DLog(@"Hook: downloadFromPCS called");
+    gShouldInterceptDlink = YES;
+    if (orig_downloadFromPCS) {
+        orig_downloadFromPCS(self, _cmd);
+    }
+}
+
+// Hook implementation for getDlinkDownloadPath
+static id (*orig_getDlinkDownloadPath)(id, SEL) = NULL;
+static id hook_getDlinkDownloadPath(id self, SEL _cmd) {
+    id result = NULL;
+    if (orig_getDlinkDownloadPath) {
+        result = orig_getDlinkDownloadPath(self, _cmd);
+    }
+    if (result && [result isKindOfClass:[NSString class]] && gShouldInterceptDlink) {
+        NSString *dlink = (NSString *)result;
+        DLog(@"Hook: getDlinkDownloadPath returned: %@...", [dlink substringToIndex:MIN(80, dlink.length)]);
+        gInterceptedDlink = dlink;
+    }
+    return result;
+}
+
+// Hook implementation for startDownloadTransFile
+static void (*orig_startDownloadTransFile)(id, SEL) = NULL;
+static void hook_startDownloadTransFile(id self, SEL _cmd) {
+    DLog(@"Hook: startDownloadTransFile called");
+    gShouldInterceptDlink = YES;
+    if (orig_startDownloadTransFile) {
+        orig_startDownloadTransFile(self, _cmd);
+    }
+}
+
+// Hook implementation for startDownloadFolder
+static void (*orig_startDownloadFolder)(id, SEL) = NULL;
+static void hook_startDownloadFolder(id self, SEL _cmd) {
+    DLog(@"Hook: startDownloadFolder called");
+    gShouldInterceptDlink = YES;
+    if (orig_startDownloadFolder) {
+        orig_startDownloadFolder(self, _cmd);
+    }
+}
+
+static void hookBaiduPanClasses(void) {
+    // Hook PriviewDownLoad
+    Class previewDLClass = NSClassFromString(@"PriviewDownLoad");
+    if (previewDLClass) {
+        DLog(@"Found PriviewDownLoad class, hooking...");
+        // Use MSHookMessageEx or method_exchangeImplementations
+        Method m1 = class_getInstanceMethod(previewDLClass, @selector(previewDownloadFileMeta));
+        Method m2 = class_getInstanceMethod(previewDLClass, @selector(downloadFileWithCDNModel:));
+        Method m3 = class_getInstanceMethod(previewDLClass, @selector(PMallDownloadFile));
+        Method m4 = class_getInstanceMethod(previewDLClass, @selector(downloadShareDirFile));
+        
+        if (m1) {
+            orig_previewDownloadFileMeta = (void (*)(id, SEL))method_getImplementation(m1);
+            method_setImplementation(m1, (IMP)hook_previewDownloadFileMeta);
+        }
+        if (m2) {
+            orig_downloadFileWithCDNModel = (void (*)(id, SEL, id))method_getImplementation(m2);
+            method_setImplementation(m2, (IMP)hook_downloadFileWithCDNModel);
+        }
+        if (m3) {
+            orig_PMallDownloadFile = (void (*)(id, SEL))method_getImplementation(m3);
+            method_setImplementation(m3, (IMP)hook_PMallDownloadFile);
+        }
+        if (m4) {
+            orig_downloadShareDirFile = (void (*)(id, SEL))method_getImplementation(m4);
+            method_setImplementation(m4, (IMP)hook_downloadShareDirFile);
+        }
+    } else {
+        DLog(@"PriviewDownLoad class not found, will retry later");
+    }
+
+    // Hook DownOperation
+    Class downOpClass = NSClassFromString(@"DownOperation");
+    if (downOpClass) {
+        DLog(@"Found DownOperation class, hooking...");
+        Method m5 = class_getInstanceMethod(downOpClass, @selector(downloadFromPCS));
+        Method m6 = class_getInstanceMethod(downOpClass, @selector(getDlinkDownloadPath));
+        
+        if (m5) {
+            orig_downloadFromPCS = (void (*)(id, SEL))method_getImplementation(m5);
+            method_setImplementation(m5, (IMP)hook_downloadFromPCS);
+        }
+        if (m6) {
+            orig_getDlinkDownloadPath = (id (*)(id, SEL))method_getImplementation(m6);
+            method_setImplementation(m6, (IMP)hook_getDlinkDownloadPath);
+        }
+    } else {
+        DLog(@"DownOperation class not found, will retry later");
+    }
+
+    // Hook BDPanFileDownloadEngine
+    Class engineClass = NSClassFromString(@"BDPanFileDownloadEngine");
+    if (engineClass) {
+        DLog(@"Found BDPanFileDownloadEngine class, hooking...");
+        Method m7 = class_getInstanceMethod(engineClass, @selector(startDownloadTransFile));
+        Method m8 = class_getInstanceMethod(engineClass, @selector(startDownloadFolder));
+        
+        if (m7) {
+            orig_startDownloadTransFile = (void (*)(id, SEL))method_getImplementation(m7);
+            method_setImplementation(m7, (IMP)hook_startDownloadTransFile);
+        }
+        if (m8) {
+            orig_startDownloadFolder = (void (*)(id, SEL))method_getImplementation(m8);
+            method_setImplementation(m8, (IMP)hook_startDownloadFolder);
+        }
+    } else {
+        DLog(@"BDPanFileDownloadEngine class not found, will retry later");
+    }
+}
+
+// ========== Logos Hooks (Only for system classes) ==========
 
 %hook NSURLSession
 
@@ -537,70 +708,6 @@ static void triggerDownloadFlow(void) {
     }
 
     return %orig(request, completionHandler);
-}
-
-%end
-
-%hook PriviewDownLoad
-
-- (void)previewDownloadFileMeta {
-    DLog(@"Hook: previewDownloadFileMeta called, intercept enabled");
-    gShouldInterceptDlink = YES;
-    %orig;
-}
-
-- (void)downloadFileWithCDNModel:(id)cdnModel {
-    DLog(@"Hook: downloadFileWithCDNModel called");
-    gShouldInterceptDlink = YES;
-    %orig;
-}
-
-- (void)PMallDownloadFile {
-    DLog(@"Hook: PMallDownloadFile called");
-    gShouldInterceptDlink = YES;
-    %orig;
-}
-
-- (void)downloadShareDirFile {
-    DLog(@"Hook: downloadShareDirFile called");
-    gShouldInterceptDlink = YES;
-    %orig;
-}
-
-%end
-
-%hook DownOperation
-
-- (void)downloadFromPCS {
-    DLog(@"Hook: downloadFromPCS called");
-    gShouldInterceptDlink = YES;
-    %orig;
-}
-
-- (id)getDlinkDownloadPath {
-    id result = %orig;
-    if (result && [result isKindOfClass:[NSString class]] && gShouldInterceptDlink) {
-        NSString *dlink = (NSString *)result;
-        DLog(@"Hook: getDlinkDownloadPath returned: %@...", [dlink substringToIndex:MIN(80, dlink.length)]);
-        gInterceptedDlink = dlink;
-    }
-    return result;
-}
-
-%end
-
-%hook BDPanFileDownloadEngine
-
-- (void)startDownloadTransFile {
-    DLog(@"Hook: startDownloadTransFile called");
-    gShouldInterceptDlink = YES;
-    %orig;
-}
-
-- (void)startDownloadFolder {
-    DLog(@"Hook: startDownloadFolder called");
-    gShouldInterceptDlink = YES;
-    %orig;
 }
 
 %end
@@ -647,8 +754,8 @@ static void showFloatButton(void) {
     [gFloatButton setTitle:@"🚀" forState:UIControlStateNormal];
     [gFloatButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     gFloatButton.titleLabel.font = [UIFont systemFontOfSize:24];
-    [gFloatButton addTarget:[NSObject new] action:@selector(bdt_floatButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:[NSObject new] action:@selector(bdt_floatButtonPanned:)];
+    [gFloatButton addTarget:nil action:@selector(bdt_floatButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:nil action:@selector(bdt_floatButtonPanned:)];
     [gFloatButton addGestureRecognizer:pan];
     [window addSubview:gFloatButton];
     DLog(@"Float button shown (v12.1)");
@@ -672,6 +779,15 @@ static void showFloatButton(void) {
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
     DLog(@"BaiduPan Troll v12.1 loaded - Dlink Intercept Mode");
+    
+    // Hook private classes using runtime (avoids Logos "missing context" errors)
+    hookBaiduPanClasses();
+    
+    // Retry hooking after delay in case classes are loaded later
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        hookBaiduPanClasses();
+    });
+    
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
