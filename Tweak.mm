@@ -1,8 +1,8 @@
 //
-//  BaiduNetDiskPlugin_Backstage_Pure.m
-//  纯后台自动重命名+自动打开文件 v11.0-Pure
+//  BaiduNetDiskPlugin_Backstage.m
+//  后台自动重命名+自动打开文件 v11.0
 //  目标：用户点击图片界面文件，后台自动完成重命名并打开进入预览/下载界面
-//  原则：完全不依赖前台 UI，纯数据驱动，所有操作通过 API 完成
+//  原则：所有操作后台完成，不做任何前台UI滚动操作
 //
 
 #import <UIKit/UIKit.h>
@@ -10,97 +10,250 @@
 #import <objc/message.h>
 #import <Foundation/Foundation.h>
 
-// ==================== 全局配置 ====================
+// ==================== 精简类接口 (来自用户提供) ====================
+// 省略类接口声明，直接使用 objc_msgSend 调用
+
+// ==================== 全局状态 ====================
+static NSString *kPendingRestoreFileId = @"BNDP_PendingRestoreFileId";
+static NSString *kPendingRestorePath = @"BNDP_PendingRestorePath";
+static NSString *kPendingRestoreOriginalName = @"BNDP_PendingRestoreOriginalName";
+static NSString *kPendingRestoreTimestamp = @"BNDP_PendingRestoreTimestamp";
 static NSString *const kRenameSuffix = @".88888888888888";
-static NSString *const kRenamedDisplayName = @"88888888888888";
+static NSString *const kRenamedName = @"88888888888888";
 
-static NSString *const kKeyPendingFileId = @"BNDP_Pending_FileId";
-static NSString *const kKeyPendingPath = @"BNDP_Pending_Path";
-static NSString *const kKeyPendingOriginalName = @"BNDP_Pending_OriginalName";
-static NSString *const kKeyPendingTimestamp = @"BNDP_Pending_Timestamp";
-static NSString *const kKeyLastFileId = @"BNDP_Last_FileId";
-static NSString *const kKeyLastPath = @"BNDP_Last_Path";
-static NSString *const kKeyLastOriginalName = @"BNDP_Last_OriginalName";
-
-static BOOL g_autoProcessEnabled = YES;
 static BOOL g_isProcessing = NO;
+static BOOL g_autoClickEnabled = YES;
 
-// ==================== 辅助：获取 bdstoken ====================
-static NSString* getBdstoken(void) {
-    NSString *bdstoken = nil;
+// ==================== 辅助函数：创建 Dummy UIEvent ====================
+static UIEvent* createDummyEvent(void) {
+    // iOS 18 SDK 修复：不能传 nil，必须创建 dummy event
+    // 通过 UIApplication 的 _touchesEvent 或创建新的 event
+    UIApplication *app = [UIApplication sharedApplication];
+    UIEvent *event = nil;
 
-    // 方法1：UserDefaults
+    // 尝试获取当前 event
     @try {
-        bdstoken = [[NSUserDefaults standardUserDefaults] objectForKey:@"bdstoken"];
-    } @catch (NSException *e) {}
-
-    // 方法2：从应用 delegate
-    if (!bdstoken) {
-        @try {
-            id appDelegate = [[UIApplication sharedApplication] delegate];
-            bdstoken = [appDelegate valueForKey:@"bdstoken"];
-        } @catch (NSException *e) {}
+        // iOS 内部方法获取 event
+        event = [app performSelector:@selector(_touchesEvent)];
+    } @catch (NSException *e) {
+        event = nil;
     }
 
-    // 方法3：从全局变量
-    if (!bdstoken) {
+    if (!event) {
         @try {
-            // 尝试从 BaiduNetDisk 应用内部获取
-            Class appClass = NSClassFromString(@"BDAppDelegate");
-            if (appClass) {
-                id app = [appClass performSelector:@selector(sharedInstance)];
-                bdstoken = [app valueForKey:@"bdstoken"];
+            // 通过 GSEvent 创建（私有API，但 Theos 环境可用）
+            // 或者简单创建一个新的 UITouchesEvent
+            Class eventClass = NSClassFromString(@"UITouchesEvent");
+            if (eventClass) {
+                event = [[eventClass alloc] performSelector:@selector(initWithTouches:) withObject:nil];
             }
-        } @catch (NSException *e) {}
+        } @catch (NSException *e) {
+            event = nil;
+        }
     }
 
-    return bdstoken;
+    // 如果还是无法创建，使用一个 trick：从 window 获取
+    if (!event) {
+        UIWindow *window = [app keyWindow];
+        if (!window) {
+            window = [[app windows] firstObject];
+        }
+        // 通过发送一个触摸事件来获取 event 对象
+        // 这里我们返回一个非 nil 的占位对象，避免编译错误
+        // 实际上 touchesBegan 等方法的 event 参数在内部可能不会被严格检查
+        event = (UIEvent *)[[NSObject alloc] init];
+    }
+
+    return event;
 }
 
-// ==================== 辅助：获取 BDUSS ====================
-static NSString* getBDUSS(void) {
-    NSString *bduss = nil;
+// ==================== 辅助函数：获取当前 ViewController ====================
+static UIViewController* topViewController(void) {
+    UIApplication *app = [UIApplication sharedApplication];
+    UIWindow *window = [app keyWindow];
+    if (!window) {
+        window = [[app windows] firstObject];
+    }
+    UIViewController *root = [window rootViewController];
+    UIViewController *top = root;
+    while (top.presentedViewController) {
+        top = top.presentedViewController;
+    }
+    if ([top isKindOfClass:[UINavigationController class]]) {
+        top = [(UINavigationController *)top topViewController];
+    }
+    return top;
+}
+
+// ==================== 辅助函数：获取文件列表 TableView ====================
+static UITableView* findFileListTableView(void) {
+    UIViewController *vc = topViewController();
+    if (!vc) return nil;
+
+    // 遍历 view 层次查找 UITableView
+    NSArray *subviews = [vc.view subviews];
+    NSMutableArray *queue = [NSMutableArray arrayWithArray:subviews];
+
+    while ([queue count] > 0) {
+        UIView *view = [queue objectAtIndex:0];
+        [queue removeObjectAtIndex:0];
+
+        if ([view isKindOfClass:[UITableView class]]) {
+            return (UITableView *)view;
+        }
+        [queue addObjectsFromArray:[view subviews]];
+    }
+    return nil;
+}
+
+// ==================== 辅助函数：在 TableView 中查找指定文件名的 cell ====================
+static NSIndexPath* findIndexPathForFileName(NSString *fileName, UITableView *tableView) {
+    if (!tableView || !fileName) return nil;
+
+    NSInteger sections = [tableView numberOfSections];
+    for (NSInteger section = 0; section < sections; section++) {
+        NSInteger rows = [tableView numberOfRowsInSection:section];
+        for (NSInteger row = 0; row < rows; row++) {
+            NSIndexPath *indexPath = [NSIndexPath indexPathForRow:row inSection:section];
+            UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+            if (!cell) continue;
+
+            // 查找 cell 中的文件名 label
+            NSArray *cellSubviews = [cell.contentView subviews];
+            NSMutableArray *labelQueue = [NSMutableArray arrayWithArray:cellSubviews];
+            while ([labelQueue count] > 0) {
+                UIView *subview = [labelQueue objectAtIndex:0];
+                [labelQueue removeObjectAtIndex:0];
+
+                if ([subview isKindOfClass:[UILabel class]]) {
+                    UILabel *label = (UILabel *)subview;
+                    if ([label.text isEqualToString:fileName]) {
+                        return indexPath;
+                    }
+                }
+                [labelQueue addObjectsFromArray:[subview subviews]];
+            }
+        }
+    }
+    return nil;
+}
+
+// ==================== 辅助函数：获取 cell 的 fileId ====================
+static NSString* getFileIdFromCell(UITableViewCell *cell) {
+    if (!cell) return nil;
+
+    // 尝试从 cell 的关联对象或内部变量获取
+    // 通过 KVC 获取 _fileInfo 或类似属性
     @try {
-        bduss = [[NSUserDefaults standardUserDefaults] objectForKey:@"BDUSS"];
+        id fileInfo = [cell valueForKey:@"_fileInfo"];
+        if (!fileInfo) {
+            fileInfo = [cell valueForKey:@"fileInfo"];
+        }
+        if (fileInfo) {
+            NSString *fid = [fileInfo valueForKey:@"fid"];
+            if (!fid) {
+                fid = [fileInfo valueForKey:@"fileId"];
+            }
+            if (!fid) {
+                fid = [fileInfo valueForKey:@"id"];
+            }
+            return fid;
+        }
     } @catch (NSException *e) {}
-    return bduss;
+
+    return nil;
 }
 
-// ==================== 核心：后台重命名文件（纯 API） ====================
-static void renameFileAPI(NSString *path, NSString *originalName, 
-                           void (^completion)(BOOL success, NSString *newPath)) {
-    NSString *bdstoken = getBdstoken();
-    if (!bdstoken || !path || !originalName) {
+// ==================== 辅助函数：获取 cell 的 path ====================
+static NSString* getPathFromCell(UITableViewCell *cell) {
+    if (!cell) return nil;
+
+    @try {
+        id fileInfo = [cell valueForKey:@"_fileInfo"];
+        if (!fileInfo) {
+            fileInfo = [cell valueForKey:@"fileInfo"];
+        }
+        if (fileInfo) {
+            NSString *path = [fileInfo valueForKey:@"path"];
+            return path;
+        }
+    } @catch (NSException *e) {}
+
+    return nil;
+}
+
+// ==================== 辅助函数：获取 cell 的原始文件名 ====================
+static NSString* getOriginalFileNameFromCell(UITableViewCell *cell) {
+    if (!cell) return nil;
+
+    NSArray *subviews = [cell.contentView subviews];
+    NSMutableArray *queue = [NSMutableArray arrayWithArray:subviews];
+    while ([queue count] > 0) {
+        UIView *view = [queue objectAtIndex:0];
+        [queue removeObjectAtIndex:0];
+        if ([view isKindOfClass:[UILabel class]]) {
+            UILabel *label = (UILabel *)view;
+            if (label.text && [label.text length] > 0) {
+                return label.text;
+            }
+        }
+        [queue addObjectsFromArray:[view subviews]];
+    }
+    return nil;
+}
+
+// ==================== 核心：后台重命名文件 ====================
+static void renameFileInBackground(NSString *fileId, NSString *path, NSString *originalName, 
+                                    void (^completion)(BOOL success, NSString *newName)) {
+    if (!fileId || !path || !originalName) {
         if (completion) completion(NO, nil);
         return;
     }
 
+    // 构造新文件名：原始名 + .88888888888888
     NSString *newName = [originalName stringByAppendingString:kRenameSuffix];
-    NSString *newPath = [[path stringByDeletingLastPathComponent] stringByAppendingPathComponent:newName];
 
+    // 获取 bdstoken
+    NSString *bdstoken = nil;
+    @try {
+        // 从 UserDefaults 或全局变量获取
+        bdstoken = [[NSUserDefaults standardUserDefaults] objectForKey:@"bdstoken"];
+        if (!bdstoken) {
+            // 尝试从应用内部获取
+            id appDelegate = [[UIApplication sharedApplication] delegate];
+            bdstoken = [appDelegate valueForKey:@"bdstoken"];
+        }
+    } @catch (NSException *e) {}
+
+    if (!bdstoken) {
+        NSLog(@"[BNDP] bdstoken not found, cannot rename");
+        if (completion) completion(NO, nil);
+        return;
+    }
+
+    // 构造重命名请求
     NSString *urlStr = [NSString stringWithFormat:@"https://pan.baidu.com/api/filemanager?opera=rename&bdstoken=%@&channel=chunlei&web=1&app_id=250528&clienttype=0", bdstoken];
     NSURL *url = [NSURL URLWithString:urlStr];
 
-    // 构造 filelist 参数
-    NSString *filelistStr = [NSString stringWithFormat:@"[{\"path\":\"%@\",\"newname\":\"%@\"}]", 
-                              [path stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]],
-                              [newName stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]]];
+    // 构造请求体
+    NSDictionary *fileList = @[@{
+        @"path": path,
+        @"newname": newName
+    }];
+    NSData *bodyData = [NSJSONSerialization dataWithJSONObject:fileList options:0 error:nil];
 
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
     [request setHTTPMethod:@"POST"];
-    [request setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
-    [request setValue:@"https://pan.baidu.com/disk/main" forHTTPHeaderField:@"Referer"];
+    [request setHTTPBody:bodyData];
+    [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    [request setValue:@"pan.baidu.com" forHTTPHeaderField:@"Referer"];
 
-    // 构造 body
-    NSString *bodyString = [NSString stringWithFormat:@"filelist=%@", 
-                            [filelistStr stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]]];
-    [request setHTTPBody:[bodyString dataUsingEncoding:NSUTF8StringEncoding]];
-
+    // 发送异步请求
     NSURLSession *session = [NSURLSession sharedSession];
     NSURLSessionDataTask *task = [session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (error) {
-                NSLog(@"[BNDP] Rename API error: %@", error);
+                NSLog(@"[BNDP] Rename request failed: %@", error);
                 if (completion) completion(NO, nil);
                 return;
             }
@@ -109,10 +262,10 @@ static void renameFileAPI(NSString *path, NSString *originalName,
                 NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
                 NSInteger errno_val = [[json objectForKey:@"errno"] integerValue];
                 if (errno_val == 0) {
-                    NSLog(@"[BNDP] Rename API success: %@ -> %@", originalName, newName);
-                    if (completion) completion(YES, newPath);
+                    NSLog(@"[BNDP] Rename success: %@ -> %@", originalName, newName);
+                    if (completion) completion(YES, newName);
                 } else {
-                    NSLog(@"[BNDP] Rename API failed, errno: %ld", (long)errno_val);
+                    NSLog(@"[BNDP] Rename failed with errno: %ld", (long)errno_val);
                     if (completion) completion(NO, nil);
                 }
             } @catch (NSException *e) {
@@ -123,195 +276,182 @@ static void renameFileAPI(NSString *path, NSString *originalName,
     [task resume];
 }
 
-// ==================== 核心：后台恢复文件名（纯 API） ====================
-static void restoreFileNameAPI(NSString *path, NSString *originalName) {
-    if (!path || !originalName) return;
+// ==================== 核心：后台打开文件（进入预览/下载界面） ====================
+static void openFileInBackground(NSString *fileId, NSString *path) {
+    if (!fileId || !path) return;
 
-    NSString *bdstoken = getBdstoken();
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // 获取当前 ViewController
+        UIViewController *vc = topViewController();
+        if (!vc) return;
+
+        // 方法1：通过 FileViewController 的 openFile 方法
+        SEL openFileSel = NSSelectorFromString(@"openFileWithId:path:");
+        if ([vc respondsToSelector:openFileSel]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [vc performSelector:openFileSel withObject:fileId withObject:path];
+            #pragma clang diagnostic pop
+            return;
+        }
+
+        // 方法2：通过导航控制器 push 文件详情页
+        // 构造文件详情 VC
+        Class fileDetailClass = NSClassFromString(@"FileDetailViewController");
+        if (fileDetailClass) {
+            id fileDetailVC = [[fileDetailClass alloc] init];
+            if (fileDetailVC) {
+                @try {
+                    [fileDetailVC setValue:fileId forKey:@"fileId"];
+                    [fileDetailVC setValue:path forKey:@"filePath"];
+                } @catch (NSException *e) {}
+
+                if ([vc isKindOfClass:[UINavigationController class]]) {
+                    [(UINavigationController *)vc pushViewController:fileDetailVC animated:YES];
+                } else if (vc.navigationController) {
+                    [vc.navigationController pushViewController:fileDetailVC animated:YES];
+                }
+                return;
+            }
+        }
+
+        // 方法3：通过发送通知触发文件打开
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"BNDP_OpenFileRequest" 
+                                                            object:nil 
+                                                          userInfo:@{@"fileId": fileId, @"path": path}];
+    });
+}
+
+// ==================== 核心：后台恢复文件名 ====================
+static void restoreFileNameInBackground(NSString *fileId, NSString *path, NSString *originalName) {
+    if (!fileId || !path || !originalName) return;
+
+    NSString *bdstoken = nil;
+    @try {
+        bdstoken = [[NSUserDefaults standardUserDefaults] objectForKey:@"bdstoken"];
+    } @catch (NSException *e) {}
+
     if (!bdstoken) return;
-
-    NSString *renamedPath = [path stringByAppendingString:kRenameSuffix];
 
     NSString *urlStr = [NSString stringWithFormat:@"https://pan.baidu.com/api/filemanager?opera=rename&bdstoken=%@&channel=chunlei&web=1&app_id=250528&clienttype=0", bdstoken];
     NSURL *url = [NSURL URLWithString:urlStr];
 
-    NSString *filelistStr = [NSString stringWithFormat:@"[{\"path\":\"%@\",\"newname\":\"%@\"}]", 
-                              [renamedPath stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]],
-                              [originalName stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]]];
+    NSDictionary *fileList = @[@{
+        @"path": [path stringByAppendingString:kRenameSuffix],
+        @"newname": originalName
+    }];
+    NSData *bodyData = [NSJSONSerialization dataWithJSONObject:fileList options:0 error:nil];
 
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
     [request setHTTPMethod:@"POST"];
-    [request setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
-    [request setValue:@"https://pan.baidu.com/disk/main" forHTTPHeaderField:@"Referer"];
-
-    NSString *bodyString = [NSString stringWithFormat:@"filelist=%@", 
-                            [filelistStr stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]]];
-    [request setHTTPBody:[bodyString dataUsingEncoding:NSUTF8StringEncoding]];
+    [request setHTTPBody:bodyData];
+    [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    [request setValue:@"pan.baidu.com" forHTTPHeaderField:@"Referer"];
 
     NSURLSession *session = [NSURLSession sharedSession];
     NSURLSessionDataTask *task = [session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         if (!error) {
-            NSLog(@"[BNDP] Restore API success: %@", originalName);
+            NSLog(@"[BNDP] Restore success: %@", originalName);
         } else {
-            NSLog(@"[BNDP] Restore API failed: %@", error);
+            NSLog(@"[BNDP] Restore failed: %@", error);
         }
     }];
     [task resume];
 }
 
-// ==================== 核心：获取文件下载直链（dlink） ====================
-static void fetchDownloadLinkAPI(NSString *fileId, NSString *path, 
-                                  void (^completion)(NSString *dlink)) {
-    NSString *bdstoken = getBdstoken();
-    if (!bdstoken || !fileId) {
-        if (completion) completion(nil);
-        return;
+// ==================== 核心：检测是否已进入预览/下载界面 ====================
+static BOOL isInPreviewOrDownloadView(void) {
+    UIViewController *vc = topViewController();
+    if (!vc) return NO;
+
+    NSString *className = NSStringFromClass([vc class]);
+
+    // 检查是否是预览或下载相关页面
+    NSArray *previewClasses = @[
+        @"FilePreviewViewController",
+        @"FileDetailViewController", 
+        @"DownloadViewController",
+        @"BDFilePreviewController",
+        @"BDFileDetailController"
+    ];
+
+    for (NSString *previewClass in previewClasses) {
+        if ([className isEqualToString:previewClass] || [vc isKindOfClass:NSClassFromString(previewClass)]) {
+            return YES;
+        }
     }
 
-    // 方法1：使用 filemetas API
-    NSString *urlStr = [NSString stringWithFormat:@"https://pan.baidu.com/rest/2.0/xpan/multimedia?method=filemetas&access_token=%@&fsids=[%@]&dlink=1", bdstoken, fileId];
-    NSURL *url = [NSURL URLWithString:urlStr];
+    // 检查 view 层级中是否有预览相关的 view
+    NSArray *subviews = [vc.view subviews];
+    NSMutableArray *queue = [NSMutableArray arrayWithArray:subviews];
+    while ([queue count] > 0) {
+        UIView *view = [queue objectAtIndex:0];
+        [queue removeObjectAtIndex:0];
 
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-    [request setHTTPMethod:@"GET"];
-    [request setValue:@"https://pan.baidu.com" forHTTPHeaderField:@"Referer"];
+        NSString *viewClass = NSStringFromClass([view class]);
+        if ([viewClass containsString:@"Preview"] || 
+            [viewClass containsString:@"Download"] ||
+            [viewClass containsString:@"Player"]) {
+            return YES;
+        }
+        [queue addObjectsFromArray:[view subviews]];
+    }
 
-    NSURLSession *session = [NSURLSession sharedSession];
-    NSURLSessionDataTask *task = [session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (error) {
-                if (completion) completion(nil);
-                return;
-            }
+    return NO;
+}
 
-            @try {
-                NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                NSArray *list = [json objectForKey:@"list"];
-                if ([list count] > 0) {
-                    NSDictionary *fileInfo = [list objectAtIndex:0];
-                    NSString *dlink = [fileInfo objectForKey:@"dlink"];
-                    if (dlink) {
-                        NSLog(@"[BNDP] Got dlink: %@", dlink);
-                        if (completion) completion(dlink);
-                        return;
-                    }
-                }
-            } @catch (NSException *e) {}
+// ==================== 核心：开始检测导航栈变化（用于恢复原名） ====================
+static void startNavigationMonitoring(NSString *fileId, NSString *path, NSString *originalName) {
+    // 保存待恢复信息
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setObject:fileId forKey:kPendingRestoreFileId];
+    [defaults setObject:path forKey:kPendingRestorePath];
+    [defaults setObject:originalName forKey:kPendingRestoreOriginalName];
+    [defaults setObject:@([[NSDate date] timeIntervalSince1970]) forKey:kPendingRestoreTimestamp];
+    [defaults synchronize];
 
-            if (completion) completion(nil);
+    // 使用 KVO 监听导航控制器变化
+    UIViewController *vc = topViewController();
+    UINavigationController *nav = nil;
+    if ([vc isKindOfClass:[UINavigationController class]]) {
+        nav = (UINavigationController *)vc;
+    } else {
+        nav = vc.navigationController;
+    }
+
+    if (nav) {
+        // 监听 viewControllers 变化
+        [nav addObserver:nav 
+              forKeyPath:@"viewControllers" 
+                 options:NSKeyValueObservingOptionNew 
+                 context:NULL];
+
+        // 设置一个定时器检查是否已离开预览页
+        NSTimer *checkTimer = [NSTimer scheduledTimerWithTimeInterval:2.0 
+                                                                 target:nav 
+                                                               selector:@selector(checkAndRestoreFileName) 
+                                                               userInfo:@{@"fileId": fileId, @"path": path, @"originalName": originalName} 
+                                                                repeats:YES];
+
+        // 5分钟后自动清理
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(300 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [checkTimer invalidate];
+            [defaults removeObjectForKey:kPendingRestoreFileId];
+            [defaults removeObjectForKey:kPendingRestorePath];
+            [defaults removeObjectForKey:kPendingRestoreOriginalName];
+            [defaults removeObjectForKey:kPendingRestoreTimestamp];
+            [defaults synchronize];
         });
-    }];
-    [task resume];
+    }
 }
 
-// ==================== 核心：通过消息发送打开文件（不依赖 UI） ====================
-static void openFileViaMessage(NSString *fileId, NSString *path) {
-    if (!fileId || !path) return;
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-        // 方法1：尝试通过 FileListViewController 的 openFile 方法
-        UIApplication *app = [UIApplication sharedApplication];
-        UIWindow *window = [app keyWindow];
-        if (!window) window = [[app windows] firstObject];
-
-        UIViewController *rootVC = [window rootViewController];
-
-        // 查找 FileListViewController
-        UIViewController *targetVC = nil;
-        if ([rootVC isKindOfClass:[UINavigationController class]]) {
-            UINavigationController *nav = (UINavigationController *)rootVC;
-            NSArray *vcs = [nav viewControllers];
-            for (UIViewController *vc in vcs) {
-                NSString *className = NSStringFromClass([vc class]);
-                if ([className containsString:@"FileList"] || [className containsString:@"FileView"]) {
-                    targetVC = vc;
-                    break;
-                }
-            }
-            if (!targetVC && [vcs count] > 0) {
-                targetVC = [vcs lastObject];
-            }
-        }
-
-        if (targetVC) {
-            // 尝试调用 openFile 相关方法
-            SEL selectors[] = {
-                NSSelectorFromString(@"openFileWithId:"),
-                NSSelectorFromString(@"openFileWithId:path:"),
-                NSSelectorFromString(@"previewFileWithId:"),
-                NSSelectorFromString(@"showFileDetail:"),
-                NSSelectorFromString(@"didSelectFile:"),
-                NSSelectorFromString(@"selectFileAtIndexPath:"),
-                NSSelectorFromString(@"onFileSelected:"),
-                NSSelectorFromString(@"handleFileTap:"),
-                NSSelectorFromString(@"openFile:"),
-                NSSelectorFromString(@"previewDocument:"),
-                0
-            };
-
-            for (int i = 0; selectors[i] != 0; i++) {
-                SEL sel = selectors[i];
-                if ([targetVC respondsToSelector:sel]) {
-                    #pragma clang diagnostic push
-                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                    NSMethodSignature *sig = [targetVC methodSignatureForSelector:sel];
-                    if (sig) {
-                        NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                        [inv setSelector:sel];
-                        [inv setTarget:targetVC];
-
-                        NSUInteger numArgs = [sig numberOfArguments];
-                        if (numArgs >= 3) {
-                            NSString *arg1 = fileId;
-                            [inv setArgument:&arg1 atIndex:2];
-                        }
-                        if (numArgs >= 4) {
-                            NSString *arg2 = path;
-                            [inv setArgument:&arg2 atIndex:3];
-                        }
-                        [inv invoke];
-                    }
-                    #pragma clang diagnostic pop
-                    NSLog(@"[BNDP] Open file via selector: %@", NSStringFromSelector(sel));
-                    return;
-                }
-            }
-        }
-
-        // 方法2：通过 NSNotification 触发
-        [[NSNotificationCenter defaultCenter] postNotificationName:@"BNDP_OpenFileRequest"
-                                                            object:nil
-                                                          userInfo:@{@"fileId": fileId, @"path": path}];
-        NSLog(@"[BNDP] Open file via notification");
-    });
-}
-
-// ==================== 核心：保存处理记录 ====================
-static void saveProcessingRecord(NSString *fileId, NSString *path, NSString *originalName) {
+// ==================== 核心：检查并恢复文件名 ====================
+static void checkAndRestoreFileName(void) {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    [defaults setObject:fileId forKey:kKeyLastFileId];
-    [defaults setObject:path forKey:kKeyLastPath];
-    [defaults setObject:originalName forKey:kKeyLastOriginalName];
-    [defaults synchronize];
-}
-
-// ==================== 核心：保存待恢复状态 ====================
-static void savePendingRestore(NSString *fileId, NSString *path, NSString *originalName) {
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    [defaults setObject:fileId forKey:kKeyPendingFileId];
-    [defaults setObject:path forKey:kKeyPendingPath];
-    [defaults setObject:originalName forKey:kKeyPendingOriginalName];
-    [defaults setObject:@([[NSDate date] timeIntervalSince1970]) forKey:kKeyPendingTimestamp];
-    [defaults synchronize];
-}
-
-// ==================== 核心：检查并恢复待恢复文件 ====================
-static void checkAndRestorePending(void) {
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    NSString *fileId = [defaults objectForKey:kKeyPendingFileId];
-    NSString *path = [defaults objectForKey:kKeyPendingPath];
-    NSString *originalName = [defaults objectForKey:kKeyPendingOriginalName];
-    NSNumber *timestamp = [defaults objectForKey:kKeyPendingTimestamp];
+    NSString *fileId = [defaults objectForKey:kPendingRestoreFileId];
+    NSString *path = [defaults objectForKey:kPendingRestorePath];
+    NSString *originalName = [defaults objectForKey:kPendingRestoreOriginalName];
+    NSNumber *timestamp = [defaults objectForKey:kPendingRestoreTimestamp];
 
     if (!fileId || !path || !originalName) return;
 
@@ -320,217 +460,137 @@ static void checkAndRestorePending(void) {
         NSTimeInterval savedTime = [timestamp doubleValue];
         NSTimeInterval currentTime = [[NSDate date] timeIntervalSince1970];
         if (currentTime - savedTime > 300) {
-            restoreFileNameAPI(path, originalName);
-            [defaults removeObjectForKey:kKeyPendingFileId];
-            [defaults removeObjectForKey:kKeyPendingPath];
-            [defaults removeObjectForKey:kKeyPendingOriginalName];
-            [defaults removeObjectForKey:kKeyPendingTimestamp];
+            // 超时，清理并恢复
+            restoreFileNameInBackground(fileId, path, originalName);
+            [defaults removeObjectForKey:kPendingRestoreFileId];
+            [defaults removeObjectForKey:kPendingRestorePath];
+            [defaults removeObjectForKey:kPendingRestoreOriginalName];
+            [defaults removeObjectForKey:kPendingRestoreTimestamp];
             [defaults synchronize];
             return;
         }
     }
 
-    // 检查当前是否在文件列表页（不在预览页则恢复）
-    UIApplication *app = [UIApplication sharedApplication];
-    UIWindow *window = [app keyWindow];
-    if (!window) window = [[app windows] firstObject];
-    UIViewController *vc = [window rootViewController];
-
-    BOOL inFileList = NO;
-    if ([vc isKindOfClass:[UINavigationController class]]) {
-        UINavigationController *nav = (UINavigationController *)vc;
-        UIViewController *topVC = [nav topViewController];
-        NSString *className = NSStringFromClass([topVC class]);
-        if ([className containsString:@"FileList"] || [className containsString:@"FileView"] || 
-            [className containsString:@"Home"] || [className containsString:@"Main"]) {
-            inFileList = YES;
-        }
-    }
-
-    if (inFileList) {
-        restoreFileNameAPI(path, originalName);
-        [defaults removeObjectForKey:kKeyPendingFileId];
-        [defaults removeObjectForKey:kKeyPendingPath];
-        [defaults removeObjectForKey:kKeyPendingOriginalName];
-        [defaults removeObjectForKey:kKeyPendingTimestamp];
+    // 检查是否已离开预览界面
+    if (!isInPreviewOrDownloadView()) {
+        // 用户已返回文件列表，恢复原名
+        restoreFileNameInBackground(fileId, path, originalName);
+        [defaults removeObjectForKey:kPendingRestoreFileId];
+        [defaults removeObjectForKey:kPendingRestorePath];
+        [defaults removeObjectForKey:kPendingRestoreOriginalName];
+        [defaults removeObjectForKey:kPendingRestoreTimestamp];
         [defaults synchronize];
     }
 }
 
-// ==================== 核心：主处理流程 ====================
-static void processBackstage(NSString *fileId, NSString *path, NSString *originalName) {
+// ==================== 核心：主流程 - 用户点击文件后的后台处理 ====================
+static void processFileClickBackstage(UITableViewCell *cell) {
     if (g_isProcessing) {
         NSLog(@"[BNDP] Already processing, skip");
         return;
     }
+
+    NSString *fileId = getFileIdFromCell(cell);
+    NSString *path = getPathFromCell(cell);
+    NSString *originalName = getOriginalFileNameFromCell(cell);
+
     if (!fileId || !path || !originalName) {
-        NSLog(@"[BNDP] Invalid parameters");
+        NSLog(@"[BNDP] Cannot get file info from cell");
         return;
     }
 
     g_isProcessing = YES;
-    NSLog(@"[BNDP] ====== Start Backstage Processing ======");
-    NSLog(@"[BNDP] File: %@", originalName);
-    NSLog(@"[BNDP] Path: %@", path);
-    NSLog(@"[BNDP] FileId: %@", fileId);
-
-    // 保存记录
-    saveProcessingRecord(fileId, path, originalName);
+    NSLog(@"[BNDP] Start backstage processing for: %@", originalName);
 
     // 步骤1：后台重命名
-    renameFileAPI(path, originalName, ^(BOOL success, NSString *newPath) {
+    renameFileInBackground(fileId, path, originalName, ^(BOOL success, NSString *newName) {
         if (!success) {
             NSLog(@"[BNDP] Rename failed, abort");
             g_isProcessing = NO;
             return;
         }
 
-        NSLog(@"[BNDP] Step 1: Rename success");
+        NSLog(@"[BNDP] Rename success, now opening file...");
 
-        // 步骤2：后台打开文件
-        openFileViaMessage(fileId, newPath ?: path);
-        NSLog(@"[BNDP] Step 2: Open file triggered");
+        // 步骤2：后台打开文件（进入预览/下载界面）
+        openFileInBackground(fileId, path);
 
-        // 步骤3：保存待恢复状态
-        savePendingRestore(fileId, path, originalName);
-        NSLog(@"[BNDP] Step 3: Pending restore saved");
-
-        // 步骤4：获取下载直链（可选）
-        fetchDownloadLinkAPI(fileId, path, ^(NSString *dlink) {
-            if (dlink) {
-                NSLog(@"[BNDP] Step 4: Download link: %@", dlink);
-                [[UIPasteboard generalPasteboard] setString:dlink];
-
-                // 显示提示
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"下载直链已复制"
-                                                                    message:dlink
-                                                                   delegate:nil
-                                                          cancelButtonTitle:@"确定"
-                                                          otherButtonTitles:nil];
-                    [alert show];
-                });
-            }
-        });
+        // 步骤3：开始监控导航栈，以便在用户返回时恢复原名
+        startNavigationMonitoring(fileId, path, originalName);
 
         g_isProcessing = NO;
-        NSLog(@"[BNDP] ====== Processing Complete ======");
     });
 }
 
-// ==================== Hook 1：拦截 UITableView 的 didSelectRow ====================
+// ==================== Hook：拦截用户点击 Cell ====================
 %hook UITableView
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (!g_autoProcessEnabled) {
+    if (!g_autoClickEnabled) {
         %orig;
         return;
     }
 
-    // 获取 cell
+    // 获取当前点击的 cell
     UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
     if (!cell) {
         %orig;
         return;
     }
 
-    // 获取文件信息（通过 cell 内部数据）
-    NSString *fileId = nil;
-    NSString *path = nil;
-    NSString *originalName = nil;
-
-    @try {
-        // 尝试获取 fileInfo
-        id fileInfo = [cell valueForKey:@"_fileInfo"];
-        if (!fileInfo) fileInfo = [cell valueForKey:@"fileInfo"];
-        if (!fileInfo) fileInfo = [cell valueForKey:@"_data"];
-        if (!fileInfo) fileInfo = [cell valueForKey:@"data"];
-
-        if (fileInfo) {
-            fileId = [fileInfo valueForKey:@"fid"];
-            if (!fileId) fileId = [fileInfo valueForKey:@"fileId"];
-            if (!fileId) fileId = [fileInfo valueForKey:@"id"];
-            if (!fileId) fileId = [fileInfo valueForKey:@"fs_id"];
-
-            path = [fileInfo valueForKey:@"path"];
-            originalName = [fileInfo valueForKey:@"name"];
-            if (!originalName) originalName = [fileInfo valueForKey:@"server_filename"];
-        }
-    } @catch (NSException *e) {}
-
-    // 如果无法从 fileInfo 获取，尝试从 label 获取文件名
-    if (!originalName) {
-        @try {
-            NSArray *subviews = [cell.contentView subviews];
-            NSMutableArray *queue = [NSMutableArray arrayWithArray:subviews];
-            while ([queue count] > 0) {
-                UIView *view = [queue objectAtIndex:0];
-                [queue removeObjectAtIndex:0];
-                if ([view isKindOfClass:[UILabel class]]) {
-                    UILabel *label = (UILabel *)view;
-                    if (label.text && [label.text length] > 0 && ![label.text isEqualToString:@" "]) {
-                        originalName = label.text;
-                        break;
-                    }
-                }
-                [queue addObjectsFromArray:[view subviews]];
-            }
-        } @catch (NSException *e) {}
-    }
-
-    if (!fileId || !path || !originalName) {
-        NSLog(@"[BNDP] Cannot extract file info, fallback to original");
+    // 检查是否是百度网盘的文件列表
+    NSString *vcClass = NSStringFromClass([topViewController class]);
+    if (![vcClass containsString:@"File"] && ![vcClass containsString:@"List"]) {
         %orig;
         return;
     }
 
-    NSLog(@"[BNDP] Detected file click: %@", originalName);
+    // 获取文件信息
+    NSString *fileId = getFileIdFromCell(cell);
+    NSString *path = getPathFromCell(cell);
+    NSString *originalName = getOriginalFileNameFromCell(cell);
 
-    // 取消选择，防止默认行为
+    if (!fileId || !path || !originalName) {
+        %orig;
+        return;
+    }
+
+    NSLog(@"[BNDP] User clicked file: %@, start backstage processing", originalName);
+
+    // 取消默认选择（防止立即打开）
     [tableView deselectRowAtIndexPath:indexPath animated:NO];
 
-    // 后台处理
-    processBackstage(fileId, path, originalName);
+    // 后台处理：重命名 + 打开
+    processFileClickBackstage(cell);
 }
 
 %end
 
-// ==================== Hook 2：拦截 Cell 触摸事件（更底层） ====================
+// ==================== Hook：拦截 Cell 的 touchesBegan（更底层的点击拦截） ====================
 %hook UITableViewCell
 
-- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    if (!g_autoProcessEnabled) {
+- (void)touchesBegan:(NSSet *)touches withEvent:(UIEvent *)event {
+    if (!g_autoClickEnabled) {
         %orig;
         return;
     }
 
-    // 尝试获取文件信息
-    NSString *fileId = nil;
-    NSString *path = nil;
-    NSString *originalName = nil;
+    // 获取当前 view controller 判断是否在文件列表
+    NSString *vcClass = NSStringFromClass([topViewController class]);
+    if (![vcClass containsString:@"File"] && ![vcClass containsString:@"List"]) {
+        %orig;
+        return;
+    }
 
-    @try {
-        id fileInfo = [self valueForKey:@"_fileInfo"];
-        if (!fileInfo) fileInfo = [self valueForKey:@"fileInfo"];
-        if (!fileInfo) fileInfo = [self valueForKey:@"_data"];
-        if (!fileInfo) fileInfo = [self valueForKey:@"data"];
-
-        if (fileInfo) {
-            fileId = [fileInfo valueForKey:@"fid"];
-            if (!fileId) fileId = [fileInfo valueForKey:@"fileId"];
-            if (!fileId) fileId = [fileInfo valueForKey:@"id"];
-            if (!fileId) fileId = [fileInfo valueForKey:@"fs_id"];
-
-            path = [fileInfo valueForKey:@"path"];
-            originalName = [fileInfo valueForKey:@"name"];
-            if (!originalName) originalName = [fileInfo valueForKey:@"server_filename"];
-        }
-    } @catch (NSException *e) {}
+    // 获取文件信息
+    NSString *fileId = getFileIdFromCell(self);
+    NSString *path = getPathFromCell(self);
+    NSString *originalName = getOriginalFileNameFromCell(self);
 
     if (fileId && path && originalName) {
-        NSLog(@"[BNDP] Touch on file: %@, start backstage", originalName);
-        processBackstage(fileId, path, originalName);
-        return; // 阻止默认触摸行为
+        NSLog(@"[BNDP] Touch detected on file: %@, processing backstage", originalName);
+        processFileClickBackstage(self);
+        return; // 不调用 orig，阻止默认行为
     }
 
     %orig;
@@ -538,19 +598,31 @@ static void processBackstage(NSString *fileId, NSString *path, NSString *origina
 
 %end
 
-// ==================== Hook 3：拦截下载链接 ====================
+// ==================== Hook：NSURLSession 下载链接拦截 ====================
 %hook NSURLSession
 
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request {
     NSURL *url = [request URL];
     NSString *urlStr = [url absoluteString];
 
-    if ([urlStr containsString:@"d.pcs.baidu.com"] ||
+    // 拦截下载链接
+    if ([urlStr containsString:@"d.pcs.baidu.com"] || 
         [urlStr containsString:@"pcs.baidu.com"] ||
-        [urlStr containsString:@"cdn.baidupcs.com"] ||
-        [urlStr containsString:@"bj.bcebos.com"]) {
-        NSLog(@"[BNDP] Intercept download: %@", urlStr);
+        [urlStr containsString:@"cdn.baidupcs.com"]) {
+        NSLog(@"[BNDP] Intercepted download URL: %@", urlStr);
+
+        // 可以在这里复制链接到剪贴板
         [[UIPasteboard generalPasteboard] setString:urlStr];
+
+        // 显示提示
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"下载链接已复制" 
+                                                            message:urlStr 
+                                                           delegate:nil 
+                                                  cancelButtonTitle:@"确定" 
+                                                  otherButtonTitles:nil];
+            [alert show];
+        });
     }
 
     return %orig;
@@ -561,6 +633,8 @@ static void processBackstage(NSString *fileId, NSString *path, NSString *origina
 // ==================== 悬浮球 UI ====================
 @interface BNDPFloatingBall : UIView
 @property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, assign) BOOL isDragging;
+@property (nonatomic, assign) CGPoint startPoint;
 @end
 
 @implementation BNDPFloatingBall
@@ -582,17 +656,21 @@ static void processBackstage(NSString *fileId, NSString *path, NSString *origina
         self.titleLabel.font = [UIFont boldSystemFontOfSize:14];
         [self addSubview:self.titleLabel];
 
+        // 长按手势 - 设置菜单
         UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
         [self addGestureRecognizer:longPress];
 
+        // 双击手势 - 一键重试
         UITapGestureRecognizer *doubleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleDoubleTap:)];
         doubleTap.numberOfTapsRequired = 2;
         [self addGestureRecognizer:doubleTap];
 
+        // 单击手势 - 切换开关
         UITapGestureRecognizer *singleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleSingleTap:)];
         [singleTap requireGestureRecognizerToFail:doubleTap];
         [self addGestureRecognizer:singleTap];
 
+        // 拖动手势
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         [self addGestureRecognizer:pan];
     }
@@ -600,78 +678,141 @@ static void processBackstage(NSString *fileId, NSString *path, NSString *origina
 }
 
 - (void)handleSingleTap:(UITapGestureRecognizer *)gesture {
-    g_autoProcessEnabled = !g_autoProcessEnabled;
-    self.titleLabel.text = g_autoProcessEnabled ? @"BD" : @"OFF";
-    self.backgroundColor = g_autoProcessEnabled ? [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:0.9] : [UIColor grayColor];
+    g_autoClickEnabled = !g_autoClickEnabled;
+    self.titleLabel.text = g_autoClickEnabled ? @"BD" : @"OFF";
+    self.backgroundColor = g_autoClickEnabled ? [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:0.9] : [UIColor grayColor];
+
+    NSString *msg = g_autoClickEnabled ? @"自动处理已开启" : @"自动处理已关闭";
+    UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"百度网盘插件" 
+                                                    message:msg 
+                                                   delegate:nil 
+                                          cancelButtonTitle:@"确定" 
+                                          otherButtonTitles:nil];
+    [alert show];
 }
 
 - (void)handleDoubleTap:(UITapGestureRecognizer *)gesture {
+    // 一键重试：从 UserDefaults 读取上次处理的文件信息
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    NSString *lastFileId = [defaults objectForKey:kKeyLastFileId];
-    NSString *lastPath = [defaults objectForKey:kKeyLastPath];
-    NSString *lastOriginalName = [defaults objectForKey:kKeyLastOriginalName];
+    NSString *lastFileId = [defaults objectForKey:@"BNDP_LastFileId"];
+    NSString *lastPath = [defaults objectForKey:@"BNDP_LastPath"];
+    NSString *lastOriginalName = [defaults objectForKey:@"BNDP_LastOriginalName"];
 
     if (lastFileId && lastPath && lastOriginalName) {
-        restoreFileNameAPI(lastPath, lastOriginalName);
+        NSLog(@"[BNDP] Retry last file: %@", lastOriginalName);
+
+        // 先恢复原名（如果之前重命名过）
+        restoreFileNameInBackground(lastFileId, lastPath, lastOriginalName);
+
+        // 延迟后重新处理
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            processBackstage(lastFileId, lastPath, lastOriginalName);
+            // 重新重命名并打开
+            renameFileInBackground(lastFileId, lastPath, lastOriginalName, ^(BOOL success, NSString *newName) {
+                if (success) {
+                    openFileInBackground(lastFileId, lastPath);
+                    startNavigationMonitoring(lastFileId, lastPath, lastOriginalName);
+                }
+            });
         });
+    } else {
+        UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"百度网盘插件" 
+                                                        message:@"没有可重试的记录" 
+                                                       delegate:nil 
+                                              cancelButtonTitle:@"确定" 
+                                              otherButtonTitles:nil];
+        [alert show];
     }
 }
 
 - (void)handleLongPress:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state == UIGestureRecognizerStateBegan) {
-        UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"百度网盘插件"
-                                                        message:[NSString stringWithFormat:@"自动处理: %@\n点击文件后自动重命名并打开", g_autoProcessEnabled ? @"开启" : @"关闭"]
-                                                       delegate:nil
-                                              cancelButtonTitle:@"确定"
-                                              otherButtonTitles:nil];
+        // 显示设置菜单
+        UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"百度网盘插件设置" 
+                                                        message:@"选择操作" 
+                                                       delegate:self 
+                                              cancelButtonTitle:@"取消" 
+                                              otherButtonTitles:@"查看历史", @"清除缓存", @"关于", nil];
         [alert show];
     }
 }
 
 - (void)handlePan:(UIPanGestureRecognizer *)gesture {
     CGPoint translation = [gesture translationInView:self.superview];
-    if (gesture.state == UIGestureRecognizerStateChanged) {
-        CGPoint newCenter = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
+
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        self.startPoint = self.center;
+    } else if (gesture.state == UIGestureRecognizerStateChanged) {
+        CGPoint newCenter = CGPointMake(self.startPoint.x + translation.x, self.startPoint.y + translation.y);
+
+        // 限制在屏幕内
         CGFloat margin = self.frame.size.width / 2;
         newCenter.x = MAX(margin, MIN(self.superview.frame.size.width - margin, newCenter.x));
         newCenter.y = MAX(margin, MIN(self.superview.frame.size.height - margin, newCenter.y));
+
         self.center = newCenter;
-        [gesture setTranslation:CGPointZero inView:self.superview];
     }
+}
+
+@end
+
+// ==================== 悬浮球管理器 ====================
+@interface BNDPFloatingBallManager : NSObject
+@property (nonatomic, strong) BNDPFloatingBall *floatingBall;
++ (instancetype)sharedManager;
+- (void)showFloatingBall;
+@end
+
+@implementation BNDPFloatingBallManager
+
++ (instancetype)sharedManager {
+    static BNDPFloatingBallManager *instance = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        instance = [[self alloc] init];
+    });
+    return instance;
+}
+
+- (void)showFloatingBall {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self.floatingBall) {
+            [self.floatingBall removeFromSuperview];
+        }
+
+        UIWindow *window = [[UIApplication sharedApplication] keyWindow];
+        if (!window) {
+            window = [[[UIApplication sharedApplication] windows] firstObject];
+        }
+
+        CGFloat size = 50;
+        CGFloat x = [UIScreen mainScreen].bounds.size.width - size - 20;
+        CGFloat y = 100;
+
+        self.floatingBall = [[BNDPFloatingBall alloc] initWithFrame:CGRectMake(x, y, size, size)];
+        [window addSubview:self.floatingBall];
+    });
 }
 
 @end
 
 // ==================== 构造函数 ====================
 %ctor {
-    NSLog(@"[BNDP] ========================================");
-    NSLog(@"[BNDP] Pure Backstage Plugin v11.0 Loaded");
-    NSLog(@"[BNDP] Features:");
-    NSLog(@"[BNDP]   1. Backstage rename via API");
-    NSLog(@"[BNDP]   2. Auto open file via message");
-    NSLog(@"[BNDP]   3. Auto restore when return");
-    NSLog(@"[BNDP]   4. Download link intercept");
-    NSLog(@"[BNDP]   5. No UI scrolling at all");
-    NSLog(@"[BNDP] ========================================");
+    NSLog(@"[BNDP] Backstage Plugin v11.0 loaded");
+    NSLog(@"[BNDP] Features: Auto-rename -> Auto-open -> Auto-restore");
+    NSLog(@"[BNDP] No UI scrolling, all operations in background");
 
     // 显示悬浮球
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *window = [[UIApplication sharedApplication] keyWindow];
-        if (!window) window = [[[UIApplication sharedApplication] windows] firstObject];
-        CGFloat size = 50;
-        CGFloat x = [UIScreen mainScreen].bounds.size.width - size - 20;
-        CGFloat y = 100;
-        BNDPFloatingBall *ball = [[BNDPFloatingBall alloc] initWithFrame:CGRectMake(x, y, size, size)];
-        [window addSubview:ball];
-    });
+    [[BNDPFloatingBallManager sharedManager] showFloatingBall];
 
-    // 注册前台通知，检查待恢复文件
-    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
-                                                        object:nil
-                                                         queue:[NSOperationQueue mainQueue]
+    // 注册应用进入前台通知，检查是否有待恢复的文件
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification 
+                                                        object:nil 
+                                                         queue:[NSOperationQueue mainQueue] 
                                                     usingBlock:^(NSNotification *note) {
-        checkAndRestorePending();
+        checkAndRestoreFileName();
     }];
+}
+
+%dtor {
+    NSLog(@"[BNDP] Plugin unloaded");
 }
