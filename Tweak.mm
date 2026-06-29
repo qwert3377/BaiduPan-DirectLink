@@ -1,8 +1,6 @@
-//
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v12.1 (Xcode Port)
-//  Fix: Removed Logos syntax, replaced with Objective-C Method Swizzling
-//  Fix: Fixed 'keyWindow' deprecation warnings and unused variables
-//
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v12.1
+//  Fix: Removed unused variables, fixed function order, no block recursion
+//  Strategy: Hook internal PriviewDownLoad -> previewDownloadFileMeta to intercept dlink
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -47,8 +45,6 @@ static void showFloatButton(void);
 
 static UIViewController * topViewController(void) {
     UIWindow *window = nil;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
     if (@available(iOS 13.0, *)) {
         for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
             if (scene.activationState == UISceneActivationStateForegroundActive) {
@@ -58,7 +54,6 @@ static UIViewController * topViewController(void) {
         }
     }
     if (!window) window = [[UIApplication sharedApplication] keyWindow];
-#pragma clang diagnostic pop
     if (!window) return nil;
     UIViewController *vc = window.rootViewController;
     while (vc.presentedViewController) vc = vc.presentedViewController;
@@ -254,19 +249,16 @@ static void copyToClipboard(NSString *text) {
 
 static void showToast(NSString *msg) {
     UIWindow *window = nil;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
     if (@available(iOS 13.0, *)) {
         for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
             if (scene.activationState == UISceneActivationStateForegroundActive) { window = scene.windows.firstObject; break; }
         }
     }
     if (!window) window = [[UIApplication sharedApplication] keyWindow];
-#pragma clang diagnostic pop
     if (!window) return;
     UILabel *toast = [[UILabel alloc] init];
     toast.text = msg;
-    toast.textColor = [UIColor whiteColor];
+    toast.textColor = [UIColor whiteColor;
     toast.backgroundColor = [UIColor colorWithWhite:0 alpha:0.8];
     toast.textAlignment = NSTextAlignmentCenter;
     toast.font = [UIFont systemFontOfSize:14];
@@ -293,10 +285,10 @@ static void forceRefreshFileList(void) {
         SEL sel = NSSelectorFromString(selName);
         if ([vc respondsToSelector:sel]) {
             DLog(@"Calling VC refresh method: %@", selName);
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
             [vc performSelector:sel];
-#pragma clang diagnostic pop
+            #pragma clang diagnostic pop
             return;
         }
     }
@@ -511,26 +503,11 @@ static void triggerDownloadFlow(void) {
     });
 }
 
-// ========== Standard Objective-C Method Swizzling Hooks ==========
+// ========== Logos Hooks ==========
 
-#pragma mark - NSURLSession Hook
-@implementation NSURLSession (BaiduPanTrollHook)
+%hook NSURLSession
 
-+ (void)load {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        Class cls = [NSURLSession class];
-        SEL originalSel = @selector(dataTaskWithRequest:completionHandler:);
-        SEL swizzledSel = @selector(bdt_dataTaskWithRequest:completionHandler:);
-        Method originalMethod = class_getInstanceMethod(cls, originalSel);
-        Method swizzledMethod = class_getInstanceMethod(cls, swizzledSel);
-        if (originalMethod && swizzledMethod) {
-            method_exchangeImplementations(originalMethod, swizzledMethod);
-        }
-    });
-}
-
-- (NSURLSessionDataTask *)bdt_dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
     NSString *urlString = request.URL.absoluteString;
 
     if (gShouldInterceptDlink && urlString) {
@@ -549,99 +526,59 @@ static void triggerDownloadFlow(void) {
             gInterceptedDlink = urlString;
             gShouldInterceptDlink = NO;
 
-            NSURLSessionDataTask *dummyTask = [self bdt_dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+            NSURLSessionDataTask *dummyTask = %orig(request, ^(NSData *data, NSURLResponse *response, NSError *error) {
                 if (completionHandler) {
                     completionHandler(nil, nil, [NSError errorWithDomain:@"BaiduPanTroll" code:-999 userInfo:@{NSLocalizedDescriptionKey: @"Intercepted by Troll"}]);
                 }
-            }];
+            });
             [dummyTask cancel];
             return dummyTask;
         }
     }
 
-    return [self bdt_dataTaskWithRequest:request completionHandler:completionHandler];
-}
-@end
-
-#pragma mark - PriviewDownLoad Hook
-@implementation NSObject (PriviewDownLoadHook)
-
-+ (void)load {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        Class cls = NSClassFromString(@"PriviewDownLoad");
-        if (!cls) return;
-
-        NSArray *selectors = @[@"previewDownloadFileMeta", @"downloadFileWithCDNModel:", @"PMallDownloadFile", @"downloadShareDirFile"];
-        for (NSString *selName in selectors) {
-            SEL originalSel = NSSelectorFromString(selName);
-            NSString *swizzledSelName = [NSString stringWithFormat:@"bdt_%@", selName];
-            SEL swizzledSel = NSSelectorFromString(swizzledSelName);
-            Method originalMethod = class_getInstanceMethod(cls, originalSel);
-            Method swizzledMethod = class_getInstanceMethod(cls, swizzledSel);
-            if (originalMethod && swizzledMethod) {
-                method_exchangeImplementations(originalMethod, swizzledMethod);
-            }
-        }
-    });
+    return %orig(request, completionHandler);
 }
 
-- (void)bdt_previewDownloadFileMeta {
+%end
+
+%hook PriviewDownLoad
+
+- (void)previewDownloadFileMeta {
     DLog(@"Hook: previewDownloadFileMeta called, intercept enabled");
     gShouldInterceptDlink = YES;
-    [self bdt_previewDownloadFileMeta];
+    %orig;
 }
 
-- (void)bdt_downloadFileWithCDNModel:(id)cdnModel {
+- (void)downloadFileWithCDNModel:(id)cdnModel {
     DLog(@"Hook: downloadFileWithCDNModel called");
     gShouldInterceptDlink = YES;
-    [self bdt_downloadFileWithCDNModel:cdnModel];
+    %orig;
 }
 
-- (void)bdt_PMallDownloadFile {
+- (void)PMallDownloadFile {
     DLog(@"Hook: PMallDownloadFile called");
     gShouldInterceptDlink = YES;
-    [self bdt_PMallDownloadFile];
+    %orig;
 }
 
-- (void)bdt_downloadShareDirFile {
+- (void)downloadShareDirFile {
     DLog(@"Hook: downloadShareDirFile called");
     gShouldInterceptDlink = YES;
-    [self bdt_downloadShareDirFile];
-}
-@end
-
-#pragma mark - DownOperation Hook
-@implementation NSObject (DownOperationHook)
-
-+ (void)load {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        Class cls = NSClassFromString(@"DownOperation");
-        if (!cls) return;
-
-        NSArray *selectors = @[@"downloadFromPCS", @"getDlinkDownloadPath"];
-        for (NSString *selName in selectors) {
-            SEL originalSel = NSSelectorFromString(selName);
-            NSString *swizzledSelName = [NSString stringWithFormat:@"bdt_%@", selName];
-            SEL swizzledSel = NSSelectorFromString(swizzledSelName);
-            Method originalMethod = class_getInstanceMethod(cls, originalSel);
-            Method swizzledMethod = class_getInstanceMethod(cls, swizzledSel);
-            if (originalMethod && swizzledMethod) {
-                method_exchangeImplementations(originalMethod, swizzledMethod);
-            }
-        }
-    });
+    %orig;
 }
 
-- (void)bdt_downloadFromPCS {
+%end
+
+%hook DownOperation
+
+- (void)downloadFromPCS {
     DLog(@"Hook: downloadFromPCS called");
     gShouldInterceptDlink = YES;
-    [self bdt_downloadFromPCS];
+    %orig;
 }
 
-- (id)bdt_getDlinkDownloadPath {
-    id result = [self bdt_getDlinkDownloadPath];
+- (id)getDlinkDownloadPath {
+    id result = %orig;
     if (result && [result isKindOfClass:[NSString class]] && gShouldInterceptDlink) {
         NSString *dlink = (NSString *)result;
         DLog(@"Hook: getDlinkDownloadPath returned: %@...", [dlink substringToIndex:MIN(80, dlink.length)]);
@@ -649,43 +586,24 @@ static void triggerDownloadFlow(void) {
     }
     return result;
 }
-@end
 
-#pragma mark - BDPanFileDownloadEngine Hook
-@implementation NSObject (BDPanFileDownloadEngineHook)
+%end
 
-+ (void)load {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        Class cls = NSClassFromString(@"BDPanFileDownloadEngine");
-        if (!cls) return;
+%hook BDPanFileDownloadEngine
 
-        NSArray *selectors = @[@"startDownloadTransFile", @"startDownloadFolder"];
-        for (NSString *selName in selectors) {
-            SEL originalSel = NSSelectorFromString(selName);
-            NSString *swizzledSelName = [NSString stringWithFormat:@"bdt_%@", selName];
-            SEL swizzledSel = NSSelectorFromString(swizzledSelName);
-            Method originalMethod = class_getInstanceMethod(cls, originalSel);
-            Method swizzledMethod = class_getInstanceMethod(cls, swizzledSel);
-            if (originalMethod && swizzledMethod) {
-                method_exchangeImplementations(originalMethod, swizzledMethod);
-            }
-        }
-    });
-}
-
-- (void)bdt_startDownloadTransFile {
+- (void)startDownloadTransFile {
     DLog(@"Hook: startDownloadTransFile called");
     gShouldInterceptDlink = YES;
-    [self bdt_startDownloadTransFile];
+    %orig;
 }
 
-- (void)bdt_startDownloadFolder {
+- (void)startDownloadFolder {
     DLog(@"Hook: startDownloadFolder called");
     gShouldInterceptDlink = YES;
-    [self bdt_startDownloadFolder];
+    %orig;
 }
-@end
+
+%end
 
 // ========== Float Button ==========
 
@@ -711,15 +629,12 @@ static void onFloatButtonTap(void) {
 static void showFloatButton(void) {
     if (gFloatButton) return;
     UIWindow *window = nil;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
     if (@available(iOS 13.0, *)) {
         for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
             if (scene.activationState == UISceneActivationStateForegroundActive) { window = scene.windows.firstObject; break; }
         }
     }
     if (!window) window = [[UIApplication sharedApplication] keyWindow];
-#pragma clang diagnostic pop
     if (!window) return;
     CGFloat size = 50;
     CGFloat x = [UIScreen mainScreen].bounds.size.width - size - 20;
@@ -732,22 +647,19 @@ static void showFloatButton(void) {
     [gFloatButton setTitle:@"🚀" forState:UIControlStateNormal];
     [gFloatButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     gFloatButton.titleLabel.font = [UIFont systemFontOfSize:24];
-    
-    // 【关键修改】将 self 替换为 [UIApplication sharedApplication]，以避免静态函数报错
-    [gFloatButton addTarget:[UIApplication sharedApplication] action:@selector(bdt_floatButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:[UIApplication sharedApplication] action:@selector(bdt_floatButtonPanned:)];
-    
+    [gFloatButton addTarget:[NSObject new] action:@selector(bdt_floatButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:[NSObject new] action:@selector(bdt_floatButtonPanned:)];
     [gFloatButton addGestureRecognizer:pan];
     [window addSubview:gFloatButton];
     DLog(@"Float button shown (v12.1)");
 }
 
-@interface NSObject (BaiduPanTrollFloat)
+@interface NSObject (BaiduPanTroll)
 - (void)bdt_floatButtonTapped:(id)sender;
 - (void)bdt_floatButtonPanned:(UIPanGestureRecognizer *)gesture;
 @end
 
-@implementation NSObject (BaiduPanTrollFloat)
+@implementation NSObject (BaiduPanTroll)
 - (void)bdt_floatButtonTapped:(id)sender { onFloatButtonTap(); }
 - (void)bdt_floatButtonPanned:(UIPanGestureRecognizer *)gesture {
     UIView *button = gesture.view;
