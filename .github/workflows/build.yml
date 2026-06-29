@@ -39,4 +39,4 @@ jobs:
       with:
         name: BaiduPanTroll.dylib
         path: "**/*.dylib"
-        if-no-files-found: war
+        if-no-files-found: warn
