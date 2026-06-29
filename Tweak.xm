@@ -1,7 +1,7 @@
 //
 //  Tweak.xm
-//  BaiduPanTroll - Pure Backstage v11.0
-//  Theos Logos 单文件版本
+//  BaiduPanTroll - Pure Backstage v11.1
+//  修复：重命名后自动刷新文件列表
 //
 
 #import <UIKit/UIKit.h>
@@ -21,7 +21,89 @@ static NSString *const kKeyLastOriginalName = @"BNDP_Last_OriginalName";
 static BOOL g_autoProcessEnabled = YES;
 static BOOL g_isProcessing = NO;
 
-// ==================== 辅助函数 ====================
+// ==================== 辅助函数：获取当前文件列表 VC ====================
+static UIViewController* getCurrentFileListVC(void) {
+    UIApplication *app = [UIApplication sharedApplication];
+    UIWindow *window = [app keyWindow];
+    if (!window) window = [[app windows] firstObject];
+    UIViewController *rootVC = [window rootViewController];
+    UIViewController *targetVC = nil;
+    if ([rootVC isKindOfClass:[UINavigationController class]]) {
+        UINavigationController *nav = (UINavigationController *)rootVC;
+        NSArray *vcs = [nav viewControllers];
+        for (UIViewController *vc in vcs) {
+            NSString *className = NSStringFromClass([vc class]);
+            if ([className containsString:@"FileList"] || [className containsString:@"FileView"] ||
+                [className containsString:@"BDFile"] || [className containsString:@"PanFile"]) {
+                targetVC = vc;
+                break;
+            }
+        }
+        if (!targetVC && [vcs count] > 0) {
+            targetVC = [vcs lastObject];
+        }
+    }
+    return targetVC;
+}
+
+// ==================== 辅助函数：刷新文件列表 ====================
+static void refreshFileList(void) {
+    UIViewController *vc = getCurrentFileListVC();
+    if (!vc) {
+        NSLog(@"[BNDP] Cannot find file list VC to refresh");
+        return;
+    }
+
+    NSLog(@"[BNDP] Refreshing file list...");
+
+    // 方法1：尝试调用常见的刷新方法
+    SEL refreshSelectors[] = {
+        NSSelectorFromString(@"reloadFileList"),
+        NSSelectorFromString(@"refreshData"),
+        NSSelectorFromString(@"loadData"),
+        NSSelectorFromString(@"fetchFileList"),
+        NSSelectorFromString(@"refreshFileList"),
+        NSSelectorFromString(@"pullToRefresh"),
+        NSSelectorFromString(@"onRefresh"),
+        NSSelectorFromString(@"reloadData"),
+        (SEL)0
+    };
+
+    for (int i = 0; refreshSelectors[i] != (SEL)0; i++) {
+        SEL sel = refreshSelectors[i];
+        if ([vc respondsToSelector:sel]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [vc performSelector:sel];
+            #pragma clang diagnostic pop
+            NSLog(@"[BNDP] Refreshed via selector: %@", NSStringFromSelector(sel));
+            return;
+        }
+    }
+
+    // 方法2：查找 UITableView 并 reloadData
+    NSArray *subviews = [vc.view subviews];
+    NSMutableArray *queue = [NSMutableArray arrayWithArray:subviews];
+    while ([queue count] > 0) {
+        UIView *view = [queue objectAtIndex:0];
+        [queue removeObjectAtIndex:0];
+        if ([view isKindOfClass:[UITableView class]]) {
+            UITableView *tableView = (UITableView *)view;
+            [tableView reloadData];
+            NSLog(@"[BNDP] Refreshed via UITableView reloadData");
+            return;
+        }
+        [queue addObjectsFromArray:[view subviews]];
+    }
+
+    // 方法3：发送通知
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"BNDP_RefreshFileList"
+                                                        object:nil
+                                                      userInfo:nil];
+    NSLog(@"[BNDP] Posted refresh notification");
+}
+
+// ==================== 辅助函数：获取 bdstoken ====================
 static NSString* getBdstoken(void) {
     NSString *bdstoken = nil;
     @try {
@@ -150,25 +232,7 @@ static void fetchDownloadLinkAPI(NSString *fileId, NSString *path, void (^comple
 static void openFileViaMessage(NSString *fileId, NSString *path) {
     if (!fileId || !path) return;
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIApplication *app = [UIApplication sharedApplication];
-        UIWindow *window = [app keyWindow];
-        if (!window) window = [[app windows] firstObject];
-        UIViewController *rootVC = [window rootViewController];
-        UIViewController *targetVC = nil;
-        if ([rootVC isKindOfClass:[UINavigationController class]]) {
-            UINavigationController *nav = (UINavigationController *)rootVC;
-            NSArray *vcs = [nav viewControllers];
-            for (UIViewController *vc in vcs) {
-                NSString *className = NSStringFromClass([vc class]);
-                if ([className containsString:@"FileList"] || [className containsString:@"FileView"]) {
-                    targetVC = vc;
-                    break;
-                }
-            }
-            if (!targetVC && [vcs count] > 0) {
-                targetVC = [vcs lastObject];
-            }
-        }
+        UIViewController *targetVC = getCurrentFileListVC();
         if (targetVC) {
             SEL selectors[] = {
                 NSSelectorFromString(@"openFileWithId:"),
@@ -254,15 +318,10 @@ static void checkAndRestorePending(void) {
             return;
         }
     }
-    UIApplication *app = [UIApplication sharedApplication];
-    UIWindow *window = [app keyWindow];
-    if (!window) window = [[app windows] firstObject];
-    UIViewController *vc = [window rootViewController];
+    UIViewController *vc = getCurrentFileListVC();
     BOOL inFileList = NO;
-    if ([vc isKindOfClass:[UINavigationController class]]) {
-        UINavigationController *nav = (UINavigationController *)vc;
-        UIViewController *topVC = [nav topViewController];
-        NSString *className = NSStringFromClass([topVC class]);
+    if (vc) {
+        NSString *className = NSStringFromClass([vc class]);
         if ([className containsString:@"FileList"] || [className containsString:@"FileView"] ||
             [className containsString:@"Home"] || [className containsString:@"Main"]) {
             inFileList = YES;
@@ -317,6 +376,7 @@ static void extractFileInfoFromCell(UITableViewCell *cell, NSString **outFileId,
     }
 }
 
+// ==================== 核心处理：重命名 + 刷新 + 打开 ====================
 static void processBackstage(NSString *fileId, NSString *path, NSString *originalName) {
     if (g_isProcessing) {
         NSLog(@"[BNDP] Already processing, skip");
@@ -332,6 +392,8 @@ static void processBackstage(NSString *fileId, NSString *path, NSString *origina
     NSLog(@"[BNDP] Path: %@", path);
     NSLog(@"[BNDP] FileId: %@", fileId);
     saveProcessingRecord(fileId, path, originalName);
+
+    // 步骤1：后台重命名
     renameFileAPI(path, originalName, ^(BOOL success, NSString *newPath) {
         if (!success) {
             NSLog(@"[BNDP] Rename failed, abort");
@@ -339,13 +401,25 @@ static void processBackstage(NSString *fileId, NSString *path, NSString *origina
             return;
         }
         NSLog(@"[BNDP] Step 1: Rename success");
-        openFileViaMessage(fileId, newPath ?: path);
-        NSLog(@"[BNDP] Step 2: Open file triggered");
+
+        // 步骤2：刷新文件列表（关键修复）
+        refreshFileList();
+        NSLog(@"[BNDP] Step 2: File list refreshed");
+
+        // 步骤3：延迟打开文件，等刷新完成
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            openFileViaMessage(fileId, newPath ?: path);
+            NSLog(@"[BNDP] Step 3: Open file triggered");
+        });
+
+        // 步骤4：保存待恢复状态
         savePendingRestore(fileId, path, originalName);
-        NSLog(@"[BNDP] Step 3: Pending restore saved");
+        NSLog(@"[BNDP] Step 4: Pending restore saved");
+
+        // 步骤5：获取下载直链
         fetchDownloadLinkAPI(fileId, path, ^(NSString *dlink) {
             if (dlink) {
-                NSLog(@"[BNDP] Step 4: Download link: %@", dlink);
+                NSLog(@"[BNDP] Step 5: Download link: %@", dlink);
                 [[UIPasteboard generalPasteboard] setString:dlink];
                 dispatch_async(dispatch_get_main_queue(), ^{
                     UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"下载直链已复制"
@@ -357,6 +431,7 @@ static void processBackstage(NSString *fileId, NSString *path, NSString *origina
                 });
             }
         });
+
         g_isProcessing = NO;
         NSLog(@"[BNDP] ====== Processing Complete ======");
     });
@@ -367,8 +442,7 @@ static void processBackstage(NSString *fileId, NSString *path, NSString *origina
 @property (nonatomic, strong) UILabel *titleLabel;
 @end
 
-// ==================== Logos Hook 块（必须在 @implementation 之前）====================
-
+// ==================== Logos Hook 块 ====================
 %hook UITableView
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -435,7 +509,7 @@ static void processBackstage(NSString *fileId, NSString *path, NSString *origina
 
 %end
 
-// ==================== 悬浮球实现（必须在所有 %hook 之后）====================
+// ==================== 悬浮球实现 ====================
 @implementation BNDPFloatingBall
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -514,13 +588,8 @@ static void processBackstage(NSString *fileId, NSString *path, NSString *origina
 // ==================== 构造函数 ====================
 %ctor {
     NSLog(@"[BNDP] ========================================");
-    NSLog(@"[BNDP] Pure Backstage Plugin v11.0 Loaded");
-    NSLog(@"[BNDP] Features:");
-    NSLog(@"[BNDP]   1. Backstage rename via API");
-    NSLog(@"[BNDP]   2. Auto open file via message");
-    NSLog(@"[BNDP]   3. Auto restore when return");
-    NSLog(@"[BNDP]   4. Download link intercept");
-    NSLog(@"[BNDP]   5. No UI scrolling at all");
+    NSLog(@"[BNDP] Pure Backstage Plugin v11.1 Loaded");
+    NSLog(@"[BNDP] Fix: Auto refresh file list after rename");
     NSLog(@"[BNDP] ========================================");
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *window = [[UIApplication sharedApplication] keyWindow];
