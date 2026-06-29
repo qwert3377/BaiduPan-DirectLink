@@ -1,9 +1,8 @@
 # Makefile
 TARGET := iphone:clang:latest:15.0
 ARCHS = arm64 arm64e
-INSTALL_TARGET_PROCESSES = BaiduNetdisk
 
-TWEAK_NAME = BaiduPanTroll
+LIBRARY_NAME = BaiduPanTroll
 
 BaiduPanTroll_FILES = Tweak.mm
 BaiduPanTroll_FRAMEWORKS = UIKit Foundation
@@ -11,4 +10,4 @@ BaiduPanTroll_CFLAGS = -fobjc-arc -Wno-unused-function -Wno-unused-variable -Wno
 BaiduPanTroll_LDFLAGS = -Wl,-segalign,4000
 
 include $(THEOS)/makefiles/common.mk
-include $(THEOS_MAKE_PATH)/tweak.mk
+include $(THEOS_MAKE_PATH)/library.mk
