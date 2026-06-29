@@ -1,7 +1,7 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v12.0
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v12.1
+//  Fix: Removed unused variables, fixed function order, no block recursion
 //  Strategy: Hook internal PriviewDownLoad -> previewDownloadFileMeta to intercept dlink
-//  This bypasses the 50MB limit by capturing the server-signed dlink from app internals.
 //
 
 #import <UIKit/UIKit.h>
@@ -22,7 +22,8 @@ static NSString *gInterceptedFileId = nil;
 static BOOL gShouldInterceptDlink = NO;
 static BOOL gIsProcessingFile = NO;
 
-// Forward declarations (functions must be defined before use)
+// ========== Forward Declarations ==========
+
 static UIViewController * topViewController(void);
 static NSString * strictEncodeURIComponent(NSString *str);
 static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *headers, NSString *body, void (^handler)(id json, NSError *err));
@@ -36,6 +37,7 @@ static void copyToClipboard(NSString *text);
 static void showToast(NSString *msg);
 static void forceRefreshFileList(void);
 static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId, NSString *pdfPath);
+static void handleInterceptedDlink(void);
 static void runRenameAndIntercept(NSString *fileName, NSString *filePath, NSString *fileId);
 static void triggerDownloadFlow(void);
 static void onFloatButtonTap(void);
@@ -302,7 +304,7 @@ static void forceRefreshFileList(void) {
     }
 }
 
-// ========== v12.0 Link Dialog ==========
+// ========== Link Dialog ==========
 
 @interface LinkCopyButton : UIButton
 @property (nonatomic, copy) NSString *linkText;
@@ -378,13 +380,12 @@ static void showLinkDialog(NSString *link, NSString *fileName, NSString *fileId,
     if (vc) [vc presentViewController:alert animated:YES completion:nil];
 }
 
-// ========== v12.0 Core: Intercept internal download dlink ==========
+// ========== Core: Intercept internal download dlink ==========
 
 static void handleInterceptedDlink(void) {
     if (!gInterceptedDlink) {
         DLog(@"No dlink intercepted!");
         showToast(@"未能拦截到直链，请重试");
-        // Auto restore original name if interception failed
         if (gInterceptedFileId && gInterceptedFileName && gInterceptedFilePath) {
             NSString *pdfPath = [[gInterceptedFilePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:[gInterceptedFileName stringByAppendingString:@".pdf"]];
             renameFile(gInterceptedFileId, pdfPath, gInterceptedFileName, ^(BOOL ok, NSError *e) {
@@ -414,9 +415,7 @@ static void runRenameAndIntercept(NSString *fileName, NSString *filePath, NSStri
     gIsProcessingFile = YES;
 
     NSString *pdfName = [fileName stringByAppendingString:@".pdf"];
-    NSString *pdfPath = [[filePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:pdfName];
 
-    // Store for later use
     gInterceptedFileName = fileName;
     gInterceptedFilePath = filePath;
     gInterceptedFileId = fileId;
@@ -446,9 +445,6 @@ static void runRenameAndIntercept(NSString *fileName, NSString *filePath, NSStri
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             progressAlert.message = @"3. 等待拦截直链...";
 
-            // The app should now call previewDownloadFileMeta internally
-            // We hook that method to intercept the dlink
-            // Wait for interception with timeout
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 [progressAlert dismissViewControllerAnimated:YES completion:^{
                     handleInterceptedDlink();
@@ -459,7 +455,7 @@ static void runRenameAndIntercept(NSString *fileName, NSString *filePath, NSStri
 }
 
 static void triggerDownloadFlow(void) {
-    DLog(@"Starting download flow (v12.0 intercept mode)...");
+    DLog(@"Starting download flow (v12.1 intercept mode)...");
     fetchFileList(^(NSArray *files, NSError *err) {
         if (err || !files || files.count == 0) {
             DLog(@"Failed to get file list: %@", err ? err.localizedDescription : @"No files");
@@ -509,15 +505,13 @@ static void triggerDownloadFlow(void) {
     });
 }
 
-// ========== v12.0 Hook: PriviewDownLoad ==========
+// ========== Logos Hooks ==========
 
-// Hook NSURLSession to intercept dlink URLs from internal download requests
 %hook NSURLSession
 
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(void (^)(NSData *data, NSURLResponse *response, NSError *error))completionHandler {
     NSString *urlString = request.URL.absoluteString;
 
-    // Intercept d.pcs.baidu.com / d1.baidupcs.com etc download URLs
     if (gShouldInterceptDlink && urlString) {
         NSArray *dlinkHosts = @[@"d.pcs.baidu.com", @"d1.baidupcs.com", @"d2.baidupcs.com", @"d3.baidupcs.com", @"d4.baidupcs.com",
                                  @"pcs.baidu.com", @"bj.baidupcs.com", @"nj.baidupcs.com", @"gz.baidupcs.com"];
@@ -532,12 +526,9 @@ static void triggerDownloadFlow(void) {
         if (isDlink) {
             DLog(@"INTERCEPTED dlink URL: %@...", [urlString substringToIndex:MIN(80, urlString.length)]);
             gInterceptedDlink = urlString;
-            gShouldInterceptDlink = NO; // Stop intercepting after first capture
+            gShouldInterceptDlink = NO;
 
-            // Cancel this internal request so app doesn't actually download
-            // Return a dummy task that does nothing
             NSURLSessionDataTask *dummyTask = %orig(request, ^(NSData *data, NSURLResponse *response, NSError *error) {
-                // Swallow the response - don't actually download
                 if (completionHandler) {
                     completionHandler(nil, nil, [NSError errorWithDomain:@"BaiduPanTroll" code:-999 userInfo:@{NSLocalizedDescriptionKey: @"Intercepted by Troll"}]);
                 }
@@ -552,7 +543,6 @@ static void triggerDownloadFlow(void) {
 
 %end
 
-// Also hook the specific PriviewDownLoad class if it exists
 %hook PriviewDownLoad
 
 - (void)previewDownloadFileMeta {
@@ -581,7 +571,6 @@ static void triggerDownloadFlow(void) {
 
 %end
 
-// Hook DownOperation to catch dlink generation
 %hook DownOperation
 
 - (void)downloadFromPCS {
@@ -602,7 +591,6 @@ static void triggerDownloadFlow(void) {
 
 %end
 
-// Hook BDPanFileDownloadEngine to catch download operations
 %hook BDPanFileDownloadEngine
 
 - (void)startDownloadTransFile {
@@ -629,7 +617,7 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 16 ? 16 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v12.0"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v12.1"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n拦截模式: 启用\n状态: %@", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing", gIsProcessingFile ? @"处理中" : @"就绪"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"📥 获取直链" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
@@ -665,7 +653,7 @@ static void showFloatButton(void) {
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:nil action:@selector(bdt_floatButtonPanned:)];
     [gFloatButton addGestureRecognizer:pan];
     [window addSubview:gFloatButton];
-    DLog(@"Float button shown (v12.0)");
+    DLog(@"Float button shown (v12.1)");
 }
 
 @interface NSObject (BaiduPanTroll)
@@ -685,7 +673,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v12.0 loaded - Dlink Intercept Mode");
+    DLog(@"BaiduPan Troll v12.1 loaded - Dlink Intercept Mode");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
