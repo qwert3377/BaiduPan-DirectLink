@@ -1,8 +1,8 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.29
-//  Flow: select -> rename to .88888888888888 -> refresh x2 -> scroll to file
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.30
+//  Flow: select -> rename to .88888888888888 -> refresh x2 (fast) -> scroll to file
 //        -> restore original name (NO refresh) -> AUTO CLICK visible cell
-//  CHANGELOG v10.29: Restore name before auto-click, no tap detection needed
+//  CHANGELOG v10.30: All delays shortened for speed
 //
 
 #import <UIKit/UIKit.h>
@@ -15,7 +15,6 @@ static NSString *gBdstoken = nil;
 static NSString *gBDUSS = nil;
 static UIButton *gFloatButton = nil;
 
-// State machine for two-phase flow
 static NSString *gPendingRestoreFileId = nil;
 static NSString *gPendingRestorePdfPath = nil;
 static NSString *gPendingRestoreOriginalName = nil;
@@ -26,11 +25,9 @@ static BOOL gHasOpenedFile = NO;
 static NSString *gInitialTopVCClass = nil;
 static NSString *gInitialTopVCTitle = nil;
 
-// v10.29: New flags for restore-then-click flow
 static BOOL gHasRestored = NO;
 static BOOL gHasClicked = NO;
 
-// ========== Forward declarations ==========
 static UIViewController * topViewController(void);
 static NSInteger currentNavStackCount(void);
 static NSString * strictEncodeURIComponent(NSString *str);
@@ -62,7 +59,6 @@ static void triggerDownloadFlow(void);
 static void onFloatButtonTap(void);
 static void showFloatButton(void);
 
-// v10.29 Auto-click helpers - SCROLL + VISIBLE CELL TOUCH
 static UIScrollView * findListViewInHierarchy(UIView *root);
 static UIScrollView * findListViewGlobally(void);
 static NSIndexPath * searchFileInTableView(NSString *targetName, UITableView *tv);
@@ -74,8 +70,6 @@ static void autoClickVisibleCell(NSString *ppName, UIScrollView *listView);
 static void invokeOpenFileMethodOnVC(UIViewController *vc, NSString *fileName, NSString *filePath);
 static NSString * topVCClassName(void);
 static NSString * topVCTitle(void);
-
-// ========== Implementations ==========
 
 static UIViewController * topViewController(void) {
     UIWindow *window = nil;
@@ -396,12 +390,10 @@ static void showToast(NSString *msg) {
     [window addSubview:toast];
     toast.alpha = 0;
     [UIView animateWithDuration:0.3 animations:^{ toast.alpha = 1; }];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [UIView animateWithDuration:0.3 animations:^{ toast.alpha = 0; } completion:^(BOOL finished) { [toast removeFromSuperview]; }];
     });
 }
-
-// ========== Refresh mechanism ==========
 
 static UIScrollView * findScrollViewInView(UIView *view) {
     if ([view isKindOfClass:[UIScrollView class]]) return (UIScrollView *)view;
@@ -493,7 +485,7 @@ static void simulatePullToRefreshOnScrollView(UIScrollView *scrollView) {
         [scrollView.delegate performSelector:didScroll withObject:scrollView];
         #pragma clang diagnostic pop
     }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         SEL didEndDragging = @selector(scrollViewDidEndDragging:willDecelerate:);
         if (scrollView.delegate && [scrollView.delegate respondsToSelector:didEndDragging]) {
             #pragma clang diagnostic push
@@ -508,7 +500,7 @@ static void simulatePullToRefreshOnScrollView(UIScrollView *scrollView) {
             [scrollView.delegate performSelector:didEndDecelerating withObject:scrollView];
             #pragma clang diagnostic pop
         }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [UIView animateWithDuration:0.3 animations:^{
                 scrollView.contentOffset = originalOffset;
             }];
@@ -525,7 +517,7 @@ static void tryRefreshOnScrollView(UIScrollView *scrollView) {
         [UIView animateWithDuration:0.25 animations:^{
             scrollView.contentOffset = CGPointMake(offset.x, -scrollView.refreshControl.frame.size.height);
         }];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [scrollView.refreshControl endRefreshing];
         });
         return;
@@ -635,8 +627,6 @@ static BOOL viewContainsText(UIView *view, NSString *text) {
     return NO;
 }
 
-// ========== v10.29 Auto-click helpers ==========
-
 static UIScrollView * findListViewInHierarchy(UIView *root) {
     if (!root) return nil;
     if ([root isKindOfClass:[UITableView class]] || [root isKindOfClass:[UICollectionView class]]) {
@@ -710,19 +700,16 @@ static NSIndexPath * searchFileInCollectionView(NSString *targetName, UICollecti
     return nil;
 }
 
-// v10.29: Simulate real touch events on a VISIBLE cell
 static void simulateTouchOnCell(UIView *cell) {
     if (!cell) return;
     DLog(@"Simulating touch on visible cell: %@", NSStringFromClass([cell class]));
 
-    // Method 1: If cell is a UIControl, send action directly
     if ([cell isKindOfClass:[UIControl class]]) {
         UIControl *control = (UIControl *)cell;
         [control sendActionsForControlEvents:UIControlEventTouchUpInside];
         DLog(@"Sent UIControl action");
     }
 
-    // Method 2: Trigger tap gesture recognizers on the cell
     for (UIGestureRecognizer *gr in cell.gestureRecognizers) {
         if ([gr isKindOfClass:[UITapGestureRecognizer class]]) {
             DLog(@"Triggering tap gesture on cell");
@@ -740,7 +727,6 @@ static void simulateTouchOnCell(UIView *cell) {
         }
     }
 
-    // Method 3: Try to use cell's target-action mechanism
     @try {
         for (UIView *sub in cell.subviews) {
             if ([sub isKindOfClass:[UIButton class]]) {
@@ -751,7 +737,6 @@ static void simulateTouchOnCell(UIView *cell) {
         }
     } @catch (NSException *e) {}
 
-    // Method 4: Post a tap notification to the cell's window
     @try {
         CGPoint center = CGPointMake(cell.bounds.size.width / 2.0, cell.bounds.size.height / 2.0);
         CGPoint windowPoint = [cell convertPoint:center toView:nil];
@@ -760,8 +745,6 @@ static void simulateTouchOnCell(UIView *cell) {
     } @catch (NSException *e) {}
 }
 
-// v10.29: Auto-click after ensuring cell is VISIBLE
-// NEW FLOW: find cell -> restore name (no refresh) -> click cell
 static void autoClickVisibleCell(NSString *ppName, UIScrollView *listView) {
     if (!ppName || !listView) return;
 
@@ -777,13 +760,12 @@ static void autoClickVisibleCell(NSString *ppName, UIScrollView *listView) {
         return;
     }
 
-    // v10.29: Restore original name BEFORE clicking (only once)
     if (!gHasRestored && gPendingRestoreFileId && gPendingRestorePdfPath && gPendingRestoreOriginalName) {
         gHasRestored = YES;
         showToast(@"5. 恢复原名...");
         executeRestoreWithoutRefresh(^(BOOL success) {
             if (success) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     showToast(@"6. 自动打开文件...");
                     autoClickVisibleCell(ppName, listView);
                 });
@@ -794,14 +776,12 @@ static void autoClickVisibleCell(NSString *ppName, UIScrollView *listView) {
         return;
     }
 
-    // Prevent double-click
     if (gHasClicked) {
         DLog(@"Already clicked, skipping duplicate");
         return;
     }
     gHasClicked = YES;
 
-    // Get the ACTUAL visible cell
     UIView *visibleCell = nil;
     if ([listView isKindOfClass:[UITableView class]]) {
         visibleCell = [(UITableView *)listView cellForRowAtIndexPath:foundPath];
@@ -811,14 +791,13 @@ static void autoClickVisibleCell(NSString *ppName, UIScrollView *listView) {
 
     if (!visibleCell) {
         DLog(@"Cell at path %@ is not visible (returns nil), cannot click", foundPath);
-        gHasClicked = NO; // Allow retry if cell becomes visible later
+        gHasClicked = NO;
         return;
     }
 
     DLog(@"Cell is VISIBLE, proceeding with auto-click");
     showToast(@"正在自动打开文件...");
 
-    // Method A: Call delegate didSelect
     id delegate = nil;
     if ([listView isKindOfClass:[UITableView class]]) {
         delegate = [(UITableView *)listView delegate];
@@ -842,19 +821,16 @@ static void autoClickVisibleCell(NSString *ppName, UIScrollView *listView) {
         }
     }
 
-    // Method B: Simulate real touch on the visible cell (more reliable)
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         simulateTouchOnCell(visibleCell);
     });
 
-    // Method C: Try to find the file list VC and call its open method directly
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         UIViewController *vc = topViewController();
         invokeOpenFileMethodOnVC(vc, ppName, gPendingRestorePdfPath);
     });
 }
 
-// v10.29: Try to invoke internal open file methods on the VC
 static void invokeOpenFileMethodOnVC(UIViewController *vc, NSString *fileName, NSString *filePath) {
     if (!vc) return;
 
@@ -937,11 +913,9 @@ static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInt
         listView.contentOffset = CGPointMake(0, targetY);
     }];
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        // After scroll + wait, try to auto-click if cell is now visible
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         autoClickVisibleCell(ppName, listView);
 
-        // Check if we found it
         NSIndexPath *foundPath = nil;
         if ([listView isKindOfClass:[UITableView class]]) {
             foundPath = searchFileInTableView(ppName, (UITableView *)listView);
@@ -951,7 +925,6 @@ static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInt
 
         if (foundPath) {
             DLog(@"File found at attempt %ld, cell should be visible now", (long)attempt);
-            // v10.29: autoClickVisibleCell already handles restore-then-click, no need to call again
             return;
         }
 
@@ -965,10 +938,9 @@ static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInt
     });
 }
 
-// v10.29: Scroll to file AND auto-click when visible
 static void scrollToRenamedFileAndAutoClick(NSString *ppName) {
     if (!ppName) return;
-    DLog(@"v10.29 Scrolling to file and auto-click: %@", ppName);
+    DLog(@"v10.30 Scrolling to file and auto-click: %@", ppName);
 
     UIScrollView *listView = findListViewGlobally();
     if (!listView) {
@@ -976,9 +948,8 @@ static void scrollToRenamedFileAndAutoClick(NSString *ppName) {
         showToast(@"未找到文件列表");
         return;
     }
-    DLog(@"Found list view: %@", NSStringFromClass([listView class]));
+    DLog(@"Found list view: %@", NSStringFromClass([listView class]]);
 
-    // First try: check if already visible
     NSIndexPath *foundPath = nil;
     if ([listView isKindOfClass:[UITableView class]]) {
         foundPath = searchFileInTableView(ppName, (UITableView *)listView);
@@ -993,8 +964,7 @@ static void scrollToRenamedFileAndAutoClick(NSString *ppName) {
         } else if ([listView isKindOfClass:[UICollectionView class]]) {
             [(UICollectionView *)listView scrollToItemAtIndexPath:foundPath atScrollPosition:UICollectionViewScrollPositionCenteredVertically animated:YES];
         }
-        // Wait for scroll animation + cell render, then auto-click
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             autoClickVisibleCell(ppName, listView);
         });
         return;
@@ -1005,14 +975,12 @@ static void scrollToRenamedFileAndAutoClick(NSString *ppName) {
 
     [listView setContentOffset:CGPointZero animated:YES];
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         CGFloat scrollStep = listView.bounds.size.height * 0.7;
         if (scrollStep < 100) scrollStep = 100;
         performScrollAttempt(ppName, listView, 0, 15, scrollStep);
     });
 }
-
-// ========== Tap Detection (Two-Phase) - kept for compatibility but no longer used in main flow ==========
 
 static NSString * topVCClassName(void) {
     UIViewController *vc = topViewController();
@@ -1048,7 +1016,6 @@ static void executeRestore(void) {
     });
 }
 
-// v10.29: Restore without refreshing list, keep globals for subsequent click
 static void executeRestoreWithoutRefresh(void (^completion)(BOOL success)) {
     if (!gPendingRestoreFileId || !gPendingRestorePdfPath || !gPendingRestoreOriginalName) {
         if (completion) completion(NO);
@@ -1136,7 +1103,7 @@ static void startTapDetection(void) {
                                                           userInfo:nil
                                                            repeats:YES];
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (gIsWaitingForTap) {
             DLog(@"Tap detection timeout, forcing restore");
             stopTapDetection();
@@ -1145,8 +1112,6 @@ static void startTapDetection(void) {
         }
     });
 }
-
-// ========== Smart Flow ==========
 
 static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileId, NSNumber *fileSize) {
     if (fileSize && [fileSize doubleValue] >= 300.0 * 1024.0 * 1024.0) {
@@ -1157,8 +1122,8 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
     gPendingRestoreFileId = nil;
     gPendingRestorePdfPath = nil;
     gPendingRestoreOriginalName = nil;
-    gHasRestored = NO;   // v10.29
-    gHasClicked = NO;    // v10.29
+    gHasRestored = NO;
+    gHasClicked = NO;
 
     NSString *ext = fileName.pathExtension.lowercaseString;
     if ([ext isEqualToString:@"88888888888888"]) {
@@ -1183,13 +1148,12 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
         showToast(@"2. 刷新第1次...");
         forceRefreshFileList();
 
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             showToast(@"3. 刷新第2次...");
             forceRefreshFileList();
 
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 showToast(@"4. 滚动到文件...");
-                // v10.29: No tap detection needed; restore happens inside autoClickVisibleCell
                 scrollToRenamedFileAndAutoClick(ppName);
             });
         });
@@ -1218,7 +1182,7 @@ static void triggerDownloadFlow(void) {
             return;
         }
         UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"选择文件"
-                                                                       message:@"选择后自动重命名为 文件名88888888888888，刷新2次，滚动定位，恢复原名，然后自动打开文件"
+                                                                       message:@"选择后自动重命名并快速打开"
                                                                 preferredStyle:UIAlertControllerStyleActionSheet];
         for (NSDictionary *file in fileItems) {
             NSString *name = file[@"server_filename"];
@@ -1260,8 +1224,6 @@ static void triggerDownloadFlow(void) {
     });
 }
 
-// ========== Float button ==========
-
 static void onFloatButtonTap(void) {
     autoDetectPathAndToken();
     NSString *tokenInfo = @"missing";
@@ -1270,8 +1232,8 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 8 ? 8 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.29"
-                                                                   message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n智能流程：改名->.88888888888888->刷新2次->滚动定位->恢复原名(不刷新)->自动点击cell", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.30"
+                                                                   message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n快速流程：改名->刷新x2->滚动->恢复原名->自动点击", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件"
                                                              style:UIAlertActionStyleDefault
@@ -1332,8 +1294,8 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v10.29 loaded - Restore-Then-Click Edition");
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    DLog(@"BaiduPan Troll v10.30 loaded - Fast Edition");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
     });
