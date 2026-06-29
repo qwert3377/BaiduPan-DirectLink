@@ -1,5 +1,5 @@
 # .github/workflows/build.yml
-name: Build & Release
+name: Build
 
 on:
   push:
@@ -15,14 +15,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install Dependencies
+        run: |
+          brew install dpkg ldid
+
       - name: Setup Theos
-        uses: Randomblock1/theos-action@v1
-        with:
-          theos-dir: theos
+        run: |
+          git clone --recursive https://github.com/theos/theos.git $HOME/theos
+          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+
+      - name: Download iOS SDK
+        run: |
+          mkdir -p $HOME/theos/sdks
+          curl -L -o $HOME/sdks.zip https://github.com/theos/sdks/archive/refs/heads/master.zip
+          unzip -q $HOME/sdks.zip -d $HOME/sdks_tmp
+          mv $HOME/sdks_tmp/sdks-master/*.sdk $HOME/theos/sdks/ 2>/dev/null || true
+          rm -rf $HOME/sdks.zip $HOME/sdks_tmp
+          ls -la $HOME/theos/sdks/
 
       - name: Build Package
         run: |
-          export THEOS=./theos
+          export THEOS=$HOME/theos
           make clean
           make package FINALPACKAGE=1
 
@@ -32,10 +45,3 @@ jobs:
           name: BaiduPanTroll
           path: packages/*.deb
           if-no-files-found: error
-
-      - name: Release
-        if: github.event_name == 'push' && contains(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
-        with:
-          files: packages/*.deb
-          generate_release_notes: true
