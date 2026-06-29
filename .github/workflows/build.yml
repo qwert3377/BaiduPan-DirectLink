@@ -15,13 +15,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Cache Theos
+        uses: actions/cache@v4
+        with:
+          path: ~/theos
+          key: theos-${{ runner.os }}-${{ hashFiles('Makefile') }}
+          restore-keys: |
+            theos-${{ runner.os }}-
+
       - name: Install Dependencies
         run: |
           brew install dpkg ldid
 
       - name: Setup Theos
         run: |
-          git clone --recursive https://github.com/theos/theos.git $HOME/theos
+          if [ ! -d "$HOME/theos/.git" ]; then
+            rm -rf $HOME/theos
+            git clone --recursive https://github.com/theos/theos.git $HOME/theos
+          fi
           echo "THEOS=$HOME/theos" >> $GITHUB_ENV
 
       - name: Build Library
