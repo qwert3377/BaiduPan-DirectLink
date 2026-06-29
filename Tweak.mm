@@ -1,6 +1,6 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v12.2
-//  Fix: Completed truncated functions, fixed Logos hook placement
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v12.3
+//  Fix: Removed @interface/@implementation, use runtime class creation
 //  Strategy: Hook NSURLSession to intercept dlink, runtime hook for private classes
 //
 
@@ -13,8 +13,8 @@ static NSString *gCurrentPath = nil;
 static NSString *gBdstoken = nil;
 static NSString *gBDUSS = nil;
 static UIButton *gFloatButton = nil;
+static id gButtonTarget = nil;
 
-// Intercepted dlink storage
 static NSString *gInterceptedDlink = nil;
 static NSString *gInterceptedFileName = nil;
 static NSString *gInterceptedFilePath = nil;
@@ -476,28 +476,6 @@ static void triggerDownloadFlow(void) {
     });
 }
 
-// ========== Float Button Helper ==========
-
-@interface BaiduPanFloatButtonHelper : NSObject
-- (void)floatButtonTap;
-- (void)panGesture:(UIPanGestureRecognizer *)gesture;
-@end
-
-@implementation BaiduPanFloatButtonHelper
-- (void)floatButtonTap {
-    onFloatButtonTap();
-}
-
-- (void)panGesture:(UIPanGestureRecognizer *)gesture {
-    UIView *button = gesture.view;
-    CGPoint translation = [gesture translationInView:button.superview];
-    button.center = CGPointMake(button.center.x + translation.x, button.center.y + translation.y);
-    [gesture setTranslation:CGPointZero inView:button.superview];
-}
-@end
-
-static BaiduPanFloatButtonHelper *gFloatButtonHelper = nil;
-
 static void onFloatButtonTap(void) {
     UIViewController *top = topViewController();
     if (!top) return;
@@ -524,6 +502,23 @@ static void onFloatButtonTap(void) {
     [top presentViewController:alert animated:YES completion:nil];
 }
 
+// ========== Button Target (Runtime) ==========
+
+static void buttonTappedAction(id self, SEL _cmd) {
+    (void)self;
+    (void)_cmd;
+    onFloatButtonTap();
+}
+
+static void panGestureAction(id self, SEL _cmd, UIPanGestureRecognizer *gesture) {
+    (void)self;
+    (void)_cmd;
+    UIView *button = gesture.view;
+    CGPoint translation = [gesture translationInView:button.superview];
+    button.center = CGPointMake(button.center.x + translation.x, button.center.y + translation.y);
+    [gesture setTranslation:CGPointZero inView:button.superview];
+}
+
 static void showFloatButton(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (gFloatButton) {
@@ -543,8 +538,18 @@ static void showFloatButton(void) {
         if (!window) window = [[UIApplication sharedApplication] keyWindow];
         if (!window) return;
         
-        if (!gFloatButtonHelper) {
-            gFloatButtonHelper = [[BaiduPanFloatButtonHelper alloc] init];
+        // 消除 unused-function 警告
+        (void)buttonTappedAction;
+        (void)panGestureAction;
+        
+        if (!gButtonTarget) {
+            Class helperClass = objc_allocateClassPair([NSObject class], "BaiduPanBtnHelper", 0);
+            if (helperClass) {
+                class_addMethod(helperClass, @selector(buttonTapped), (IMP)buttonTappedAction, "v@:");
+                class_addMethod(helperClass, @selector(panGesture:), (IMP)panGestureAction, "v@:@");
+                objc_registerClassPair(helperClass);
+                gButtonTarget = [[helperClass alloc] init];
+            }
         }
         
         gFloatButton = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -556,10 +561,11 @@ static void showFloatButton(void) {
         [gFloatButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
         gFloatButton.titleLabel.font = [UIFont systemFontOfSize:12];
         
-        [gFloatButton addTarget:gFloatButtonHelper action:@selector(floatButtonTap) forControlEvents:UIControlEventTouchUpInside];
-        
-        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:gFloatButtonHelper action:@selector(panGesture:)];
-        [gFloatButton addGestureRecognizer:pan];
+        if (gButtonTarget) {
+            [gFloatButton addTarget:gButtonTarget action:@selector(buttonTapped) forControlEvents:UIControlEventTouchUpInside];
+            UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:gButtonTarget action:@selector(panGesture:)];
+            [gFloatButton addGestureRecognizer:pan];
+        }
         
         [window addSubview:gFloatButton];
     });
