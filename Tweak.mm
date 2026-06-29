@@ -1,8 +1,8 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.31
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.32
 //  Flow: select -> rename to .88888888888888 -> refresh x2 (fast) -> scroll to file
 //        -> restore original name (NO refresh) -> AUTO CLICK visible cell
-//  CHANGELOG v10.31: ALL animations removed, direct property assignment only
+//  CHANGELOG v10.32: Fix UITable/UICollection typo -> UITableView/UICollectionView
 //
 
 #import <UIKit/UIKit.h>
@@ -335,7 +335,7 @@ static void renameFile(NSString *fileId, NSString *path, NSString *newName, void
     }
     NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/filemanager?async=2&onnest=fail&opera=rename&clienttype=0&app_id=250528&web=1&bdstoken=%@", gBdstoken];
     NSString *filelist = [NSString stringWithFormat:@"[{\"id\":%@,\"path\":\"%@\",\"newname\":\"%@\"}]", fileId, path, newName];
-    NSString *body = [NSString stringWithFormat:@"filelist=%@", strictEncodeURIComponent(filelist)];
+    NSString *body = [NSString stringWithFormat:@"filelist=%@", strictEncodeURIComponent(filelist));
     DLog(@"RENAME body: %@", body);
     DLog(@"RENAME filelist raw: %@", filelist);
     NSDictionary *headers = @{
@@ -361,7 +361,6 @@ static void renameFile(NSString *fileId, NSString *path, NSString *newName, void
     });
 }
 
-// v10.31: No animations, direct property assignment
 static void showToast(NSString *msg) {
     UIWindow *window = nil;
     if (@available(iOS 13.0, *)) {
@@ -466,7 +465,6 @@ static void triggerBDWalletRefresh(UIView *subview, UIScrollView *scrollView) {
     }
 }
 
-// v10.31: No animations, direct contentOffset assignment
 static void simulatePullToRefreshOnScrollView(UIScrollView *scrollView) {
     if (!scrollView) return;
     DLog(@"Simulating pull-to-refresh gesture");
@@ -507,7 +505,6 @@ static void simulatePullToRefreshOnScrollView(UIScrollView *scrollView) {
     });
 }
 
-// v10.31: No animations for UIRefreshControl
 static void tryRefreshOnScrollView(UIScrollView *scrollView) {
     if (!scrollView) return;
     if (scrollView.refreshControl) {
@@ -885,7 +882,6 @@ static void invokeOpenFileMethodOnVC(UIViewController *vc, NSString *fileName, N
     DLog(@"No internal open file method found on %@", NSStringFromClass([vc class]));
 }
 
-// v10.31: No UIView animation, direct contentOffset assignment
 static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInteger attempt, NSInteger maxAttempts, CGFloat scrollStep) {
     if (attempt >= maxAttempts) {
         DLog(@"Max scroll attempts reached");
@@ -934,10 +930,10 @@ static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInt
     });
 }
 
-// v10.31: No animations, scrollToRow/scrollToItem with animated:NO
+// v10.32: Fix UITable/UICollection -> UITableView/UICollectionView
 static void scrollToRenamedFileAndAutoClick(NSString *ppName) {
     if (!ppName) return;
-    DLog(@"v10.31 Scrolling to file and auto-click: %@", ppName);
+    DLog(@"v10.32 Scrolling to file and auto-click: %@", ppName);
 
     UIScrollView *listView = findListViewGlobally();
     if (!listView) {
@@ -1229,7 +1225,7 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 8 ? 8 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.31"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.32"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n快速流程：改名->刷新x2->滚动->恢复原名->自动点击", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件"
@@ -1291,7 +1287,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v10.31 loaded - No Animation Edition");
+    DLog(@"BaiduPan Troll v10.32 loaded - No Animation Edition");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
