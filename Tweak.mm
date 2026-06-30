@@ -1,8 +1,10 @@
 //
 //  BaiduNetdiskAdBlocker.mm
 //  百度网盘去广告插件 (纯运行时版)
-//  版本: 1.2.0
+//  版本: 1.2.2
 //  编译: Theos / Logos
+//  修复1: %ctor -> __attribute__((constructor)) 避免 Logos 预处理器错误
+//  修复2: 删除未使用的 hooked 变量，避免 -Werror,-Wunused-but-set-variable
 //
 
 #import <UIKit/UIKit.h>
@@ -16,6 +18,8 @@ static void __attribute__((optnone)) blk_void(id self, SEL _cmd) { }
 static id __attribute__((optnone)) blk_nil(id self, SEL _cmd) { return nil; }
 static BOOL __attribute__((optnone)) blk_no(id self, SEL _cmd) { return NO; }
 
+// 修复1: 使用 C 构造函数替代 %ctor，避免 Logos 预处理器 "expected unqualified-id" 错误
+// 当 .mm 文件中没有 %hook 块时，Logos 无法解析 %ctor，必须用 __attribute__((constructor))
 static void __attribute__((constructor)) adBlockerInit() {
     // 广告SDK类前缀列表
     NSArray *adPrefixes = @[@"ABU", @"CSJ", @"BaiduMobAd", @"GDT", @"Wind", @"Sigmob", @"AWM", @"Pangle"];
@@ -105,7 +109,7 @@ static void __attribute__((constructor)) adBlockerInit() {
         @"canRequestWithType:", @"instancesRespondToSelector:"
     ];
 
-    int hooked = 0;
+    // 修复2: 删除 hooked 计数器变量，避免 -Werror,-Wunused-but-set-variable
     unsigned int classCount = 0;
     Class *classes = objc_copyClassList(&classCount);
 
@@ -126,7 +130,6 @@ static void __attribute__((constructor)) adBlockerInit() {
                 Method m = class_getInstanceMethod(classes[i], sel);
                 if (m) {
                     method_setImplementation(m, (IMP)blk_void);
-                    hooked++;
                 }
             }
         }
@@ -136,7 +139,6 @@ static void __attribute__((constructor)) adBlockerInit() {
                 Method m = class_getInstanceMethod(classes[i], sel);
                 if (m) {
                     method_setImplementation(m, (IMP)blk_nil);
-                    hooked++;
                 }
             }
         }
@@ -146,7 +148,6 @@ static void __attribute__((constructor)) adBlockerInit() {
                 Method m = class_getInstanceMethod(classes[i], sel);
                 if (m) {
                     method_setImplementation(m, (IMP)blk_no);
-                    hooked++;
                 }
             }
         }
