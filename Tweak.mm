@@ -16,7 +16,7 @@ static void __attribute__((optnone)) blk_void(id self, SEL _cmd) { }
 static id __attribute__((optnone)) blk_nil(id self, SEL _cmd) { return nil; }
 static BOOL __attribute__((optnone)) blk_no(id self, SEL _cmd) { return NO; }
 
-%ctor {
+static void __attribute__((constructor)) adBlockerInit() {
     // 广告SDK类前缀列表
     NSArray *adPrefixes = @[@"ABU", @"CSJ", @"BaiduMobAd", @"GDT", @"Wind", @"Sigmob", @"AWM", @"Pangle"];
 
