@@ -77,6 +77,7 @@ static void openFileDirectly(UIViewController *vc, id fileModel, NSString *fileP
 // 辅助函数：安全调用 performSelector，避免 @try 内 pragma 问题
 static void safePerformSelectorWithObject(id target, SEL sel, id obj);
 static void safePerformSelector(id target, SEL sel);
+static void safePerformSelectorWithTwoObjects(id target, SEL sel, id obj1, id obj2);
 
 static UIViewController * topViewController(void) {
     UIWindow *window = nil;
@@ -716,10 +717,7 @@ static void simulateTouchOnCell(UIView *cell) {
             @try {
                 SEL sel = NSSelectorFromString(@"_touchesEnded:withEvent:");
                 if ([gr respondsToSelector:sel]) {
-                    #pragma clang diagnostic push
-                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                    [gr performSelector:sel withObject:[NSSet set] withObject:nil];
-                    #pragma clang diagnostic pop
+                    safePerformSelectorWithTwoObjects(gr, sel, [NSSet set], nil);
                 }
             } @catch (NSException *e) {
                 DLog(@"Gesture trigger failed: %@", e);
@@ -1065,6 +1063,13 @@ static void safePerformSelector(id target, SEL sel) {
     #pragma clang diagnostic pop
 }
 
+static void safePerformSelectorWithTwoObjects(id target, SEL sel, id obj1, id obj2) {
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    [target performSelector:sel withObject:obj1 withObject:obj2];
+    #pragma clang diagnostic pop
+}
+
 // ========== 方案C 核心函数 ==========
 
 static id findFileModelInVC(UIViewController *vc, NSString *fileId) {
@@ -1220,8 +1225,7 @@ static void openFileDirectly(UIViewController *vc, id fileModel, NSString *fileP
                             SEL sel = @selector(tableView:didSelectRowAtIndexPath:);
                             if (delegate && [delegate respondsToSelector:sel]) {
                                 DLog(@"Triggering tableView:didSelectRowAtIndexPath: at %@", ip);
-                                safePerformSelectorWithObject(delegate, sel, tv);
-                                safePerformSelectorWithObject(delegate, sel, ip);
+                                safePerformSelectorWithTwoObjects(delegate, sel, tv, ip);
                                 return;
                             }
                         }
@@ -1244,8 +1248,7 @@ static void openFileDirectly(UIViewController *vc, id fileModel, NSString *fileP
                             SEL sel = @selector(collectionView:didSelectItemAtIndexPath:);
                             if (delegate && [delegate respondsToSelector:sel]) {
                                 DLog(@"Triggering collectionView:didSelectItemAtIndexPath: at %@", ip);
-                                safePerformSelectorWithObject(delegate, sel, cv);
-                                safePerformSelectorWithObject(delegate, sel, ip);
+                                safePerformSelectorWithTwoObjects(delegate, sel, cv, ip);
                                 return;
                             }
                         }
