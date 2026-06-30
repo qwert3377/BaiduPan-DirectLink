@@ -1,7 +1,7 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.35
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.36
 //  方案C：改名 -> 篡改内存对象 -> 直接调用内部方法打开 -> 检测进入后恢复原名
-//  全程不刷新、不滚动、不模拟点击
+//  修复：提取 performSelector 辅助函数，避免 @try 内 pragma push/pop 不匹配
 //
 
 #import <UIKit/UIKit.h>
@@ -73,6 +73,10 @@ static NSString * topVCTitle(void);
 static id findFileModelInVC(UIViewController *vc, NSString *fileId);
 static BOOL mutateFileModel(id fileModel, NSString *newPath, NSString *newName);
 static void openFileDirectly(UIViewController *vc, id fileModel, NSString *filePath, NSString *fileName);
+
+// 辅助函数：安全调用 performSelector，避免 @try 内 pragma 问题
+static void safePerformSelectorWithObject(id target, SEL sel, id obj);
+static void safePerformSelector(id target, SEL sel);
 
 static UIViewController * topViewController(void) {
     UIWindow *window = nil;
@@ -417,18 +421,15 @@ static void triggerMJRefresh(id headerOrFooter) {
     if (!headerOrFooter) return;
     SEL beginSel = NSSelectorFromString(@"beginRefreshing");
     SEL executeSel = NSSelectorFromString(@"executeRefreshingCallback");
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
     if ([headerOrFooter respondsToSelector:beginSel]) {
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
         [headerOrFooter performSelector:beginSel];
-        #pragma clang diagnostic pop
     }
     if ([headerOrFooter respondsToSelector:executeSel]) {
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
         [headerOrFooter performSelector:executeSel];
-        #pragma clang diagnostic pop
     }
+    #pragma clang diagnostic pop
 }
 
 static void triggerNotificationFallback(void) {
@@ -450,29 +451,29 @@ static void triggerNotificationFallback(void) {
 static void triggerEGORefresh(UIView *subview, UIScrollView *scrollView) {
     SEL egoScrollSel = NSSelectorFromString(@"egoRefreshScrollViewDidScroll:");
     SEL egoDragSel = NSSelectorFromString(@"egoRefreshScrollViewDidEndDragging:");
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
     if ([subview respondsToSelector:egoScrollSel]) {
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
         [subview performSelector:egoScrollSel withObject:scrollView];
         if ([subview respondsToSelector:egoDragSel]) {
             [subview performSelector:egoDragSel withObject:scrollView];
         }
-        #pragma clang diagnostic pop
     }
+    #pragma clang diagnostic pop
 }
 
 static void triggerBDWalletRefresh(UIView *subview, UIScrollView *scrollView) {
     SEL bdScrollSel = NSSelectorFromString(@"BDWalletRefreshScrollViewDidScroll:");
     SEL bdDragSel = NSSelectorFromString(@"BDWalletRefreshScrollViewDidEndDragging:");
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
     if ([subview respondsToSelector:bdScrollSel]) {
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
         [subview performSelector:bdScrollSel withObject:scrollView];
         if ([subview respondsToSelector:bdDragSel]) {
             [subview performSelector:bdDragSel withObject:scrollView];
         }
-        #pragma clang diagnostic pop
     }
+    #pragma clang diagnostic pop
 }
 
 static void simulatePullToRefreshOnScrollView(UIScrollView *scrollView) {
@@ -480,35 +481,29 @@ static void simulatePullToRefreshOnScrollView(UIScrollView *scrollView) {
     DLog(@"Simulating pull-to-refresh gesture");
     CGPoint originalOffset = scrollView.contentOffset;
     SEL willBeginDragging = @selector(scrollViewWillBeginDragging:);
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
     if (scrollView.delegate && [scrollView.delegate respondsToSelector:willBeginDragging]) {
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
         [scrollView.delegate performSelector:willBeginDragging withObject:scrollView];
-        #pragma clang diagnostic pop
     }
     scrollView.contentOffset = CGPointMake(originalOffset.x, -150);
     SEL didScroll = @selector(scrollViewDidScroll:);
     if (scrollView.delegate && [scrollView.delegate respondsToSelector:didScroll]) {
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
         [scrollView.delegate performSelector:didScroll withObject:scrollView];
-        #pragma clang diagnostic pop
     }
+    #pragma clang diagnostic pop
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         SEL didEndDragging = @selector(scrollViewDidEndDragging:willDecelerate:);
-        if (scrollView.delegate && [scrollView.delegate respondsToSelector:didEndDragging]) {
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            [scrollView.delegate performSelector:didEndDragging withObject:scrollView withObject:@(NO)];
-            #pragma clang diagnostic pop
-        }
         SEL didEndDecelerating = @selector(scrollViewDidEndDecelerating:);
-        if (scrollView.delegate && [scrollView.delegate respondsToSelector:didEndDecelerating]) {
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            [scrollView.delegate performSelector:didEndDecelerating withObject:scrollView];
-            #pragma clang diagnostic pop
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        if (scrollView.delegate && [scrollView.delegate respondsToSelector:didEndDragging]) {
+            [scrollView.delegate performSelector:didEndDragging withObject:scrollView withObject:@(NO)];
         }
+        if (scrollView.delegate && [scrollView.delegate respondsToSelector:didEndDecelerating]) {
+            [scrollView.delegate performSelector:didEndDecelerating withObject:scrollView];
+        }
+        #pragma clang diagnostic pop
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             scrollView.contentOffset = originalOffset;
         });
@@ -544,13 +539,14 @@ static void tryRefreshOnScrollView(UIScrollView *scrollView) {
             [className containsString:@"RadarRefresh"] ||
             [className containsString:@"DimeCircleRefresh"]) {
             DLog(@"Found refresh component: %@", className);
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
             if ([subview respondsToSelector:@selector(beginRefreshing)]) {
-                #pragma clang diagnostic push
-                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
                 [subview performSelector:@selector(beginRefreshing)];
                 #pragma clang diagnostic pop
                 return;
             }
+            #pragma clang diagnostic pop
             triggerEGORefresh(subview, scrollView);
             triggerBDWalletRefresh(subview, scrollView);
         }
@@ -880,7 +876,7 @@ static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInt
 
 static void scrollToRenamedFileAndAutoClick(NSString *ppName) {
     if (!ppName) return;
-    DLog(@"v10.35 Fallback scroll: %@", ppName);
+    DLog(@"v10.36 Fallback scroll: %@", ppName);
 
     UIScrollView *listView = findListViewGlobally();
     if (!listView) {
@@ -1053,6 +1049,22 @@ static void startTapDetection(void) {
     });
 }
 
+// ========== 辅助函数：安全 performSelector，避免 @try 内 pragma 问题 ==========
+
+static void safePerformSelectorWithObject(id target, SEL sel, id obj) {
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    [target performSelector:sel withObject:obj];
+    #pragma clang diagnostic pop
+}
+
+static void safePerformSelector(id target, SEL sel) {
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    [target performSelector:sel];
+    #pragma clang diagnostic pop
+}
+
 // ========== 方案C 核心函数 ==========
 
 static id findFileModelInVC(UIViewController *vc, NSString *fileId) {
@@ -1129,17 +1141,13 @@ static void openFileDirectly(UIViewController *vc, id fileModel, NSString *fileP
             SEL sel = NSSelectorFromString(selName);
             if ([vc respondsToSelector:sel]) {
                 DLog(@"Trying %@ with mutated object", selName);
-                #pragma clang diagnostic push
-                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
                 @try {
-                    [vc performSelector:sel withObject:fileModel];
+                    safePerformSelectorWithObject(vc, sel, fileModel);
                     DLog(@"Success: %@ with object", selName);
-                    #pragma clang diagnostic pop
                     return;
                 } @catch (NSException *e) {
                     DLog(@"%@ with object failed: %@", selName, e);
                 }
-                #pragma clang diagnostic pop
             }
         }
     }
@@ -1153,17 +1161,13 @@ static void openFileDirectly(UIViewController *vc, id fileModel, NSString *fileP
         SEL sel = NSSelectorFromString(selName);
         if ([vc respondsToSelector:sel]) {
             DLog(@"Trying %@ with path", selName);
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
             @try {
-                [vc performSelector:sel withObject:filePath];
+                safePerformSelectorWithObject(vc, sel, filePath);
                 DLog(@"Success: %@ with path", selName);
-                #pragma clang diagnostic pop
                 return;
             } @catch (NSException *e) {
                 DLog(@"%@ with path failed: %@", selName, e);
             }
-            #pragma clang diagnostic pop
         }
     }
 
@@ -1183,24 +1187,20 @@ static void openFileDirectly(UIViewController *vc, id fileModel, NSString *fileP
                     SEL sel = NSSelectorFromString(selName);
                     if ([vc respondsToSelector:sel]) {
                         DLog(@"Trying %@ (no arg)", selName);
-                        #pragma clang diagnostic push
-                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
                         @try {
-                            [vc performSelector:sel];
+                            safePerformSelector(vc, sel);
                             DLog(@"Success: %@ (no arg)", selName);
-                            #pragma clang diagnostic pop
                             return;
                         } @catch (NSException *e) {
                             DLog(@"%@ (no arg) failed: %@", selName, e);
                         }
-                        #pragma clang diagnostic pop
                     }
                 }
             } @catch (NSException *e) {}
         }
     }
 
-    // Fallback：方式D 通过代码触发 delegate didSelect，让 delegate 从 dataSource 取已篡改的对象
+    // Fallback：方式D 通过代码触发 delegate didSelect
     UIScrollView *listView = findListViewGlobally();
     if (listView) {
         DLog(@"Trying delegate didSelect fallback");
@@ -1220,10 +1220,8 @@ static void openFileDirectly(UIViewController *vc, id fileModel, NSString *fileP
                             SEL sel = @selector(tableView:didSelectRowAtIndexPath:);
                             if (delegate && [delegate respondsToSelector:sel]) {
                                 DLog(@"Triggering tableView:didSelectRowAtIndexPath: at %@", ip);
-                                #pragma clang diagnostic push
-                                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                                [delegate performSelector:sel withObject:tv withObject:ip];
-                                #pragma clang diagnostic pop
+                                safePerformSelectorWithObject(delegate, sel, tv);
+                                safePerformSelectorWithObject(delegate, sel, ip);
                                 return;
                             }
                         }
@@ -1246,10 +1244,8 @@ static void openFileDirectly(UIViewController *vc, id fileModel, NSString *fileP
                             SEL sel = @selector(collectionView:didSelectItemAtIndexPath:);
                             if (delegate && [delegate respondsToSelector:sel]) {
                                 DLog(@"Triggering collectionView:didSelectItemAtIndexPath: at %@", ip);
-                                #pragma clang diagnostic push
-                                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                                [delegate performSelector:sel withObject:cv withObject:ip];
-                                #pragma clang diagnostic pop
+                                safePerformSelectorWithObject(delegate, sel, cv);
+                                safePerformSelectorWithObject(delegate, sel, ip);
                                 return;
                             }
                         }
@@ -1265,7 +1261,7 @@ static void openFileDirectly(UIViewController *vc, id fileModel, NSString *fileP
     scrollToRenamedFileAndAutoClick([fileName stringByAppendingString:@".8888888888888888"]);
 }
 
-// v10.35 方案C：不刷新、不滚动、不点击，篡改内存对象后直接打开
+// v10.36 方案C：不刷新、不滚动、不点击，篡改内存对象后直接打开
 static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileId, NSNumber *fileSize) {
     if (fileSize && [fileSize doubleValue] >= 300.0 * 1024.0 * 1024.0) {
         showToast(@"⚠️ 该文件超过300MB，无法下载");
@@ -1414,7 +1410,7 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 8 ? 8 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.35"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.36"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n方案C：改名->篡改内存->直接打开", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件"
@@ -1478,7 +1474,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v10.35 loaded - 方案C Edition");
+    DLog(@"BaiduPan Troll v10.36 loaded - 方案C Edition");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
