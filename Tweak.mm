@@ -1143,12 +1143,12 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
         gPendingRestorePdfPath = ppPath;
         gPendingRestoreOriginalName = fileName;
 
-        // v10.34: Refresh once after rename so the renamed file appears in the list
+        // First refresh: wait 0.5s after forceRefreshFileList
         showToast(@"2. 刷新列表...");
         forceRefreshFileList();
 
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            // Extra reloadData to ensure the list view picks up the new data source
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            // Second refresh: reloadData
             UIScrollView *listView = findListViewGlobally();
             if ([listView isKindOfClass:[UITableView class]]) {
                 [(UITableView *)listView reloadData];
@@ -1156,8 +1156,11 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
                 [(UICollectionView *)listView reloadData];
             }
 
-            showToast(@"3. 滚动到文件...");
-            scrollToRenamedFileAndAutoClick(ppName);
+            // Wait 1.5s after second refresh, then find & click or scroll
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                showToast(@"3. 滚动到文件...");
+                scrollToRenamedFileAndAutoClick(ppName);
+            });
         });
     });
 }
