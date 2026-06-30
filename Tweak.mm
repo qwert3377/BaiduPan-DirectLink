@@ -1114,10 +1114,6 @@ static void startTapDetection(void) {
 
 // v10.34: rename -> refresh once -> scroll -> restore -> auto click
 static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileId, NSNumber *fileSize) {
-    if (fileSize && [fileSize doubleValue] >= 300.0 * 1024.0 * 1024.0) {
-        showToast(@"⚠️ 该文件超过300MB，无法下载");
-        return;
-    }
     stopTapDetection();
     gPendingRestoreFileId = nil;
     gPendingRestorePdfPath = nil;
@@ -1207,10 +1203,6 @@ static void triggerDownloadFlow(void) {
             UIAlertAction *action = [UIAlertAction actionWithTitle:title
                                                                style:UIAlertActionStyleDefault
                                                              handler:^(UIAlertAction *action) {
-                if (isTooLarge) {
-                    showToast(@"⚠️ 该文件超过300MB，无法下载");
-                    return;
-                }
                 runSmartFlow(name, path, fid, size);
             }];
             if (isTooLarge) {
