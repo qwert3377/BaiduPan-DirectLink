@@ -949,6 +949,7 @@ static void scrollToRenamedFileAndAutoClick(NSString *ppName) {
     }
     DLog(@"Found list view: %@", NSStringFromClass([listView class]));
 
+    // Try to find and click the file in current visible area first
     NSIndexPath *foundPath = nil;
     if ([listView isKindOfClass:[UITableView class]]) {
         foundPath = searchFileInTableView(ppName, (UITableView *)listView);
@@ -969,6 +970,7 @@ static void scrollToRenamedFileAndAutoClick(NSString *ppName) {
         return;
     }
 
+    // If not found in visible area, start scroll search
     DLog(@"File not visible, starting scroll search...");
     showToast(@"正在查找并自动打开文件...");
 
