@@ -1,10 +1,11 @@
 //
 //  BaiduNetdiskAdBlocker.mm
 //  百度网盘去广告插件 (纯运行时版)
-//  版本: 1.2.2
+//  版本: 1.2.3
 //  编译: Theos / Logos
 //  修复1: %ctor -> __attribute__((constructor)) 避免 Logos 预处理器错误
-//  修复2: 删除未使用的 hooked 变量，避免 -Werror,-Wunused-but-set-variable
+//  修复2: 删除未使用的 hooked 变量，避免 -Werror
+//  修复3: 使用 %hook + %ctor 确保在 Runtime 初始化后执行，避免 TrollStore 闪退
 //
 
 #import <UIKit/UIKit.h>
@@ -18,9 +19,20 @@ static void __attribute__((optnone)) blk_void(id self, SEL _cmd) { }
 static id __attribute__((optnone)) blk_nil(id self, SEL _cmd) { return nil; }
 static BOOL __attribute__((optnone)) blk_no(id self, SEL _cmd) { return NO; }
 
-// 修复1: 使用 C 构造函数替代 %ctor，避免 Logos 预处理器 "expected unqualified-id" 错误
-// 当 .mm 文件中没有 %hook 块时，Logos 无法解析 %ctor，必须用 __attribute__((constructor))
-static void __attribute__((constructor)) adBlockerInit() {
+// 修复3: 使用 %hook 一个系统类，确保 Logos 预处理器正常工作
+// 这样 %ctor 就能在 Runtime 完全初始化后执行，避免 TrollStore 闪退
+%hook NSObject
+
+// 空的 hook，不做任何事，只为让 Logos 生成正确的 +load 和 %ctor 上下文
++ (void)load {
+    %orig;
+}
+
+%end
+
+// 修复1+3: 使用 %ctor 替代 __attribute__((constructor))
+// Logos 生成的 %ctor 会在 Runtime 初始化完成后执行，TrollStore 安全
+%ctor {
     // 广告SDK类前缀列表
     NSArray *adPrefixes = @[@"ABU", @"CSJ", @"BaiduMobAd", @"GDT", @"Wind", @"Sigmob", @"AWM", @"Pangle"];
 
@@ -109,7 +121,6 @@ static void __attribute__((constructor)) adBlockerInit() {
         @"canRequestWithType:", @"instancesRespondToSelector:"
     ];
 
-    // 修复2: 删除 hooked 计数器变量，避免 -Werror,-Wunused-but-set-variable
     unsigned int classCount = 0;
     Class *classes = objc_copyClassList(&classCount);
 
