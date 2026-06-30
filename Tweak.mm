@@ -1,7 +1,7 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v11.0
-//  Flow: select -> rename to .88888888888888 -> REFRESH -> auto try open methods
-//  CHANGELOG v11.0: No-scroll approach, test multiple open methods with user confirmation
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v11.1
+//  Flow: select -> rename to .88888888888888 -> REFRESH x2 -> auto try open methods
+//  CHANGELOG v11.1: Fixed compile errors (self in C func, UIDocumentPickerMode), keep 2 refreshes
 //
 
 #import <UIKit/UIKit.h>
@@ -21,7 +21,9 @@ static NSString *gPendingPpName = nil;
 static NSString *gPendingFilePath = nil;
 
 static NSInteger gCurrentMethodIndex = 0;
-static NSArray *gOpenMethods = nil;
+
+// Function pointer type for open methods
+typedef void (*OpenMethodFunc)(NSString *, NSString *);
 
 // Forward declarations
 static UIViewController * topViewController(void);
@@ -69,12 +71,76 @@ static void openMethod_downloadDirect(NSString *ppName, NSString *filePath);
 static void openMethod_shareSheet(NSString *ppName, NSString *filePath);
 static void openMethod_quickLook(NSString *ppName, NSString *filePath);
 static void openMethod_webView(NSString *ppName, NSString *filePath);
-static void openMethod_documentPicker(NSString *ppName, NSString *filePath);
 static void openMethod_accessibility(NSString *ppName, NSString *filePath);
 static void openMethod_responderChain(NSString *ppName, NSString *filePath);
 static void openMethod_customURL(NSString *ppName, NSString *filePath);
 static void openMethod_deepLink(NSString *ppName, NSString *filePath);
-static void openMethod_fileProvider(NSString *ppName, NSString *filePath);
+
+// Method names and descriptions (must match gOpenMethodFuncs order)
+static NSString *gMethodNames[] = {
+    @"Delegate调用",
+    @"VC直接方法",
+    @"模拟Cell点击",
+    @"UIApplication sendAction",
+    @"Notification发送",
+    @"Runtime方法搜索",
+    @"KVO触发",
+    @"URL Scheme",
+    @"Push导航",
+    @"文件ID查找",
+    @"下载直链",
+    @"ShareSheet",
+    @"QuickLook",
+    @"WebView",
+    @"Accessibility",
+    @"ResponderChain",
+    @"CustomURL",
+    @"DeepLink"
+};
+
+static NSString *gMethodDetails[] = {
+    @"调用 tableView/collectionView 的 didSelect 方法",
+    @"调用当前VC的 openFile/previewFile 等方法",
+    @"模拟 touchesBegan/touchesEnded 在可见cell上",
+    @"通过 sendAction:to:from:forEvent: 发送打开事件",
+    @"发送百度网盘内部通知触发文件打开",
+    @"遍历VC所有方法，自动调用含open/preview的方法",
+    @"设置 selectedFile/currentFile 属性触发响应",
+    @"通过 baidupan:// 等scheme打开文件",
+    @"直接push文件详情页面",
+    @"通过fs_id查找并调用openFileWithId:",
+    @"获取下载链接并通过浏览器打开",
+    @"通过系统分享面板打开",
+    @"通过QLPreviewController预览文件",
+    @"通过内置浏览器打开文件网页",
+    @"通过accessibilityActivate激活文件cell",
+    @"通过响应链传递打开事件",
+    @"构造文件URL并打开",
+    @"通过通用链接打开文件"
+};
+
+static OpenMethodFunc gOpenMethodFuncs[] = {
+    openMethod_delegateCall,
+    openMethod_vcDirectCall,
+    openMethod_simulateCellTap,
+    openMethod_sendAction,
+    openMethod_notification,
+    openMethod_runtimeSearch,
+    openMethod_kvoTrigger,
+    openMethod_urlScheme,
+    openMethod_pushVC,
+    openMethod_fileIDLookup,
+    openMethod_downloadDirect,
+    openMethod_shareSheet,
+    openMethod_quickLook,
+    openMethod_webView,
+    openMethod_accessibility,
+    openMethod_responderChain,
+    openMethod_customURL,
+    openMethod_deepLink
+};
+
+static const NSInteger kTotalMethods = sizeof(gOpenMethodFuncs) / sizeof(gOpenMethodFuncs[0]);
 
 static UIViewController * topViewController(void) {
     UIWindow *window = nil;
@@ -662,7 +728,6 @@ static void openMethod_delegateCall(NSString *ppName, NSString *filePath) {
     UIViewController *vc = topViewController();
     if (!vc) return;
 
-    // Try to find UITableView or UICollectionView in VC
     UIScrollView *sv = findScrollViewInView(vc.view);
     if ([sv isKindOfClass:[UITableView class]]) {
         UITableView *tv = (UITableView *)sv;
@@ -990,7 +1055,6 @@ static void openMethod_kvoTrigger(NSString *ppName, NSString *filePath) {
             if (value) {
                 DLog(@"Found property %@, trying to set filePath", key);
                 [vc setValue:filePath forKey:key];
-                // Also try to trigger any related method
                 NSString *capitalized = [key stringByReplacingCharactersInRange:NSMakeRange(0,1) withString:[[key substringToIndex:1] uppercaseString]];
                 NSString *setterName = [NSString stringWithFormat:@"set%@:", capitalized];
                 SEL setterSel = NSSelectorFromString(setterName);
@@ -1045,7 +1109,6 @@ static void openMethod_pushVC(NSString *ppName, NSString *filePath) {
         return;
     }
 
-    // Try to find file detail VC class
     NSArray *possibleClasses = @[@"BDPanFileDetailVC", @"BDPanPreviewVC", @"BDPanFileViewerVC",
                                     @"FileDetailViewController", @"PreviewViewController",
                                     @"BDPanFileViewController", @"BDPanDocumentVC"];
@@ -1073,7 +1136,6 @@ static void openMethod_fileIDLookup(NSString *ppName, NSString *filePath) {
         DLog(@"File ID lookup: no token");
         return;
     }
-    // Fetch file list and find the file by name, then try to open by fs_id
     fetchFileList(^(NSArray *files, NSError *err) {
         if (err || !files) {
             DLog(@"File ID lookup: fetch failed");
@@ -1084,7 +1146,6 @@ static void openMethod_fileIDLookup(NSString *ppName, NSString *filePath) {
             if ([name isEqualToString:ppName]) {
                 NSNumber *fsId = file[@"fs_id"];
                 DLog(@"Found fs_id: %@ for %@", fsId, ppName);
-                // Try to open by fs_id via API or internal method
                 UIViewController *vc = topViewController();
                 if (vc) {
                     SEL sel = NSSelectorFromString(@"openFileWithId:");
@@ -1109,14 +1170,7 @@ static void openMethod_downloadDirect(NSString *ppName, NSString *filePath) {
         DLog(@"Download direct: no token");
         return;
     }
-    // Get dlink via API
     NSString *encodedPath = strictEncodeURIComponent(filePath);
-    NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/rest/2.0/xpan/multimedia?method=filemetas&access_token=%@&fsids=[]&dlink=1", gBdstoken];
-    // This is a simplified version; in practice you'd need the correct fs_id
-    DLog(@"Download direct: would fetch dlink from API");
-    showToast(@"方法11: 尝试获取直链...");
-
-    // Alternative: try to open download URL directly
     NSString *downloadUrl = [NSString stringWithFormat:@"https://pcs.baidu.com/rest/2.0/pcs/file?method=download&app_id=250528&path=%@", encodedPath];
     NSURL *urlObj = [NSURL URLWithString:downloadUrl];
     if (urlObj) {
@@ -1127,6 +1181,7 @@ static void openMethod_downloadDirect(NSString *ppName, NSString *filePath) {
         }
         DLog(@"Opened download URL");
     }
+    showToast(@"方法11: 尝试获取直链...");
 }
 
 static void openMethod_shareSheet(NSString *ppName, NSString *filePath) {
@@ -1146,8 +1201,6 @@ static void openMethod_shareSheet(NSString *ppName, NSString *filePath) {
 
 static void openMethod_quickLook(NSString *ppName, NSString *filePath) {
     DLog(@"[Method 13] Trying QuickLook for: %@", ppName);
-    // QuickLook requires QLPreviewController which needs proper import
-    // We'll try to instantiate it via runtime
     Class qlClass = NSClassFromString(@"QLPreviewController");
     if (!qlClass) {
         DLog(@"QuickLook: QLPreviewController not available");
@@ -1207,31 +1260,8 @@ static void openMethod_webView(NSString *ppName, NSString *filePath) {
     }
 }
 
-static void openMethod_documentPicker(NSString *ppName, NSString *filePath) {
-    DLog(@"[Method 15] Trying document picker for: %@", ppName);
-    UIViewController *vc = topViewController();
-    if (!vc) return;
-
-    Class dpClass = NSClassFromString(@"UIDocumentPickerViewController");
-    if (!dpClass) {
-        DLog(@"DocumentPicker: class not available");
-        return;
-    }
-
-    @try {
-        NSURL *url = [NSURL fileURLWithPath:filePath];
-        id picker = [[dpClass alloc] initWithURL:url inMode:0]; // 0 = UIDocumentPickerModeImport
-        if (picker) {
-            [vc presentViewController:picker animated:YES completion:nil];
-            DLog(@"Presented document picker");
-        }
-    } @catch (NSException *e) {
-        DLog(@"DocumentPicker failed: %@", e);
-    }
-}
-
 static void openMethod_accessibility(NSString *ppName, NSString *filePath) {
-    DLog(@"[Method 16] Trying accessibility for: %@", ppName);
+    DLog(@"[Method 15] Trying accessibility for: %@", ppName);
     UIViewController *vc = topViewController();
     if (!vc) return;
 
@@ -1261,18 +1291,17 @@ static void openMethod_accessibility(NSString *ppName, NSString *filePath) {
 }
 
 static void openMethod_responderChain(NSString *ppName, NSString *filePath) {
-    DLog(@"[Method 17] Trying responder chain for: %@", ppName);
+    DLog(@"[Method 16] Trying responder chain for: %@", ppName);
     UIViewController *vc = topViewController();
     if (!vc) return;
 
-    // Try to send action through responder chain
     SEL sel = NSSelectorFromString(@"openFile:");
     [[UIApplication sharedApplication] sendAction:sel to:nil from:vc forEvent:nil];
     DLog(@"Sent action through responder chain");
 }
 
 static void openMethod_customURL(NSString *ppName, NSString *filePath) {
-    DLog(@"[Method 18] Trying custom URL for: %@", ppName);
+    DLog(@"[Method 17] Trying custom URL for: %@", ppName);
     NSString *encodedPath = strictEncodeURIComponent(filePath);
     NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"https://pan.baidu.com/disk/home?path=%@", encodedPath]];
     if (url) {
@@ -1286,7 +1315,7 @@ static void openMethod_customURL(NSString *ppName, NSString *filePath) {
 }
 
 static void openMethod_deepLink(NSString *ppName, NSString *filePath) {
-    DLog(@"[Method 19] Trying deep link for: %@", ppName);
+    DLog(@"[Method 18] Trying deep link for: %@", ppName);
     NSString *encodedPath = strictEncodeURIComponent(filePath);
     NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"https://pan.baidu.com/wap/init?path=%@", encodedPath]];
     if (url) {
@@ -1297,17 +1326,6 @@ static void openMethod_deepLink(NSString *ppName, NSString *filePath) {
         }
         DLog(@"Opened deep link");
     }
-}
-
-static void openMethod_fileProvider(NSString *ppName, NSString *filePath) {
-    DLog(@"[Method 20] Trying file provider for: %@", ppName);
-    // Try to use NSFileProviderManager if available
-    Class fpmClass = NSClassFromString(@"NSFileProviderManager");
-    if (!fpmClass) {
-        DLog(@"FileProvider: NSFileProviderManager not available");
-        return;
-    }
-    DLog(@"FileProvider: would trigger file provider (requires domain setup)");
 }
 
 #pragma mark - Method Testing Framework
@@ -1321,21 +1339,19 @@ static void finishAllMethodsAndRestore(void) {
 static void showMethodResultDialog(NSString *methodName, NSString *detail) {
     UIViewController *vc = topViewController();
     if (!vc) {
-        // If no VC, just continue to next method
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             tryNextOpenMethod();
         });
         return;
     }
 
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[NSString stringWithFormat:@"方法 %ld/%lu", (long)(gCurrentMethodIndex + 1), (unsigned long)gOpenMethods.count]
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[NSString stringWithFormat:@"方法 %ld/%ld", (long)(gCurrentMethodIndex + 1), (long)kTotalMethods]
                                                                    message:[NSString stringWithFormat:@"%@\n\n%@", methodName, detail]
                                                             preferredStyle:UIAlertControllerStyleAlert];
 
     UIAlertAction *openedAction = [UIAlertAction actionWithTitle:@"✅ 已打开"
                                                              style:UIAlertActionStyleDefault
                                                            handler:^(UIAlertAction *action) {
-        // User confirmed file opened! Restore name.
         showToast(@"文件已打开，恢复原名...");
         executeRestore();
     }];
@@ -1343,7 +1359,6 @@ static void showMethodResultDialog(NSString *methodName, NSString *detail) {
     UIAlertAction *notOpenedAction = [UIAlertAction actionWithTitle:@"❌ 没打开"
                                                                 style:UIAlertActionStyleDefault
                                                               handler:^(UIAlertAction *action) {
-        // Try next method
         gCurrentMethodIndex++;
         tryNextOpenMethod();
     }];
@@ -1357,27 +1372,19 @@ static void showMethodResultDialog(NSString *methodName, NSString *detail) {
 }
 
 static void tryNextOpenMethod(void) {
-    if (!gOpenMethods || gCurrentMethodIndex >= gOpenMethods.count) {
+    if (gCurrentMethodIndex >= kTotalMethods) {
         finishAllMethodsAndRestore();
         return;
     }
 
-    NSDictionary *methodInfo = gOpenMethods[gCurrentMethodIndex];
-    NSString *methodName = methodInfo[@"name"];
-    NSString *detail = methodInfo[@"detail"];
-    NSString *selectorName = methodInfo[@"selector"];
+    NSString *methodName = gMethodNames[gCurrentMethodIndex];
+    NSString *detail = gMethodDetails[gCurrentMethodIndex];
 
-    DLog(@"=== Trying method %ld: %@ ===", (long)(gCurrentMethodIndex + 1), methodName);
-    showToast([NSString stringWithFormat:@"尝试方法 %ld/%lu...", (long)(gCurrentMethodIndex + 1), (unsigned long)gOpenMethods.count]);
+    DLog(@"=== Trying method %ld/%ld: %@ ===", (long)(gCurrentMethodIndex + 1), (long)kTotalMethods, methodName);
+    showToast([NSString stringWithFormat:@"尝试方法 %ld/%ld...", (long)(gCurrentMethodIndex + 1), (long)kTotalMethods]);
 
-    // Execute the method
-    SEL methodSel = NSSelectorFromString(selectorName);
-    if ([self respondsToSelector:methodSel]) {
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        [self performSelector:methodSel withObject:gPendingPpName withObject:gPendingFilePath];
-        #pragma clang diagnostic pop
-    }
+    // Execute the method via function pointer
+    gOpenMethodFuncs[gCurrentMethodIndex](gPendingPpName, gPendingFilePath);
 
     // Show dialog after a short delay to let the method take effect
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -1417,8 +1424,8 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
         gPendingPpName = ppName;
         gPendingFilePath = filePath;
 
-        // Refresh list
-        showToast(@"2. 刷新列表...");
+        // First refresh
+        showToast(@"2. 刷新列表 (1/2)...");
         forceRefreshFileList();
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -1430,33 +1437,10 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
                 [(UICollectionView *)listView reloadData];
             }
 
+            showToast(@"3. 刷新列表 (2/2)...");
+
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                showToast(@"3. 开始测试打开方法...");
-
-                // Initialize method list
-                gOpenMethods = @[
-                    @{@"name": @"Delegate调用", @"detail": @"调用 tableView/collectionView 的 didSelect 方法", @"selector": @"openMethod_delegateCall:"},
-                    @{@"name": @"VC直接方法", @"detail": @"调用当前VC的 openFile/previewFile 等方法", @"selector": @"openMethod_vcDirectCall:"},
-                    @{@"name": @"模拟Cell点击", @"detail": @"模拟 touchesBegan/touchesEnded 在可见cell上", @"selector": @"openMethod_simulateCellTap:"},
-                    @{@"name": @"UIApplication sendAction", @"detail": @"通过 sendAction:to:from:forEvent: 发送打开事件", @"selector": @"openMethod_sendAction:"},
-                    @{@"name": @"Notification发送", @"detail": @"发送百度网盘内部通知触发文件打开", @"selector": @"openMethod_notification:"},
-                    @{@"name": @"Runtime方法搜索", @"detail": @"遍历VC所有方法，自动调用含open/preview的方法", @"selector": @"openMethod_runtimeSearch:"},
-                    @{@"name": @"KVO触发", @"detail": @"设置 selectedFile/currentFile 属性触发响应", @"selector": @"openMethod_kvoTrigger:"},
-                    @{@"name": @"URL Scheme", @"detail": @"通过 baidupan:// 等scheme打开文件", @"selector": @"openMethod_urlScheme:"},
-                    @{@"name": @"Push导航", @"detail": @"直接push文件详情页面", @"selector": @"openMethod_pushVC:"},
-                    @{@"name": @"文件ID查找", @"detail": @"通过fs_id查找并调用openFileWithId:", @"selector": @"openMethod_fileIDLookup:"},
-                    @{@"name": @"下载直链", @"detail": @"获取下载链接并通过浏览器打开", @"selector": @"openMethod_downloadDirect:"},
-                    @{@"name": @"ShareSheet", @"detail": @"通过系统分享面板打开", @"selector": @"openMethod_shareSheet:"},
-                    @{@"name": @"QuickLook", @"detail": @"通过QLPreviewController预览文件", @"selector": @"openMethod_quickLook:"},
-                    @{@"name": @"WebView", @"detail": @"通过内置浏览器打开文件网页", @"selector": @"openMethod_webView:"},
-                    @{@"name": @"DocumentPicker", @"detail": @"通过文档选择器打开", @"selector": @"openMethod_documentPicker:"},
-                    @{@"name": @"Accessibility", @"detail": @"通过accessibilityActivate激活文件cell", @"selector": @"openMethod_accessibility:"},
-                    @{@"name": @"ResponderChain", @"detail": @"通过响应链传递打开事件", @"selector": @"openMethod_responderChain:"},
-                    @{@"name": @"CustomURL", @"detail": @"构造文件URL并打开", @"selector": @"openMethod_customURL:"},
-                    @{@"name": @"DeepLink", @"detail": @"通过通用链接打开文件", @"selector": @"openMethod_deepLink:"},
-                    @{@"name": @"FileProvider", @"detail": @"通过NSFileProviderManager触发", @"selector": @"openMethod_fileProvider:"}
-                ];
-
+                showToast(@"4. 开始测试打开方法...");
                 gCurrentMethodIndex = 0;
                 tryNextOpenMethod();
             });
@@ -1543,8 +1527,8 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 8 ? 8 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v11.0"
-                                                                   message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n新流程：改名->刷新->自动测试20种打开方法", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v11.1"
+                                                                   message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n新流程：改名->刷新x2->自动测试%ld种打开方法", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing", (long)kTotalMethods]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件"
                                                              style:UIAlertActionStyleDefault
@@ -1607,7 +1591,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v11.0 loaded - No-Scroll Multi-Method Edition");
+    DLog(@"BaiduPan Troll v11.1 loaded - No-Scroll Multi-Method Edition");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
