@@ -1,7 +1,7 @@
 //
 //  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.36
 //  方案C：改名 -> 篡改内存对象 -> 直接调用内部方法打开 -> 检测进入后恢复原名
-//  修复：提取 performSelector 辅助函数，避免 @try 内 pragma push/pop 不匹配
+//  彻底修复：所有 performSelector 调用全部提取到独立辅助函数，消灭所有内联 pragma
 //
 
 #import <UIKit/UIKit.h>
@@ -74,10 +74,13 @@ static id findFileModelInVC(UIViewController *vc, NSString *fileId);
 static BOOL mutateFileModel(id fileModel, NSString *newPath, NSString *newName);
 static void openFileDirectly(UIViewController *vc, id fileModel, NSString *filePath, NSString *fileName);
 
-// 辅助函数：安全调用 performSelector，避免 @try 内 pragma 问题
-static void safePerformSelectorWithObject(id target, SEL sel, id obj);
+// 安全 performSelector 辅助函数（文件中唯一允许出现 pragma 的地方）
 static void safePerformSelector(id target, SEL sel);
+static void safePerformSelectorWithObject(id target, SEL sel, id obj);
 static void safePerformSelectorWithTwoObjects(id target, SEL sel, id obj1, id obj2);
+static void safePerformSelectorIfResponds(id target, SEL sel);
+static void safePerformSelectorIfRespondsWithObject(id target, SEL sel, id obj);
+static void safePerformSelectorIfRespondsWithTwoObjects(id target, SEL sel, id obj1, id obj2);
 
 static UIViewController * topViewController(void) {
     UIWindow *window = nil;
@@ -422,15 +425,8 @@ static void triggerMJRefresh(id headerOrFooter) {
     if (!headerOrFooter) return;
     SEL beginSel = NSSelectorFromString(@"beginRefreshing");
     SEL executeSel = NSSelectorFromString(@"executeRefreshingCallback");
-    #pragma clang diagnostic push
-    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-    if ([headerOrFooter respondsToSelector:beginSel]) {
-        [headerOrFooter performSelector:beginSel];
-    }
-    if ([headerOrFooter respondsToSelector:executeSel]) {
-        [headerOrFooter performSelector:executeSel];
-    }
-    #pragma clang diagnostic pop
+    safePerformSelectorIfResponds(headerOrFooter, beginSel);
+    safePerformSelectorIfResponds(headerOrFooter, executeSel);
 }
 
 static void triggerNotificationFallback(void) {
@@ -452,29 +448,19 @@ static void triggerNotificationFallback(void) {
 static void triggerEGORefresh(UIView *subview, UIScrollView *scrollView) {
     SEL egoScrollSel = NSSelectorFromString(@"egoRefreshScrollViewDidScroll:");
     SEL egoDragSel = NSSelectorFromString(@"egoRefreshScrollViewDidEndDragging:");
-    #pragma clang diagnostic push
-    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
     if ([subview respondsToSelector:egoScrollSel]) {
-        [subview performSelector:egoScrollSel withObject:scrollView];
-        if ([subview respondsToSelector:egoDragSel]) {
-            [subview performSelector:egoDragSel withObject:scrollView];
-        }
+        safePerformSelectorWithObject(subview, egoScrollSel, scrollView);
+        safePerformSelectorIfRespondsWithObject(subview, egoDragSel, scrollView);
     }
-    #pragma clang diagnostic pop
 }
 
 static void triggerBDWalletRefresh(UIView *subview, UIScrollView *scrollView) {
     SEL bdScrollSel = NSSelectorFromString(@"BDWalletRefreshScrollViewDidScroll:");
     SEL bdDragSel = NSSelectorFromString(@"BDWalletRefreshScrollViewDidEndDragging:");
-    #pragma clang diagnostic push
-    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
     if ([subview respondsToSelector:bdScrollSel]) {
-        [subview performSelector:bdScrollSel withObject:scrollView];
-        if ([subview respondsToSelector:bdDragSel]) {
-            [subview performSelector:bdDragSel withObject:scrollView];
-        }
+        safePerformSelectorWithObject(subview, bdScrollSel, scrollView);
+        safePerformSelectorIfRespondsWithObject(subview, bdDragSel, scrollView);
     }
-    #pragma clang diagnostic pop
 }
 
 static void simulatePullToRefreshOnScrollView(UIScrollView *scrollView) {
@@ -482,29 +468,15 @@ static void simulatePullToRefreshOnScrollView(UIScrollView *scrollView) {
     DLog(@"Simulating pull-to-refresh gesture");
     CGPoint originalOffset = scrollView.contentOffset;
     SEL willBeginDragging = @selector(scrollViewWillBeginDragging:);
-    #pragma clang diagnostic push
-    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-    if (scrollView.delegate && [scrollView.delegate respondsToSelector:willBeginDragging]) {
-        [scrollView.delegate performSelector:willBeginDragging withObject:scrollView];
-    }
+    safePerformSelectorIfRespondsWithObject(scrollView.delegate, willBeginDragging, scrollView);
     scrollView.contentOffset = CGPointMake(originalOffset.x, -150);
     SEL didScroll = @selector(scrollViewDidScroll:);
-    if (scrollView.delegate && [scrollView.delegate respondsToSelector:didScroll]) {
-        [scrollView.delegate performSelector:didScroll withObject:scrollView];
-    }
-    #pragma clang diagnostic pop
+    safePerformSelectorIfRespondsWithObject(scrollView.delegate, didScroll, scrollView);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         SEL didEndDragging = @selector(scrollViewDidEndDragging:willDecelerate:);
         SEL didEndDecelerating = @selector(scrollViewDidEndDecelerating:);
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        if (scrollView.delegate && [scrollView.delegate respondsToSelector:didEndDragging]) {
-            [scrollView.delegate performSelector:didEndDragging withObject:scrollView withObject:@(NO)];
-        }
-        if (scrollView.delegate && [scrollView.delegate respondsToSelector:didEndDecelerating]) {
-            [scrollView.delegate performSelector:didEndDecelerating withObject:scrollView];
-        }
-        #pragma clang diagnostic pop
+        safePerformSelectorIfRespondsWithTwoObjects(scrollView.delegate, didEndDragging, scrollView, @(NO));
+        safePerformSelectorIfRespondsWithObject(scrollView.delegate, didEndDecelerating, scrollView);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             scrollView.contentOffset = originalOffset;
         });
@@ -540,14 +512,10 @@ static void tryRefreshOnScrollView(UIScrollView *scrollView) {
             [className containsString:@"RadarRefresh"] ||
             [className containsString:@"DimeCircleRefresh"]) {
             DLog(@"Found refresh component: %@", className);
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
             if ([subview respondsToSelector:@selector(beginRefreshing)]) {
-                [subview performSelector:@selector(beginRefreshing)];
-                #pragma clang diagnostic pop
+                safePerformSelector(subview, @selector(beginRefreshing));
                 return;
             }
-            #pragma clang diagnostic pop
             triggerEGORefresh(subview, scrollView);
             triggerBDWalletRefresh(subview, scrollView);
         }
@@ -569,10 +537,7 @@ static void refreshVC(UIViewController *vc) {
         SEL sel = NSSelectorFromString(selName);
         if ([vc respondsToSelector:sel]) {
             DLog(@"Calling VC refresh method: %@ on %@", selName, NSStringFromClass([vc class]));
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            [vc performSelector:sel];
-            #pragma clang diagnostic pop
+            safePerformSelector(vc, sel);
             return;
         }
     }
@@ -802,20 +767,14 @@ static void autoClickVisibleCell(NSString *ppName, UIScrollView *listView) {
         SEL didSelect = @selector(tableView:didSelectRowAtIndexPath:);
         if (delegate && [delegate respondsToSelector:didSelect]) {
             DLog(@"Calling tableView:didSelectRowAtIndexPath:");
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            [delegate performSelector:didSelect withObject:listView withObject:foundPath];
-            #pragma clang diagnostic pop
+            safePerformSelectorWithTwoObjects(delegate, didSelect, listView, foundPath);
         }
     } else if ([listView isKindOfClass:[UICollectionView class]]) {
         delegate = [(UICollectionView *)listView delegate];
         SEL didSelect = @selector(collectionView:didSelectItemAtIndexPath:);
         if (delegate && [delegate respondsToSelector:didSelect]) {
             DLog(@"Calling collectionView:didSelectItemAtIndexPath:");
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            [delegate performSelector:didSelect withObject:listView withObject:foundPath];
-            #pragma clang diagnostic pop
+            safePerformSelectorWithTwoObjects(delegate, didSelect, listView, foundPath);
         }
     }
 
@@ -1045,29 +1004,6 @@ static void startTapDetection(void) {
             executeRestore();
         }
     });
-}
-
-// ========== 辅助函数：安全 performSelector，避免 @try 内 pragma 问题 ==========
-
-static void safePerformSelectorWithObject(id target, SEL sel, id obj) {
-    #pragma clang diagnostic push
-    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-    [target performSelector:sel withObject:obj];
-    #pragma clang diagnostic pop
-}
-
-static void safePerformSelector(id target, SEL sel) {
-    #pragma clang diagnostic push
-    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-    [target performSelector:sel];
-    #pragma clang diagnostic pop
-}
-
-static void safePerformSelectorWithTwoObjects(id target, SEL sel, id obj1, id obj2) {
-    #pragma clang diagnostic push
-    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-    [target performSelector:sel withObject:obj1 withObject:obj2];
-    #pragma clang diagnostic pop
 }
 
 // ========== 方案C 核心函数 ==========
@@ -1474,6 +1410,47 @@ static void showFloatButton(void) {
     [gesture setTranslation:CGPointZero inView:button.superview];
 }
 @end
+
+// ========== 安全 performSelector 辅助函数（文件中唯一允许出现 pragma 的地方） ==========
+
+static void safePerformSelector(id target, SEL sel) {
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    [target performSelector:sel];
+    #pragma clang diagnostic pop
+}
+
+static void safePerformSelectorWithObject(id target, SEL sel, id obj) {
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    [target performSelector:sel withObject:obj];
+    #pragma clang diagnostic pop
+}
+
+static void safePerformSelectorWithTwoObjects(id target, SEL sel, id obj1, id obj2) {
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    [target performSelector:sel withObject:obj1 withObject:obj2];
+    #pragma clang diagnostic pop
+}
+
+static void safePerformSelectorIfResponds(id target, SEL sel) {
+    if (target && [target respondsToSelector:sel]) {
+        safePerformSelector(target, sel);
+    }
+}
+
+static void safePerformSelectorIfRespondsWithObject(id target, SEL sel, id obj) {
+    if (target && [target respondsToSelector:sel]) {
+        safePerformSelectorWithObject(target, sel, obj);
+    }
+}
+
+static void safePerformSelectorIfRespondsWithTwoObjects(id target, SEL sel, id obj1, id obj2) {
+    if (target && [target respondsToSelector:sel]) {
+        safePerformSelectorWithTwoObjects(target, sel, obj1, obj2);
+    }
+}
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
