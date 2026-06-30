@@ -66,11 +66,10 @@ static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInt
 static void scrollToRenamedFileAndAutoClick(NSString *ppName);
 static void simulateTouchOnCell(UIView *cell);
 static void autoClickVisibleCell(NSString *ppName, UIScrollView *listView);
-static void invokeOpenFileMethodOnVC(UIViewController *vc, NSString *fileName, NSString *filePath);
 static NSString * topVCClassName(void);
 static NSString * topVCTitle(void);
 
-// 方案C新增
+// 方案C核心函数
 static id findFileModelInVC(UIViewController *vc, NSString *fileId);
 static BOOL mutateFileModel(id fileModel, NSString *newPath, NSString *newName);
 static void openFileDirectly(UIViewController *vc, id fileModel, NSString *filePath, NSString *fileName);
@@ -829,71 +828,6 @@ static void autoClickVisibleCell(NSString *ppName, UIScrollView *listView) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         simulateTouchOnCell(visibleCell);
     });
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        UIViewController *vc = topViewController();
-        invokeOpenFileMethodOnVC(vc, ppName, gPendingRestorePdfPath);
-    });
-}
-
-static void invokeOpenFileMethodOnVC(UIViewController *vc, NSString *fileName, NSString *filePath) {
-    if (!vc) return;
-
-    NSArray *possibleSelectors = @[
-        @"openFile:", @"openFileWithId:", @"previewFile:", @"previewFileWithPath:",
-        @"didSelectFile:", @"handleFileTap:", @"fileCellClicked:", @"enterFileDetail:",
-        @"showFilePreview:", @"presentFileViewer:", @"routeToFileDetail:",
-        @"openDocument:", @"previewDocument:", @"showPreviewForFile:",
-        @"handleCellTap:", @"didTapFile:", @"onFileSelected:",
-        @"pushFileDetail:", @"presentFileDetail:", @"showFileDetail:"
-    ];
-
-    for (NSString *selName in possibleSelectors) {
-        SEL sel = NSSelectorFromString(selName);
-        if ([vc respondsToSelector:sel]) {
-            DLog(@"Found open file method: %@ on %@", selName, NSStringFromClass([vc class]));
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            @try {
-                [vc performSelector:sel withObject:fileName];
-                DLog(@"Called %@ with fileName", selName);
-                #pragma clang diagnostic pop
-                return;
-            } @catch (NSException *e) {
-                @try {
-                    [vc performSelector:sel withObject:filePath];
-                    DLog(@"Called %@ with filePath", selName);
-                    #pragma clang diagnostic pop
-                    return;
-                } @catch (NSException *e2) {
-                    #pragma clang diagnostic pop
-                }
-            }
-        }
-    }
-
-    NSArray *filePropKeys = @[@"selectedFile", @"currentFile", @"fileItem", @"fileModel",
-                               @"selectedItem", @"currentItem", @"fileInfo", @"document"];
-    for (NSString *key in filePropKeys) {
-        @try {
-            id fileObj = [vc valueForKey:key];
-            if (fileObj) {
-                for (NSString *selName in possibleSelectors) {
-                    SEL sel = NSSelectorFromString(selName);
-                    if ([vc respondsToSelector:sel]) {
-                        DLog(@"Calling %@ with %@ object", selName, key);
-                        #pragma clang diagnostic push
-                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                        [vc performSelector:sel withObject:fileObj];
-                        #pragma clang diagnostic pop
-                        return;
-                    }
-                }
-            }
-        } @catch (NSException *e) {}
-    }
-
-    DLog(@"No internal open file method found on %@", NSStringFromClass([vc class]));
 }
 
 static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInteger attempt, NSInteger maxAttempts, CGFloat scrollStep) {
