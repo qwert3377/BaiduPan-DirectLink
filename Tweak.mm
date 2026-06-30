@@ -1,597 +1,1006 @@
 //
-//  AdBlocker.dylib - TrollStore Ad Blocker
-//  Targets: GroMore(ABU) + AWM + BaiduMobAd + App's own AD system
-//  Method: Runtime hooking (no %hook, no substrate dependency)
+//  BaiduNetdiskAdBlocker.mm
+//  百度网盘去广告插件 (GroMore聚合SDK + 多广告源拦截)
+//  版本: 1.0.0
+//  编译: Theos / Logos
 //
 
-#import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
-#import <objc/message.h>
-#import <dlfcn.h>
 
-// ============================================================================
-// MARK: - Configuration
-// ============================================================================
-static BOOL g_adBlockEnabled = YES;
-static BOOL g_logEnabled = YES;
+// ============================================================
+// MARK: - 通用工具函数
+// ============================================================
 
-#define ADLOG(fmt, ...) do { \
-    if (g_logEnabled) NSLog(@"[AdBlocker] " fmt, ##__VA_ARGS__); \
-} while(0)
-
-// ============================================================================
-// MARK: - Runtime Hook Helper
-// ============================================================================
-
-static void HookMethod(Class cls, SEL originalSel, SEL newSel, IMP newImp, IMP *oldImp) {
-    if (!cls) {
-        ADLOG(@"Class not found for %@", NSStringFromSelector(originalSel));
-        return;
-    }
-    Method origMethod = class_getInstanceMethod(cls, originalSel);
-    if (!origMethod) {
-        ADLOG(@"Method not found: %@ in %@", NSStringFromSelector(originalSel), NSStringFromClass(cls));
-        return;
-    }
-    
-    IMP origImp = method_getImplementation(origMethod);
-    if (oldImp) *oldImp = origImp;
-    
-    class_replaceMethod(cls, newSel, origImp, method_getTypeEncoding(origMethod));
-    class_replaceMethod(cls, originalSel, newImp, method_getTypeEncoding(origMethod));
-    
-    ADLOG(@"Hooked %@ -> %@", NSStringFromClass(cls), NSStringFromSelector(originalSel));
+static void LogAdBlock(NSString *format, ...) {
+    va_list args;
+    va_start(args, format);
+    NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+    NSLog(@"[AdBlock] %@", msg);
 }
 
-static void HookClassMethod(Class cls, SEL originalSel, IMP newImp, IMP *oldImp) {
-    if (!cls) return;
-    Method origMethod = class_getClassMethod(cls, originalSel);
-    if (!origMethod) return;
-    IMP origImp = method_getImplementation(origMethod);
-    if (oldImp) *oldImp = origImp;
-    method_setImplementation(origMethod, newImp);
-    ADLOG(@"Hooked Class +%@.%@", NSStringFromClass(cls), NSStringFromSelector(originalSel));
-}
+// ============================================================
+// MARK: - ABU (GroMore/穿山甲聚合) SDK 拦截
+// ============================================================
 
-// ============================================================================
-// MARK: - Block Ad Loading (Layer 1: Prevent ads from loading)
-// ============================================================================
+// 1. SDK初始化拦截 - 阻止广告SDK注册和配置加载
+%hook ABUAdSDKManager
 
-// Generic loadAd blocker - returns void, blocks all load calls
-static void __attribute__((used)) BlockLoadAd(id self, SEL _cmd) {
-    ADLOG(@"BLOCKED loadAd on %@", NSStringFromClass([self class]));
-    // Do nothing - ad never loads
-}
-
-// Generic loadAdData blocker
-static void __attribute__((used)) BlockLoadAdData(id self, SEL _cmd) {
-    ADLOG(@"BLOCKED loadAdData on %@", NSStringFromClass([self class]));
-}
-
-// loadAdData with param
-static void __attribute__((used)) BlockLoadAdDataParam(id self, SEL _cmd, id param) {
-    ADLOG(@"BLOCKED loadAdData:param on %@", NSStringFromClass([self class]));
-}
-
-// Generic loadAd with config
-static void __attribute__((used)) BlockLoadAdConfig(id self, SEL _cmd, id config) {
-    ADLOG(@"BLOCKED loadAdWithConfig on %@", NSStringFromClass([self class]));
-}
-
-// ============================================================================
-// MARK: - Block Ad Showing (Layer 2: Prevent ads from displaying)
-// ============================================================================
-
-// Generic showAd blocker - returns NO
-static BOOL __attribute__((used)) BlockShowAd(id self, SEL _cmd, id vc) {
-    ADLOG(@"BLOCKED showAd on %@", NSStringFromClass([self class]));
-    return NO;
-}
-
-// showAd with extra info
-static BOOL __attribute__((used)) BlockShowAdExtra(id self, SEL _cmd, id vc, id extra) {
-    ADLOG(@"BLOCKED showAd:extra: on %@", NSStringFromClass([self class]));
-    return NO;
-}
-
-// showInWindow blocker
-static BOOL __attribute__((used)) BlockShowInWindow(id self, SEL _cmd, id window) {
-    ADLOG(@"BLOCKED showInWindow on %@", NSStringFromClass([self class]));
-    return NO;
-}
-
-// showSplashAdInWindow blocker
-static void __attribute__((used)) BlockShowSplash(id self, SEL _cmd, id window, id param) {
-    ADLOG(@"BLOCKED showSplashAdInWindow on %@", NSStringFromClass([self class]));
-}
-
-// ============================================================================
-// MARK: - Block Ad Callbacks (Layer 3: Prevent success callbacks)
-// ============================================================================
-
-// Block adLoadDidSuccess
-static void __attribute__((used)) BlockAdLoadSuccess(id self, SEL _cmd) {
-    ADLOG(@"BLOCKED adLoadDidSuccess on %@", NSStringFromClass([self class]));
-    // Don't call original - suppress success notification
-}
-
-// Block adLoadDidFailedWithError - call it to make app think ad failed
-static void __attribute__((used)) BlockAdLoadFail(id self, SEL _cmd, id error) {
-    ADLOG(@"BLOCKED adLoadDidFailedWithError on %@", NSStringFromClass([self class]));
-}
-
-// Block bannerAdDidLoad
-static void __attribute__((used)) BlockBannerDidLoad(id self, SEL _cmd, id banner, id ext) {
-    ADLOG(@"BLOCKED bannerAd:didLoad: on %@", NSStringFromClass([self class]));
-}
-
-// Block nativeAdDidLoad
-static void __attribute__((used)) BlockNativeDidLoad(id self, SEL _cmd, id nativeAd, id exts) {
-    ADLOG(@"BLOCKED nativeAd:didLoad: on %@", NSStringFromClass([self class]));
-}
-
-// Block rewardedVideoAdDidLoad
-static void __attribute__((used)) BlockRewardDidLoad(id self, SEL _cmd, id ext) {
-    ADLOG(@"BLOCKED rewardedVideoAd:didLoad: on %@", NSStringFromClass([self class]));
-}
-
-// ============================================================================
-// MARK: - Block Ad View Creation (Layer 4: Return nil/empty views)
-// ============================================================================
-
-// Return nil for ad view creation
-static id __attribute__((used)) BlockReturnNil(id self, SEL _cmd) {
-    ADLOG(@"BLOCKED return nil from %@", NSStringFromSelector(_cmd));
+- (id)init {
+    LogAdBlock(@"ABUAdSDKManager init blocked");
     return nil;
 }
 
-// Return NO for isReady
-static BOOL __attribute__((used)) BlockReturnNO(id self, SEL _cmd) {
-    ADLOG(@"BLOCKED return NO from %@", NSStringFromSelector(_cmd));
-    return NO;
+- (void)_setup {
+    LogAdBlock(@"ABUAdSDKManager _setup blocked");
 }
 
-// Return 0 for ad count
-static NSInteger __attribute__((used)) BlockReturnZero(id self, SEL _cmd) {
-    ADLOG(@"BLOCKED return 0 from %@", NSStringFromSelector(_cmd));
-    return 0;
+- (void)registerAppID:(NSString *)appID {
+    LogAdBlock(@"ABUAdSDKManager registerAppID blocked: %@", appID);
 }
 
-// Return empty array
-static id __attribute__((used)) BlockReturnEmptyArray(id self, SEL _cmd) {
-    ADLOG(@"BLOCKED return empty array from %@", NSStringFromSelector(_cmd));
-    return @[];
+- (void)setupUserConfig {
+    LogAdBlock(@"ABUAdSDKManager setupUserConfig blocked");
 }
 
-// Return empty dictionary
-static id __attribute__((used)) BlockReturnEmptyDict(id self, SEL _cmd) {
-    ADLOG(@"BLOCKED return empty dict from %@", NSStringFromSelector(_cmd));
-    return @{};
+- (void)setupAPMConfig {
+    LogAdBlock(@"ABUAdSDKManager setupAPMConfig blocked");
 }
 
-// Return CGSizeZero
-static CGSize __attribute__((used)) BlockReturnZeroSize(id self, SEL _cmd) {
-    ADLOG(@"BLOCKED return CGSizeZero from %@", NSStringFromSelector(_cmd));
-    return CGSizeZero;
+- (void)setupTNCConfig {
+    LogAdBlock(@"ABUAdSDKManager setupTNCConfig blocked");
 }
 
-// ============================================================================
-// MARK: - Block SDK Initialization (Layer 5: Stop SDK from starting)
-// ============================================================================
-
-// Block ABUAdSDKManager setup
-static void __attribute__((used)) BlockSDKSetup(id self, SEL _cmd) {
-    ADLOG(@"BLOCKED SDK setup on %@", NSStringFromClass([self class]));
+- (void)setupApplogConfig {
+    LogAdBlock(@"ABUAdSDKManager setupApplogConfig blocked");
 }
 
-// Block registerAppID
-static void __attribute__((used)) BlockRegisterAppID(id self, SEL _cmd, id appID) {
-    ADLOG(@"BLOCKED registerAppID: %@", appID);
+- (void)setupSDKConfig {
+    LogAdBlock(@"ABUAdSDKManager setupSDKConfig blocked");
 }
 
-// Block config load
-static void __attribute__((used)) BlockConfigLoad(id self, SEL _cmd) {
-    ADLOG(@"BLOCKED config load on %@", NSStringFromClass([self class]));
+- (void)setupModuleControl {
+    LogAdBlock(@"ABUAdSDKManager setupModuleControl blocked");
 }
 
-// Block config load with block
-static void __attribute__((used)) BlockConfigLoadBlock(id self, SEL _cmd, id block) {
-    ADLOG(@"BLOCKED configLoadWithBlock on %@", NSStringFromClass([self class]));
-    // Call block with error to make app think config failed
+- (void)setupAdnDetectManager {
+    LogAdBlock(@"ABUAdSDKManager setupAdnDetectManager blocked");
+}
+
+- (void)setupUpperDetectManager {
+    LogAdBlock(@"ABUAdSDKManager setupUpperDetectManager blocked");
+}
+
+- (void)setupPangleSDK {
+    LogAdBlock(@"ABUAdSDKManager setupPangleSDK blocked");
+}
+
+- (void)setupAdActionManager {
+    LogAdBlock(@"ABUAdSDKManager setupAdActionManager blocked");
+}
+
+- (void)_updatePC {
+    LogAdBlock(@"ABUAdSDKManager _updatePC blocked");
+}
+
+- (void)_updateRulesWithConfig {
+    LogAdBlock(@"ABUAdSDKManager _updateRulesWithConfig blocked");
+}
+
+- (void)setupTrackerConfig {
+    LogAdBlock(@"ABUAdSDKManager setupTrackerConfig blocked");
+}
+
+- (void)setupLogConfigViaConfig {
+    LogAdBlock(@"ABUAdSDKManager setupLogConfigViaConfig blocked");
+}
+
+- (void)setupAdnSDKWithConfig:(id)config {
+    LogAdBlock(@"ABUAdSDKManager setupAdnSDKWithConfig blocked");
+}
+
+- (void)setupAdnSDKWithConfigSYNC:(id)config {
+    LogAdBlock(@"ABUAdSDKManager setupAdnSDKWithConfigSYNC blocked");
+}
+
+%end
+
+// 2. 配置管理器拦截 - 阻止广告配置获取
+%hook ABUConfigManager
+
+- (id)init {
+    LogAdBlock(@"ABUConfigManager init blocked");
+    return nil;
+}
+
+- (void)getConfigWithBlock:(id)block {
+    LogAdBlock(@"ABUConfigManager getConfigWithBlock blocked");
     if (block) {
-        NSError *error = [NSError errorWithDomain:@"AdBlocker" code:999 userInfo:@{NSLocalizedDescriptionKey: @"Ad config blocked"}];
         dispatch_async(dispatch_get_main_queue(), ^{
-            // Try to call block with error
-            void (^callbackBlock)(id) = block;
-            // Actually we can't easily call it, so just don't call
+            void (^configBlock)(id, NSError *) = block;
+            NSError *err = [NSError errorWithDomain:@"AdBlock" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Ad config blocked"}];
+            configBlock(nil, err);
         });
     }
 }
 
-// ============================================================================
-// MARK: - Block App's Own Ad System (ADxxx classes)
-// ============================================================================
-
-// Block ADInfoManager ad loading
-static void __attribute__((used)) BlockADInfoUpdate(id self, SEL _cmd, id key, id imgSize) {
-    ADLOG(@"BLOCKED ADInfoManager updateAdWithKey: %@", key);
+- (void)configLoadDidSuccess {
+    LogAdBlock(@"ABUConfigManager configLoadDidSuccess blocked");
 }
 
-// Block full screen ad
-static void __attribute__((used)) BlockADFullScreen(id self, SEL _cmd, id info, id complete) {
-    ADLOG(@"BLOCKED full screen ad");
-    if (complete) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            void (^completion)(BOOL) = complete;
-            completion(NO); // Tell app ad was skipped/failed
-        });
-    }
+- (void)loadConfigFromServerIfNeeded {
+    LogAdBlock(@"ABUConfigManager loadConfigFromServerIfNeeded blocked");
 }
 
-// Block ADFullScreenViewController
-static id __attribute__((used)) BlockADFullScreenInit(id self, SEL _cmd, id info, id complete) {
-    ADLOG(@"BLOCKED ADFullScreenViewController init");
-    // Return nil - ad view controller never created
+- (void)loadConfigFromServer {
+    LogAdBlock(@"ABUConfigManager loadConfigFromServer blocked");
+}
+
+- (void)loadConfigFromLocalIfNeeded {
+    LogAdBlock(@"ABUConfigManager loadConfigFromLocalIfNeeded blocked");
+}
+
+%end
+
+%hook ABUConfigManager_V2
+
+- (id)init {
+    LogAdBlock(@"ABUConfigManager_V2 init blocked");
     return nil;
 }
 
-// ============================================================================
-// MARK: - Block URL Requests (Layer 6: Network level blocking)
-// ============================================================================
-
-// Hook NSURLSession to block ad requests
-static IMP orig_dataTaskWithRequest = NULL;
-static NSURLSessionDataTask * __attribute__((used)) Hook_dataTaskWithRequest(id self, SEL _cmd, NSURLRequest *request) {
-    NSURL *url = request.URL;
-    NSString *urlStr = url.absoluteString;
-    
-    // Block known ad domains
-    NSArray *adDomains = @[
-        @"pangolin-sdk-toutiao.com",      // 穿山甲
-        @"pangolin-sdk-toutiao-b.com",
-        @"pangolin-sdk-toutiao1.com",
-        @"adkwai.com",                     // 快手
-        @"mob.com",                        // 百度Mob
-        @"baidu.com",                      // 百度广告
-        @"gdtimg.com",                     // 广点通
-        @"gdt.qq.com",
-        @"qq.com",                         // 腾讯广告
-        @"adn.xiaomi.com",                 // 小米
-        @"ad.xiaomi.com",
-        @"adsrvr.org",                     // 其他
-        @"doubleclick.net",
-        @"googleadservices.com",
-        @"googlesyndication.com",
-        @"google-analytics.com",
-        @"facebook.com/tr",                // FB追踪
-        @"crashlytics.com",                // 崩溃上报（可选）
-        @"firebase",
-        @"appsflyer",
-        @"adjust.com",
-        @"umeng.com",                      // 友盟
-        @"umengcloud.com",
-        @"sentry.io",
-    ];
-    
-    for (NSString *domain in adDomains) {
-        if ([urlStr containsString:domain]) {
-            ADLOG(@"BLOCKED URL: %@", urlStr);
-            // Return a dummy task that immediately completes with error
-            NSURLSessionDataTask *dummyTask = ((NSURLSessionDataTask * (*)(id, SEL, NSURLRequest *))orig_dataTaskWithRequest)(self, _cmd, request);
-            [dummyTask cancel];
-            return dummyTask;
-        }
+- (void)getConfigWithBlock:(id)block {
+    LogAdBlock(@"ABUConfigManager_V2 getConfigWithBlock blocked");
+    if (block) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            void (^configBlock)(id, NSError *) = block;
+            NSError *err = [NSError errorWithDomain:@"AdBlock" code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Ad config blocked"}];
+            configBlock(nil, err);
+        });
     }
-    
-    return ((NSURLSessionDataTask * (*)(id, SEL, NSURLRequest *))orig_dataTaskWithRequest)(self, _cmd, request);
 }
 
-// ============================================================================
-// MARK: - Block Specific Ad Classes (Layer 7: Class-level hooking)
-// ============================================================================
+- (void)configLoadForServerDidSuccess_V2 {
+    LogAdBlock(@"ABUConfigManager_V2 configLoadForServerDidSuccess_V2 blocked");
+}
 
-static void HookAdClass(const char *className, const char *methodName, const char *methodSig, IMP newImp, IMP *oldImp) {
+- (void)_loadConfigFromServerWithTimes:(NSInteger)times {
+    LogAdBlock(@"ABUConfigManager_V2 _loadConfigFromServerWithTimes blocked");
+}
+
+%end
+
+// 3. 广告存储管理器拦截
+%hook ABUAdStorageManager
+
+- (id)init {
+    LogAdBlock(@"ABUAdStorageManager init blocked");
+    return nil;
+}
+
+- (void)initializeConfig {
+    LogAdBlock(@"ABUAdStorageManager initializeConfig blocked");
+}
+
+- (void)updateConfig {
+    LogAdBlock(@"ABUAdStorageManager updateConfig blocked");
+}
+
+- (void)configLoadDidSuccess {
+    LogAdBlock(@"ABUAdStorageManager configLoadDidSuccess blocked");
+}
+
+- (void)configLoadForServerDidSuccess_V2 {
+    LogAdBlock(@"ABUAdStorageManager configLoadForServerDidSuccess_V2 blocked");
+}
+
+- (void)insertAd:(id)ad {
+    LogAdBlock(@"ABUAdStorageManager insertAd blocked");
+}
+
+- (void)clearAdListWithRequestID:(NSString *)requestID {
+    LogAdBlock(@"ABUAdStorageManager clearAdListWithRequestID blocked");
+}
+
+%end
+
+// 4. 广告行为管理器拦截
+%hook ABUAdActionManager
+
+- (id)init {
+    LogAdBlock(@"ABUAdActionManager init blocked");
+    return nil;
+}
+
+- (void)setup {
+    LogAdBlock(@"ABUAdActionManager setup blocked");
+}
+
+- (void)canLoadForFreqWithBlock:(id)block {
+    LogAdBlock(@"ABUAdActionManager canLoadForFreqWithBlock blocked");
+    if (block) {
+        void (^freqBlock)(BOOL) = block;
+        freqBlock(NO);
+    }
+}
+
+- (BOOL)canRequestWithType:(NSInteger)type {
+    LogAdBlock(@"ABUAdActionManager canRequestWithType:%ld blocked", (long)type);
+    return NO;
+}
+
+- (void)updateLoadRulesWithTimes:(NSInteger)times {
+    LogAdBlock(@"ABUAdActionManager updateLoadRulesWithTimes blocked");
+}
+
+- (void)updateErrorCodesListWithConfig:(id)config {
+    LogAdBlock(@"ABUAdActionManager updateErrorCodesListWithConfig blocked");
+}
+
+- (void)updateAllHistoriesWithNewConfigsRule:(id)rule {
+    LogAdBlock(@"ABUAdActionManager updateAllHistoriesWithNewConfigsRule blocked");
+}
+
+%end
+
+// 5. 广告加载器基类拦截
+%hook ABUAdLoader
+
+- (id)init {
+    LogAdBlock(@"ABUAdLoader init blocked");
+    return nil;
+}
+
+- (id)initWithMediationSlotConfig:(id)config {
+    LogAdBlock(@"ABUAdLoader initWithMediationSlotConfig blocked");
+    return nil;
+}
+
+- (void)loadAdsWithConfigs:(id)configs {
+    LogAdBlock(@"ABUAdLoader loadAdsWithConfigs blocked");
+}
+
+- (void)_notifyLoadFinishWithParam:(id)param {
+    LogAdBlock(@"ABUAdLoader _notifyLoadFinishWithParam blocked");
+}
+
+- (void)notifyMediaLoadSuccessWithLoadID:(NSString *)loadID {
+    LogAdBlock(@"ABUAdLoader notifyMediaLoadSuccessWithLoadID blocked");
+}
+
+- (void)notifyMediaLoadFailedWithLoadID:(NSString *)loadID {
+    LogAdBlock(@"ABUAdLoader notifyMediaLoadFailedWithLoadID blocked");
+}
+
+- (void)notifyMediaLoadWillBeginWithConfig:(id)config {
+    LogAdBlock(@"ABUAdLoader notifyMediaLoadWillBeginWithConfig blocked");
+}
+
+- (void)beginLoadMediaAdIfNeededWithConfig:(id)config {
+    LogAdBlock(@"ABUAdLoader beginLoadMediaAdIfNeededWithConfig blocked");
+}
+
+- (void)willLoadMediaAdUsingRules:(id)rules {
+    LogAdBlock(@"ABUAdLoader willLoadMediaAdUsingRules blocked");
+}
+
+%end
+
+// 6. 广告基类拦截
+%hook ABUBaseAd
+
+- (id)init {
+    LogAdBlock(@"ABUBaseAd init blocked");
+    return nil;
+}
+
+- (id)initWithMediationRit:(NSString *)rit {
+    LogAdBlock(@"ABUBaseAd initWithMediationRit:%@ blocked", rit);
+    return nil;
+}
+
+- (void)ex_loadAdData {
+    LogAdBlock(@"ABUBaseAd ex_loadAdData blocked");
+}
+
+- (void)loadAdData {
+    LogAdBlock(@"ABUBaseAd loadAdData blocked");
+}
+
+- (void)loadAdDataWithMediaSlotConfigIDs:(id)ids {
+    LogAdBlock(@"ABUBaseAd loadAdDataWithMediaSlotConfigIDs blocked");
+}
+
+- (void)preloadByUser {
+    LogAdBlock(@"ABUBaseAd preloadByUser blocked");
+}
+
+- (void)checkPreloadCacheExistWithWaterfall:(id)waterfall {
+    LogAdBlock(@"ABUBaseAd checkPreloadCacheExistWithWaterfall blocked");
+}
+
+%end
+
+// 7. 各类型广告加载器拦截
+%hook ABUBannerAdLoader
+- (void)loadMediaAdWithAdapter:(id)adapter { LogAdBlock(@"ABUBannerAdLoader loadMediaAdWithAdapter blocked"); }
+- (void)willLoadMediaAdUsingRules:(id)rules { LogAdBlock(@"ABUBannerAdLoader willLoadMediaAdUsingRules blocked"); }
+%end
+
+%hook ABUSplashAdLoader
+- (void)loadMediaAdWithAdapter:(id)adapter { LogAdBlock(@"ABUSplashAdLoader loadMediaAdWithAdapter blocked"); }
+- (void)willLoadMediaAdUsingRules:(id)rules { LogAdBlock(@"ABUSplashAdLoader willLoadMediaAdUsingRules blocked"); }
+%end
+
+%hook ABURewardedVideoAdLoader
+- (void)loadMediaAdWithAdapter:(id)adapter { LogAdBlock(@"ABURewardedVideoAdLoader loadMediaAdWithAdapter blocked"); }
+- (void)willLoadMediaAdUsingRules:(id)rules { LogAdBlock(@"ABURewardedVideoAdLoader willLoadMediaAdUsingRules blocked"); }
+%end
+
+%hook ABUFullscreenVideoAdLoader
+- (void)loadMediaAdWithAdapter:(id)adapter { LogAdBlock(@"ABUFullscreenVideoAdLoader loadMediaAdWithAdapter blocked"); }
+- (void)willLoadMediaAdUsingRules:(id)rules { LogAdBlock(@"ABUFullscreenVideoAdLoader willLoadMediaAdUsingRules blocked"); }
+%end
+
+%hook ABUInterstitialAdLoader
+- (void)loadMediaAdWithAdapter:(id)adapter { LogAdBlock(@"ABUInterstitialAdLoader loadMediaAdWithAdapter blocked"); }
+- (void)willLoadMediaAdUsingRules:(id)rules { LogAdBlock(@"ABUInterstitialAdLoader willLoadMediaAdUsingRules blocked"); }
+%end
+
+%hook ABUInterstitialProAdLoader
+- (void)loadMediaAdWithAdapter:(id)adapter { LogAdBlock(@"ABUInterstitialProAdLoader loadMediaAdWithAdapter blocked"); }
+- (void)willLoadMediaAdUsingRules:(id)rules { LogAdBlock(@"ABUInterstitialProAdLoader willLoadMediaAdUsingRules blocked"); }
+%end
+
+%hook ABUNativeAdLoader
+- (void)loadMediaAdWithAdapter:(id)adapter { LogAdBlock(@"ABUNativeAdLoader loadMediaAdWithAdapter blocked"); }
+- (void)willLoadMediaAdUsingRules:(id)rules { LogAdBlock(@"ABUNativeAdLoader willLoadMediaAdUsingRules blocked"); }
+%end
+
+%hook ABUDrawAdLoader
+- (void)loadMediaAdWithAdapter:(id)adapter { LogAdBlock(@"ABUDrawAdLoader loadMediaAdWithAdapter blocked"); }
+- (void)willLoadMediaAdUsingRules:(id)rules { LogAdBlock(@"ABUDrawAdLoader willLoadMediaAdUsingRules blocked"); }
+%end
+
+// 8. 各类型广告展示类拦截
+%hook ABUBannerAd
+- (id)initWithAdUnitID:(NSString *)adUnitID { LogAdBlock(@"ABUBannerAd initWithAdUnitID:%@ blocked", adUnitID); return nil; }
+- (void)loadAdData { LogAdBlock(@"ABUBannerAd loadAdData blocked"); }
+- (void)adLoadDidSuccess { LogAdBlock(@"ABUBannerAd adLoadDidSuccess blocked"); }
+- (void)adLoadDidFailedWithError:(id)error { LogAdBlock(@"ABUBannerAd adLoadDidFailedWithError blocked"); }
+- (void)preloadAdWithType:(NSInteger)type { LogAdBlock(@"ABUBannerAd preloadAdWithType blocked"); }
+%end
+
+%hook ABUSplashAd
+- (id)initWithAdUnitID:(NSString *)adUnitID { LogAdBlock(@"ABUSplashAd initWithAdUnitID:%@ blocked", adUnitID); return nil; }
+- (void)showInWindowWithBlock:(id)block { LogAdBlock(@"ABUSplashAd showInWindowWithBlock blocked"); }
+- (void)showInWindow:(UIWindow *)window { LogAdBlock(@"ABUSplashAd showInWindow blocked"); }
+- (void)loadAdData { LogAdBlock(@"ABUSplashAd loadAdData blocked"); }
+- (void)adLoadDidSuccess { LogAdBlock(@"ABUSplashAd adLoadDidSuccess blocked"); }
+- (void)adLoadDidFailedWithError:(id)error { LogAdBlock(@"ABUSplashAd adLoadDidFailedWithError blocked"); }
+- (void)preloadAdWithType:(NSInteger)type { LogAdBlock(@"ABUSplashAd preloadAdWithType blocked"); }
+%end
+
+%hook ABURewardedVideoAd
+- (id)initWithAdUnitID:(NSString *)adUnitID { LogAdBlock(@"ABURewardedVideoAd initWithAdUnitID:%@ blocked", adUnitID); return nil; }
+- (void)showAdFromRootViewController:(UIViewController *)rootViewController { LogAdBlock(@"ABURewardedVideoAd showAdFromRootViewController blocked"); }
+- (void)loadAdData { LogAdBlock(@"ABURewardedVideoAd loadAdData blocked"); }
+- (void)adLoadDidSuccess { LogAdBlock(@"ABURewardedVideoAd adLoadDidSuccess blocked"); }
+- (void)adLoadDidFailedWithError:(id)error { LogAdBlock(@"ABURewardedVideoAd adLoadDidFailedWithError blocked"); }
+- (void)preloadAdWithType:(NSInteger)type { LogAdBlock(@"ABURewardedVideoAd preloadAdWithType blocked"); }
+%end
+
+%hook ABUFullscreenVideoAd
+- (id)initWithAdUnitID:(NSString *)adUnitID { LogAdBlock(@"ABUFullscreenVideoAd initWithAdUnitID:%@ blocked", adUnitID); return nil; }
+- (void)showAdFromRootViewController:(UIViewController *)rootViewController { LogAdBlock(@"ABUFullscreenVideoAd showAdFromRootViewController blocked"); }
+- (void)loadAdData { LogAdBlock(@"ABUFullscreenVideoAd loadAdData blocked"); }
+- (void)adLoadDidSuccess { LogAdBlock(@"ABUFullscreenVideoAd adLoadDidSuccess blocked"); }
+- (void)adLoadDidFailedWithError:(id)error { LogAdBlock(@"ABUFullscreenVideoAd adLoadDidFailedWithError blocked"); }
+- (void)preloadAdWithType:(NSInteger)type { LogAdBlock(@"ABUFullscreenVideoAd preloadAdWithType blocked"); }
+%end
+
+%hook ABUInterstitialAd
+- (id)initWithAdUnitID:(NSString *)adUnitID { LogAdBlock(@"ABUInterstitialAd initWithAdUnitID:%@ blocked", adUnitID); return nil; }
+- (void)showAdFromRootViewController:(UIViewController *)rootViewController { LogAdBlock(@"ABUInterstitialAd showAdFromRootViewController blocked"); }
+- (void)loadAdData { LogAdBlock(@"ABUInterstitialAd loadAdData blocked"); }
+- (void)adLoadDidSuccess { LogAdBlock(@"ABUInterstitialAd adLoadDidSuccess blocked"); }
+- (void)adLoadDidFailedWithError:(id)error { LogAdBlock(@"ABUInterstitialAd adLoadDidFailedWithError blocked"); }
+- (void)preloadAdWithType:(NSInteger)type { LogAdBlock(@"ABUInterstitialAd preloadAdWithType blocked"); }
+%end
+
+%hook ABUInterstitialProAd
+- (id)initWithAdUnitID:(NSString *)adUnitID { LogAdBlock(@"ABUInterstitialProAd initWithAdUnitID:%@ blocked", adUnitID); return nil; }
+- (void)showAdFromRootViewController:(UIViewController *)rootViewController { LogAdBlock(@"ABUInterstitialProAd showAdFromRootViewController blocked"); }
+- (void)loadAdData { LogAdBlock(@"ABUInterstitialProAd loadAdData blocked"); }
+- (void)adLoadDidSuccess { LogAdBlock(@"ABUInterstitialProAd adLoadDidSuccess blocked"); }
+- (void)adLoadDidFailedWithError:(id)error { LogAdBlock(@"ABUInterstitialProAd adLoadDidFailedWithError blocked"); }
+%end
+
+%hook ABUNativeAdsManager
+- (id)initWithAdUnitID:(NSString *)adUnitID { LogAdBlock(@"ABUNativeAdsManager initWithAdUnitID:%@ blocked", adUnitID); return nil; }
+- (id)initWithSlot:(id)slot { LogAdBlock(@"ABUNativeAdsManager initWithSlot blocked"); return nil; }
+- (void)loadAdData { LogAdBlock(@"ABUNativeAdsManager loadAdData blocked"); }
+- (void)loadAdDataWithCount:(NSInteger)count { LogAdBlock(@"ABUNativeAdsManager loadAdDataWithCount blocked"); }
+- (void)adLoadDidSuccess { LogAdBlock(@"ABUNativeAdsManager adLoadDidSuccess blocked"); }
+- (void)adLoadDidFailedWithError:(id)error { LogAdBlock(@"ABUNativeAdsManager adLoadDidFailedWithError blocked"); }
+- (void)preloadAdWithType:(NSInteger)type { LogAdBlock(@"ABUNativeAdsManager preloadAdWithType blocked"); }
+%end
+
+%hook ABUNativeAdView
+- (id)initWithSlot:(id)slot { LogAdBlock(@"ABUNativeAdView initWithSlot blocked"); return nil; }
+- (id)initWithAdPackage:(id)package { LogAdBlock(@"ABUNativeAdView initWithAdPackage blocked"); return nil; }
+- (id)initWithExpressView:(id)view { LogAdBlock(@"ABUNativeAdView initWithExpressView blocked"); return nil; }
+- (void)loadAdData { LogAdBlock(@"ABUNativeAdView loadAdData blocked"); }
+- (void)adViewDidShow { LogAdBlock(@"ABUNativeAdView adViewDidShow blocked"); }
+%end
+
+%hook ABUDrawAdsManager
+- (id)initWithAdUnitID:(NSString *)adUnitID { LogAdBlock(@"ABUDrawAdsManager initWithAdUnitID:%@ blocked", adUnitID); return nil; }
+- (void)loadAdData { LogAdBlock(@"ABUDrawAdsManager loadAdData blocked"); }
+- (void)loadAdDataWithCount:(NSInteger)count { LogAdBlock(@"ABUDrawAdsManager loadAdDataWithCount blocked"); }
+- (void)adLoadDidSuccess { LogAdBlock(@"ABUDrawAdsManager adLoadDidSuccess blocked"); }
+- (void)adLoadDidFailedWithError:(id)error { LogAdBlock(@"ABUDrawAdsManager adLoadDidFailedWithError blocked"); }
+- (void)preloadAdWithType:(NSInteger)type { LogAdBlock(@"ABUDrawAdsManager preloadAdWithType blocked"); }
+%end
+
+%hook ABUDrawAdView
+- (id)initWithSlot:(id)slot { LogAdBlock(@"ABUDrawAdView initWithSlot blocked"); return nil; }
+- (id)initWithAdPackage:(id)package { LogAdBlock(@"ABUDrawAdView initWithAdPackage blocked"); return nil; }
+- (id)initWithExpressView:(id)view { LogAdBlock(@"ABUDrawAdView initWithExpressView blocked"); return nil; }
+- (void)loadAdData { LogAdBlock(@"ABUDrawAdView loadAdData blocked"); }
+- (void)adViewDidShow { LogAdBlock(@"ABUDrawAdView adViewDidShow blocked"); }
+%end
+
+// 9. 瀑布流/竞价拦截
+%hook ABUMediationWaterfallIMP
+- (id)init { LogAdBlock(@"ABUMediationWaterfallIMP init blocked"); return nil; }
+- (id)initWithConfig:(id)config { LogAdBlock(@"ABUMediationWaterfallIMP initWithConfig blocked"); return nil; }
+- (BOOL)canMediationRequestForFreq { LogAdBlock(@"ABUMediationWaterfallIMP canMediationRequestForFreq blocked"); return NO; }
+- (BOOL)canMediationRequestForAppFreq { LogAdBlock(@"ABUMediationWaterfallIMP canMediationRequestForAppFreq blocked"); return NO; }
+- (BOOL)canMediationRequestForPeriod { LogAdBlock(@"ABUMediationWaterfallIMP canMediationRequestForPeriod blocked"); return NO; }
+- (BOOL)canMediaRequestForFreqWithConfig:(id)config { LogAdBlock(@"ABUMediationWaterfallIMP canMediaRequestForFreqWithConfig blocked"); return NO; }
+- (BOOL)canMediaRequestForPeriodWithConfig:(id)config { LogAdBlock(@"ABUMediationWaterfallIMP canMediaRequestForPeriodWithConfig blocked"); return NO; }
+- (BOOL)canMediaRequestForErrorCodeControlWithConfig:(id)config { LogAdBlock(@"ABUMediationWaterfallIMP canMediaRequestForErrorCodeControlWithConfig blocked"); return NO; }
+- (void)reportMediaRequestForErrorCodeControlWithConfig:(id)config { LogAdBlock(@"ABUMediationWaterfallIMP reportMediaRequestForErrorCodeControlWithConfig blocked"); }
+%end
+
+%hook ABUMediationWaterfallFactory
+- (id)init { LogAdBlock(@"ABUMediationWaterfallFactory init blocked"); return nil; }
+%end
+
+%hook ABUMediationWaterfallExtra
+- (void)startLoadWithAd:(id)ad { LogAdBlock(@"ABUMediationWaterfallExtra startLoadWithAd blocked"); }
+- (void)waterfallDidLoadSuccess { LogAdBlock(@"ABUMediationWaterfallExtra waterfallDidLoadSuccess blocked"); }
+%end
+
+// 10. 预加载管理器拦截
+%hook ABUPreloadManager
+- (id)init { LogAdBlock(@"ABUPreloadManager init blocked"); return nil; }
+- (void)preloadAdFromAd:(id)ad { LogAdBlock(@"ABUPreloadManager preloadAdFromAd blocked"); }
+- (void)preloadAdsWithInfos:(id)infos { LogAdBlock(@"ABUPreloadManager preloadAdsWithInfos blocked"); }
+- (void)checkPreloadExistWithAd:(id)ad { LogAdBlock(@"ABUPreloadManager checkPreloadExistWithAd blocked"); }
+%end
+
+// 11. 轮播广告拦截
+%hook ABUCarouselBannerAd
+- (id)initWithAdUnitID:(NSString *)adUnitID { LogAdBlock(@"ABUCarouselBannerAd initWithAdUnitID:%@ blocked", adUnitID); return nil; }
+- (void)bannerAdDidLoad { LogAdBlock(@"ABUCarouselBannerAd bannerAdDidLoad blocked"); }
+- (void)bannerCarouselViewDidShowBannerAd { LogAdBlock(@"ABUCarouselBannerAd bannerCarouselViewDidShowBannerAd blocked"); }
+%end
+
+%hook ABUInterstitialProCarouselManager
+- (id)initWithAd:(id)ad { LogAdBlock(@"ABUInterstitialProCarouselManager initWithAd blocked"); return nil; }
+- (void)showAdFromRootViewController:(UIViewController *)vc { LogAdBlock(@"ABUInterstitialProCarouselManager showAdFromRootViewController blocked"); }
+%end
+
+// 12. 个性化配置适配器拦截
+%hook ABUPersonaliseConfigAdapter
+- (id)init { LogAdBlock(@"ABUPersonaliseConfigAdapter init blocked"); return nil; }
+%end
+
+%hook ABUPanglePersonaliseConfigAdapter
+- (id)init { LogAdBlock(@"ABUPanglePersonaliseConfigAdapter init blocked"); return nil; }
+%end
+
+%hook ABUBaiduPersonaliseConfigAdapter
+- (id)init { LogAdBlock(@"ABUBaiduPersonaliseConfigAdapter init blocked"); return nil; }
+%end
+
+%hook ABUGdtPersonaliseConfigAdapter
+- (id)init { LogAdBlock(@"ABUGdtPersonaliseConfigAdapter init blocked"); return nil; }
+%end
+
+%hook ABUCsjPersonaliseConfigAdapter
+- (id)init { LogAdBlock(@"ABUCsjPersonaliseConfigAdapter init blocked"); return nil; }
+%end
+
+%hook ABUKsPersonaliseConfigAdapter
+- (id)init { LogAdBlock(@"ABUKsPersonaliseConfigAdapter init blocked"); return nil; }
+%end
+
+%hook ABUKlevinPersonaliseConfigAdapter
+- (id)init { LogAdBlock(@"ABUKlevinPersonaliseConfigAdapter init blocked"); return nil; }
+%end
+
+%hook ABUMintegralPersonaliseConfigAdapter
+- (id)init { LogAdBlock(@"ABUMintegralPersonaliseConfigAdapter init blocked"); return nil; }
+%end
+
+%hook ABUAdmobPersonaliseConfigAdapter
+- (id)init { LogAdBlock(@"ABUAdmobPersonaliseConfigAdapter init blocked"); return nil; }
+%end
+
+// 13. 服务器竞价拦截
+%hook ABUCustomServerBiddingManager
+- (id)init { LogAdBlock(@"ABUCustomServerBiddingManager init blocked"); return nil; }
+%end
+
+%hook ABUDefaultServerBiddingManager
+- (id)init { LogAdBlock(@"ABUDefaultServerBiddingManager init blocked"); return nil; }
+%end
+
+// 14. 策略管理器拦截
+%hook ABUMediaSlotConfig
+- (id)init { LogAdBlock(@"ABUMediaSlotConfig init blocked"); return nil; }
+- (id)initWithSplashMediaRit:(id)rit { LogAdBlock(@"ABUMediaSlotConfig initWithSplashMediaRit blocked"); return nil; }
+- (id)initWithDictionary:(id)dict { LogAdBlock(@"ABUMediaSlotConfig initWithDictionary blocked"); return nil; }
+- (id)mediaSlotConfigWithMediationSlotID:(NSString *)slotID { LogAdBlock(@"ABUMediaSlotConfig mediaSlotConfigWithMediationSlotID blocked"); return nil; }
+%end
+
+%hook ABUMediationSlotConfig
+- (id)init { LogAdBlock(@"ABUMediationSlotConfig init blocked"); return nil; }
+- (id)initWithSplashMediationRit:(id)rit { LogAdBlock(@"ABUMediationSlotConfig initWithSplashMediationRit blocked"); return nil; }
+- (id)initWithDictionary:(id)dict { LogAdBlock(@"ABUMediationSlotConfig initWithDictionary blocked"); return nil; }
+- (id)mediationSlotConfig { LogAdBlock(@"ABUMediationSlotConfig mediationSlotConfig blocked"); return nil; }
+%end
+
+%hook ABUMediaSlotConfigGroup
+- (id)initWithMediationSlotConfig:(id)config { LogAdBlock(@"ABUMediaSlotConfigGroup initWithMediationSlotConfig blocked"); return nil; }
+%end
+
+// ============================================================
+// MARK: - CSJ (穿山甲/Pangle) 原生SDK 拦截
+// ============================================================
+
+%hook CSJSplashAd
+- (id)initWithSlotID:(NSString *)slotID { LogAdBlock(@"CSJSplashAd initWithSlotID:%@ blocked", slotID); return nil; }
+- (id)initWithSlot:(id)slot { LogAdBlock(@"CSJSplashAd initWithSlot blocked"); return nil; }
+- (void)loadAdData { LogAdBlock(@"CSJSplashAd loadAdData blocked"); }
+- (void)showSplashViewInRootViewController:(UIViewController *)vc { LogAdBlock(@"CSJSplashAd showSplashViewInRootViewController blocked"); }
+- (void)showCardViewInRootViewController:(UIViewController *)vc { LogAdBlock(@"CSJSplashAd showCardViewInRootViewController blocked"); }
+- (void)showZoomOutViewInRootViewController:(UIViewController *)vc { LogAdBlock(@"CSJSplashAd showZoomOutViewInRootViewController blocked"); }
+%end
+
+%hook CSJNativeExpressAdManager
+- (id)initWithSlot:(id)slot { LogAdBlock(@"CSJNativeExpressAdManager initWithSlot blocked"); return nil; }
+- (void)loadAdDataWithCount:(NSInteger)count { LogAdBlock(@"CSJNativeExpressAdManager loadAdDataWithCount blocked"); }
+- (void)loadAdData { LogAdBlock(@"CSJNativeExpressAdManager loadAdData blocked"); }
+- (void)nativeAdsManagerSuccessToLoad:(id)ads { LogAdBlock(@"CSJNativeExpressAdManager nativeAdsManagerSuccessToLoad blocked"); }
+%end
+
+%hook CSJNativeExpressRewardedVideoAd
+- (id)initWithSlotID:(NSString *)slotID { LogAdBlock(@"CSJNativeExpressRewardedVideoAd initWithSlotID:%@ blocked", slotID); return nil; }
+- (id)initWithSlot:(id)slot { LogAdBlock(@"CSJNativeExpressRewardedVideoAd initWithSlot blocked"); return nil; }
+- (void)loadAdData { LogAdBlock(@"CSJNativeExpressRewardedVideoAd loadAdData blocked"); }
+- (void)showAdFromRootViewController:(UIViewController *)vc { LogAdBlock(@"CSJNativeExpressRewardedVideoAd showAdFromRootViewController blocked"); }
+%end
+
+%hook CSJNativeExpressFullscreenVideoAd
+- (id)initWithSlotID:(NSString *)slotID { LogAdBlock(@"CSJNativeExpressFullscreenVideoAd initWithSlotID:%@ blocked", slotID); return nil; }
+- (id)initWithSlot:(id)slot { LogAdBlock(@"CSJNativeExpressFullscreenVideoAd initWithSlot blocked"); return nil; }
+- (void)loadAdData { LogAdBlock(@"CSJNativeExpressFullscreenVideoAd loadAdData blocked"); }
+- (void)showAdFromRootViewController:(UIViewController *)vc { LogAdBlock(@"CSJNativeExpressFullscreenVideoAd showAdFromRootViewController blocked"); }
+%end
+
+%hook CSJNativeExpressAdView
+- (void)play { LogAdBlock(@"CSJNativeExpressAdView play blocked"); }
+- (void)replay { LogAdBlock(@"CSJNativeExpressAdView replay blocked"); }
+- (void)startPlayVideo { LogAdBlock(@"CSJNativeExpressAdView startPlayVideo blocked"); }
+%end
+
+%hook CSJMaterialMeta
+- (id)initWithDictionary:(id)dict { LogAdBlock(@"CSJMaterialMeta initWithDictionary blocked"); return nil; }
+- (id)init { LogAdBlock(@"CSJMaterialMeta init blocked"); return nil; }
+%end
+
+// ============================================================
+// MARK: - BaiduMobAd (百度广告) SDK 拦截
+// ============================================================
+
+%hook BaiduMobAdExpressFullScreenVideo
+- (id)init { LogAdBlock(@"BaiduMobAdExpressFullScreenVideo init blocked"); return nil; }
+- (void)load { LogAdBlock(@"BaiduMobAdExpressFullScreenVideo load blocked"); }
+- (void)loadBiddingAd { LogAdBlock(@"BaiduMobAdExpressFullScreenVideo loadBiddingAd blocked"); }
+- (void)show { LogAdBlock(@"BaiduMobAdExpressFullScreenVideo show blocked"); }
+- (void)showFromViewController:(UIViewController *)vc { LogAdBlock(@"BaiduMobAdExpressFullScreenVideo showFromViewController blocked"); }
+%end
+
+%hook BaiduMobAdExpressInterstitial
+- (id)init { LogAdBlock(@"BaiduMobAdExpressInterstitial init blocked"); return nil; }
+- (void)load { LogAdBlock(@"BaiduMobAdExpressInterstitial load blocked"); }
+- (void)loadBiddingAd { LogAdBlock(@"BaiduMobAdExpressInterstitial loadBiddingAd blocked"); }
+- (void)show { LogAdBlock(@"BaiduMobAdExpressInterstitial show blocked"); }
+- (void)showFromViewController:(UIViewController *)vc { LogAdBlock(@"BaiduMobAdExpressInterstitial showFromViewController blocked"); }
+%end
+
+%hook BaiduMobAdExpressNativeView
+- (id)initWithAdObject:(id)adObject { LogAdBlock(@"BaiduMobAdExpressNativeView initWithAdObject blocked"); return nil; }
+- (void)render { LogAdBlock(@"BaiduMobAdExpressNativeView render blocked"); }
+- (void)bubbleShow { LogAdBlock(@"BaiduMobAdExpressNativeView bubbleShow blocked"); }
+- (void)showSlideGestureView { LogAdBlock(@"BaiduMobAdExpressNativeView showSlideGestureView blocked"); }
+- (void)nativeAdExpressSuccessRender { LogAdBlock(@"BaiduMobAdExpressNativeView nativeAdExpressSuccessRender blocked"); }
+%end
+
+%hook BaiduMobAdRenderer
+- (id)initWithAdRendererHelper:(id)helper { LogAdBlock(@"BaiduMobAdRenderer initWithAdRendererHelper blocked"); return nil; }
+- (void)load { LogAdBlock(@"BaiduMobAdRenderer load blocked"); }
+- (void)start { LogAdBlock(@"BaiduMobAdRenderer start blocked"); }
+- (void)pause { LogAdBlock(@"BaiduMobAdRenderer pause blocked"); }
+%end
+
+%hook BaiduMobAdVideoRenderer
+- (id)initWithAdRendererHelper:(id)helper { LogAdBlock(@"BaiduMobAdVideoRenderer initWithAdRendererHelper blocked"); return nil; }
+- (void)load { LogAdBlock(@"BaiduMobAdVideoRenderer load blocked"); }
+- (void)start { LogAdBlock(@"BaiduMobAdVideoRenderer start blocked"); }
+%end
+
+%hook BaiduMobAdHTMLRenderer
+- (id)initWithAdRendererHelper:(id)helper { LogAdBlock(@"BaiduMobAdHTMLRenderer initWithAdRendererHelper blocked"); return nil; }
+- (void)load { LogAdBlock(@"BaiduMobAdHTMLRenderer load blocked"); }
+- (void)start { LogAdBlock(@"BaiduMobAdHTMLRenderer start blocked"); }
+- (void)reload { LogAdBlock(@"BaiduMobAdHTMLRenderer reload blocked"); }
+%end
+
+%hook BaiduMobAdH5Renderer
+- (void)load { LogAdBlock(@"BaiduMobAdH5Renderer load blocked"); }
+- (void)playUrl { LogAdBlock(@"BaiduMobAdH5Renderer playUrl blocked"); }
+%end
+
+%hook BaiduMobAdImageRenderer
+- (void)load { LogAdBlock(@"BaiduMobAdImageRenderer load blocked"); }
+- (void)showPureImage { LogAdBlock(@"BaiduMobAdImageRenderer showPureImage blocked"); }
+- (void)showResource { LogAdBlock(@"BaiduMobAdImageRenderer showResource blocked"); }
+- (void)showImage { LogAdBlock(@"BaiduMobAdImageRenderer showImage blocked"); }
+%end
+
+%hook BaiduMobAdGifImageRenderer
+- (void)showResource { LogAdBlock(@"BaiduMobAdGifImageRenderer showResource blocked"); }
+- (void)showGifImage { LogAdBlock(@"BaiduMobAdGifImageRenderer showGifImage blocked"); }
+%end
+
+%hook BaiduMobAdNativeVideoView
+- (id)initWithFrame:(CGRect)frame { LogAdBlock(@"BaiduMobAdNativeVideoView initWithFrame blocked"); return nil; }
+- (id)initVideoWithFrame:(CGRect)frame { LogAdBlock(@"BaiduMobAdNativeVideoView initVideoWithFrame blocked"); return nil; }
+- (void)setAudioSessionCategory { LogAdBlock(@"BaiduMobAdNativeVideoView setAudioSessionCategory blocked"); }
+%end
+
+%hook BaiduMobAdNativeCPUVideoView
+- (id)initWithFrame:(CGRect)frame { LogAdBlock(@"BaiduMobAdNativeCPUVideoView initWithFrame blocked"); return nil; }
+%end
+
+%hook BaiduMobAdExpressIntViewController
+- (id)initWithAdRender:(id)render { LogAdBlock(@"BaiduMobAdExpressIntViewController initWithAdRender blocked"); return nil; }
+- (void)viewDidLoad { LogAdBlock(@"BaiduMobAdExpressIntViewController viewDidLoad blocked"); }
+- (void)viewWillAppear:(BOOL)animated { LogAdBlock(@"BaiduMobAdExpressIntViewController viewWillAppear blocked"); }
+%end
+
+%hook BaiduMobAdRewardVideoRenderer
+- (id)initWithAdRendererHelper:(id)helper { LogAdBlock(@"BaiduMobAdRewardVideoRenderer initWithAdRendererHelper blocked"); return nil; }
+- (void)layoutDisplayArea { LogAdBlock(@"BaiduMobAdRewardVideoRenderer layoutDisplayArea blocked"); }
+- (void)handleCloud { LogAdBlock(@"BaiduMobAdRewardVideoRenderer handleCloud blocked"); }
+%end
+
+%hook BaiduMobAdSmartFeedView
+- (id)initWithFrame:(CGRect)frame { LogAdBlock(@"BaiduMobAdSmartFeedView initWithFrame blocked"); return nil; }
+%end
+
+%hook BaiduMobAdMraidBridge
+- (id)init { LogAdBlock(@"BaiduMobAdMraidBridge init blocked"); return nil; }
+%end
+
+%hook BaiduMobAdInstance
+- (id)initWithDictonary:(id)dict { LogAdBlock(@"BaiduMobAdInstance initWithDictonary blocked"); return nil; }
+- (id)initCpuInstanceWithDictonary:(id)dict { LogAdBlock(@"BaiduMobAdInstance initCpuInstanceWithDictonary blocked"); return nil; }
+%end
+
+%hook BaiduMobAdComponentModel
+- (id)initWithOriginJson:(id)json { LogAdBlock(@"BaiduMobAdComponentModel initWithOriginJson blocked"); return nil; }
+- (void)setModelWithDictionary:(id)dict { LogAdBlock(@"BaiduMobAdComponentModel setModelWithDictionary blocked"); }
+%end
+
+// ============================================================
+// MARK: - GDT (广点通/Tencent Ads) SDK 拦截
+// ============================================================
+
+%hook GDTSplashAd
+- (id)initWithPlacementId:(NSString *)placementId { LogAdBlock(@"GDTSplashAd initWithPlacementId:%@ blocked", placementId); return nil; }
+- (void)loadAdAndShowInWindow:(UIWindow *)window { LogAdBlock(@"GDTSplashAd loadAdAndShowInWindow blocked"); }
+- (void)loadAdAndShowFullScreenInWindow:(UIWindow *)window { LogAdBlock(@"GDTSplashAd loadAdAndShowFullScreenInWindow blocked"); }
+%end
+
+%hook GDTSplashAdImp
+- (id)initWithPlacementId:(NSString *)placementId { LogAdBlock(@"GDTSplashAdImp initWithPlacementId:%@ blocked", placementId); return nil; }
+- (void)loadAd { LogAdBlock(@"GDTSplashAdImp loadAd blocked"); }
+- (void)showAdInWindow:(UIWindow *)window { LogAdBlock(@"GDTSplashAdImp showAdInWindow blocked"); }
+- (void)loadAdAndShowInWindow:(UIWindow *)window { LogAdBlock(@"GDTSplashAdImp loadAdAndShowInWindow blocked"); }
+- (void)preload { LogAdBlock(@"GDTSplashAdImp preload blocked"); }
+%end
+
+%hook GDTRewardVideoAd
+- (id)initWithPlacementId:(NSString *)placementId { LogAdBlock(@"GDTRewardVideoAd initWithPlacementId:%@ blocked", placementId); return nil; }
+- (void)loadAd { LogAdBlock(@"GDTRewardVideoAd loadAd blocked"); }
+- (void)showAdFromRootViewController:(UIViewController *)vc { LogAdBlock(@"GDTRewardVideoAd showAdFromRootViewController blocked"); }
+%end
+
+%hook GDTUnifiedInterstitialAd
+- (id)initWithPlacementId:(NSString *)placementId { LogAdBlock(@"GDTUnifiedInterstitialAd initWithPlacementId:%@ blocked", placementId); return nil; }
+- (void)loadAd { LogAdBlock(@"GDTUnifiedInterstitialAd loadAd blocked"); }
+- (void)loadFullScreenAd { LogAdBlock(@"GDTUnifiedInterstitialAd loadFullScreenAd blocked"); }
+%end
+
+%hook GDTUnifiedInterstitialAdImp
+- (id)initWithPlacementId:(NSString *)placementId { LogAdBlock(@"GDTUnifiedInterstitialAdImp initWithPlacementId:%@ blocked", placementId); return nil; }
+- (void)loadAd { LogAdBlock(@"GDTUnifiedInterstitialAdImp loadAd blocked"); }
+%end
+
+%hook GDTNativeExpressAd
+- (id)initWithPlacementId:(NSString *)placementId { LogAdBlock(@"GDTNativeExpressAd initWithPlacementId:%@ blocked", placementId); return nil; }
+- (void)loadAd { LogAdBlock(@"GDTNativeExpressAd loadAd blocked"); }
+%end
+
+%hook GDTNativeExpressAdImp
+- (id)initWithPlacementId:(NSString *)placementId { LogAdBlock(@"GDTNativeExpressAdImp initWithPlacementId:%@ blocked", placementId); return nil; }
+- (void)loadAd { LogAdBlock(@"GDTNativeExpressAdImp loadAd blocked"); }
+- (void)loadAdWithAdCount:(NSInteger)count { LogAdBlock(@"GDTNativeExpressAdImp loadAdWithAdCount blocked"); }
+%end
+
+%hook GDTNativeExpressAdView
+- (void)render { LogAdBlock(@"GDTNativeExpressAdView render blocked"); }
+%end
+
+%hook GDTNativeExpressAdViewImp
+- (void)render { LogAdBlock(@"GDTNativeExpressAdViewImp render blocked"); }
+- (void)play { LogAdBlock(@"GDTNativeExpressAdViewImp play blocked"); }
+%end
+
+%hook GDTUnifiedNativeAd
+- (id)initWithPlacementId:(NSString *)placementId { LogAdBlock(@"GDTUnifiedNativeAd initWithPlacementId:%@ blocked", placementId); return nil; }
+- (void)loadAd { LogAdBlock(@"GDTUnifiedNativeAd loadAd blocked"); }
+- (void)loadAdWithAdCount:(NSInteger)count { LogAdBlock(@"GDTUnifiedNativeAd loadAdWithAdCount blocked"); }
+%end
+
+%hook GDTADConfiguration
+- (id)init { LogAdBlock(@"GDTADConfiguration init blocked"); return nil; }
+%end
+
+// ============================================================
+// MARK: - Wind/Sigmob SDK 拦截
+// ============================================================
+
+%hook WindMillRewardVideoAdManager
+- (id)init { LogAdBlock(@"WindMillRewardVideoAdManager init blocked"); return nil; }
+- (void)loadAdData { LogAdBlock(@"WindMillRewardVideoAdManager loadAdData blocked"); }
+- (void)showAdFromRootViewController:(UIViewController *)vc { LogAdBlock(@"WindMillRewardVideoAdManager showAdFromRootViewController blocked"); }
+%end
+
+%hook WindMillInterstitialAdManager
+- (id)initWithRequest:(id)request { LogAdBlock(@"WindMillInterstitialAdManager initWithRequest blocked"); return nil; }
+- (void)loadAdData { LogAdBlock(@"WindMillInterstitialAdManager loadAdData blocked"); }
+- (void)showAdFromRootViewController:(UIViewController *)vc { LogAdBlock(@"WindMillInterstitialAdManager showAdFromRootViewController blocked"); }
+%end
+
+%hook WindMillBannerAdManager
+- (id)initWithRequest:(id)request { LogAdBlock(@"WindMillBannerAdManager initWithRequest blocked"); return nil; }
+- (void)loadAdData { LogAdBlock(@"WindMillBannerAdManager loadAdData blocked"); }
+- (void)showAdFromRootViewController:(UIViewController *)vc { LogAdBlock(@"WindMillBannerAdManager showAdFromRootViewController blocked"); }
+%end
+
+%hook WindMillNativeAdsManager
+- (id)initWithRequest:(id)request { LogAdBlock(@"WindMillNativeAdsManager initWithRequest blocked"); return nil; }
+- (void)_loadAdData { LogAdBlock(@"WindMillNativeAdsManager _loadAdData blocked"); }
+- (void)loadAdDataWithCount:(NSInteger)count { LogAdBlock(@"WindMillNativeAdsManager loadAdDataWithCount blocked"); }
+%end
+
+%hook WindMillNativeAd
+- (id)initWithMediatedNativeAd:(id)ad { LogAdBlock(@"WindMillNativeAd initWithMediatedNativeAd blocked"); return nil; }
+%end
+
+%hook WindMillNativeAdView
+- (id)initWithFrame:(CGRect)frame { LogAdBlock(@"WindMillNativeAdView initWithFrame blocked"); return nil; }
+- (void)play { LogAdBlock(@"WindMillNativeAdView play blocked"); }
+%end
+
+%hook WindMillBannerView
+- (id)initWithRequest:(id)request { LogAdBlock(@"WindMillBannerView initWithRequest blocked"); return nil; }
+- (void)loadAdData { LogAdBlock(@"WindMillBannerView loadAdData blocked"); }
+%end
+
+%hook WindMillNativeInterstitialViewController
+- (id)init { LogAdBlock(@"WindMillNativeInterstitialViewController init blocked"); return nil; }
+- (void)viewDidLoad { LogAdBlock(@"WindMillNativeInterstitialViewController viewDidLoad blocked"); }
+%end
+
+%hook WindPlayerController
+- (void)playTheIndexPath:(NSIndexPath *)indexPath { LogAdBlock(@"WindPlayerController playTheIndexPath blocked"); }
+- (void)updateScrollViewPlayerToCell { LogAdBlock(@"WindPlayerController updateScrollViewPlayerToCell blocked"); }
+- (void)updateNoramlPlayerWithContainerView:(UIView *)view { LogAdBlock(@"WindPlayerController updateNoramlPlayerWithContainerView blocked"); }
+%end
+
+%hook WindmillStrategyManager
+- (id)init { LogAdBlock(@"WindmillStrategyManager init blocked"); return nil; }
+- (void)preStrategyWithPlacementId:(NSString *)placementId { LogAdBlock(@"WindmillStrategyManager preStrategyWithPlacementId blocked"); }
+- (id)getAdStrategyWithRequest:(id)request { LogAdBlock(@"WindmillStrategyManager getAdStrategyWithRequest blocked"); return nil; }
+%end
+
+%hook SigmobFullscreenAdViewController
+- (id)initWithBidResponse:(id)response { LogAdBlock(@"SigmobFullscreenAdViewController initWithBidResponse blocked"); return nil; }
+%end
+
+// ============================================================
+// MARK: - 通用广告视图/控制器拦截
+// ============================================================
+
+%hook CSJRewardedVideoDisplayViewController
+- (id)init { LogAdBlock(@"CSJRewardedVideoDisplayViewController init blocked"); return nil; }
+- (void)viewDidLoad { LogAdBlock(@"CSJRewardedVideoDisplayViewController viewDidLoad blocked"); }
+%end
+
+%hook CSJVideoDetailPageViewController
+- (id)init { LogAdBlock(@"CSJVideoDetailPageViewController init blocked"); return nil; }
+- (void)viewDidLoad { LogAdBlock(@"CSJVideoDetailPageViewController viewDidLoad blocked"); }
+%end
+
+%hook CSJExpressRewardFullScreenVM
+- (id)init { LogAdBlock(@"CSJExpressRewardFullScreenVM init blocked"); return nil; }
+- (void)relayoutSubViews { LogAdBlock(@"CSJExpressRewardFullScreenVM relayoutSubViews blocked"); }
+%end
+
+%hook CSJWebViewControllerViewModel
+- (id)init { LogAdBlock(@"CSJWebViewControllerViewModel init blocked"); return nil; }
+%end
+
+%hook CSJPlayableWebVM
+- (id)init { LogAdBlock(@"CSJPlayableWebVM init blocked"); return nil; }
+%end
+
+%hook CSJRewardedVideoWebViewControllerVM
+- (id)init { LogAdBlock(@"CSJRewardedVideoWebViewControllerVM init blocked"); return nil; }
+%end
+
+%hook CSJRewardFullScreenBaseVM
+- (id)init { LogAdBlock(@"CSJRewardFullScreenBaseVM init blocked"); return nil; }
+%end
+
+%hook CSJDynamicRenderTemplateStrategy
+- (id)init { LogAdBlock(@"CSJDynamicRenderTemplateStrategy init blocked"); return nil; }
+%end
+
+%hook CSJNativeAd
+- (id)init { LogAdBlock(@"CSJNativeAd init blocked"); return nil; }
+%end
+
+%hook CSJVideoAdView
+- (id)initWithNativeAd:(id)nativeAd { LogAdBlock(@"CSJVideoAdView initWithNativeAd blocked"); return nil; }
+%end
+
+%hook CSJNativeExpressRewardedVideoAdView
+- (id)initWithFrame:(CGRect)frame { LogAdBlock(@"CSJNativeExpressRewardedVideoAdView initWithFrame blocked"); return nil; }
+- (void)startPlayVideo { LogAdBlock(@"CSJNativeExpressRewardedVideoAdView startPlayVideo blocked"); }
+%end
+
+%hook CSJNativeExpressRewardDrawAdView
+- (id)initWithFrame:(CGRect)frame { LogAdBlock(@"CSJNativeExpressRewardDrawAdView initWithFrame blocked"); return nil; }
+- (void)render { LogAdBlock(@"CSJNativeExpressRewardDrawAdView render blocked"); }
+- (void)replay { LogAdBlock(@"CSJNativeExpressRewardDrawAdView replay blocked"); }
+%end
+
+%hook CSJNativeExpressRewardedVideoAdDisplayViewController
+- (id)init { LogAdBlock(@"CSJNativeExpressRewardedVideoAdDisplayViewController init blocked"); return nil; }
+- (void)viewDidLoad { LogAdBlock(@"CSJNativeExpressRewardedVideoAdDisplayViewController viewDidLoad blocked"); }
+%end
+
+%hook CSJNativeExpressRewardedVideoAdViewController
+- (id)init { LogAdBlock(@"CSJNativeExpressRewardedVideoAdViewController init blocked"); return nil; }
+- (void)viewDidLoad { LogAdBlock(@"CSJNativeExpressRewardedVideoAdViewController viewDidLoad blocked"); }
+%end
+
+%hook CSJNativeExpressRewardDrawAdViewController
+- (id)init { LogAdBlock(@"CSJNativeExpressRewardDrawAdViewController init blocked"); return nil; }
+- (void)viewDidLoad { LogAdBlock(@"CSJNativeExpressRewardDrawAdViewController viewDidLoad blocked"); }
+%end
+
+%hook CSJFullScreenInterstitialAdView
+- (id)initWithMaterial:(id)material { LogAdBlock(@"CSJFullScreenInterstitialAdView initWithMaterial blocked"); return nil; }
+%end
+
+%hook CSJRewardedVideoAdViewController
+- (id)init { LogAdBlock(@"CSJRewardedVideoAdViewController init blocked"); return nil; }
+- (void)viewDidLoad { LogAdBlock(@"CSJRewardedVideoAdViewController viewDidLoad blocked"); }
+%end
+
+// ============================================================
+// MARK: - 运行时动态 Hook (备用/兜底方案)
+// ============================================================
+
+static void HookClassMethod(const char *className, const char *selectorName, IMP newImp, IMP *oldImp) {
     Class cls = objc_getClass(className);
     if (!cls) {
-        ADLOG(@"Class %s not found (may be loaded later)", className);
+        LogAdBlock(@"Class %s not found, skipping runtime hook", className);
         return;
     }
-    SEL sel = sel_registerName(methodName);
-    Method m = class_getInstanceMethod(cls, sel);
-    if (!m) {
-        ADLOG(@"Method %s not found in %s", methodName, className);
+    SEL sel = sel_getUid(selectorName);
+    Method method = class_getInstanceMethod(cls, sel);
+    if (!method) {
+        LogAdBlock(@"Method %s not found in %s, skipping", selectorName, className);
         return;
     }
-    IMP orig = method_getImplementation(m);
-    if (oldImp) *oldImp = orig;
-    method_setImplementation(m, newImp);
-    ADLOG(@"Hooked %s -> %s", className, methodName);
+    if (oldImp) {
+        *oldImp = method_getImplementation(method);
+    }
+    method_setImplementation(method, newImp);
+    LogAdBlock(@"Runtime hooked %s -> %s", className, selectorName);
 }
 
-static void HookAdClassMethod(const char *className, const char *methodName, IMP newImp) {
-    Class cls = objc_getClass(className);
-    if (!cls) return;
-    SEL sel = sel_registerName(methodName);
-    Method m = class_getClassMethod(cls, sel);
-    if (!m) return;
-    method_setImplementation(m, newImp);
-    ADLOG(@"Hooked +%s -> %s", className, methodName);
+static id __attribute__((optnone)) AdBlockReturnNil(id self, SEL _cmd) {
+    LogAdBlock(@"Runtime blocked %s", sel_getName(_cmd));
+    return nil;
 }
 
-// ============================================================================
-// MARK: - Main Constructor (Entry Point)
-// ============================================================================
+static void __attribute__((optnone)) AdBlockReturnVoid(id self, SEL _cmd) {
+    LogAdBlock(@"Runtime blocked %s", sel_getName(_cmd));
+}
 
-__attribute__((constructor))
-static void AdBlockerInit() {
-    ADLOG(@"=== AdBlocker.dylib loaded ===");
-    
-    // Wait a bit for classes to be loaded
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        ADLOG(@"Starting hooks...");
-        
-        // ================================================================
-        // 1. Block GroMore (ABU) SDK
-        // ================================================================
-        
-        // ABUAdSDKManager - block initialization
-        HookAdClass("ABUAdSDKManager", "setup", "v@:", (IMP)BlockSDKSetup, NULL);
-        HookAdClass("ABUAdSDKManager", "_setup", "v@:", (IMP)BlockSDKSetup, NULL);
-        HookAdClass("ABUAdSDKManager", "registerAppID:", "v@:@", (IMP)BlockRegisterAppID, NULL);
-        HookAdClass("ABUAdSDKManager", "setupAdnSDKWithConfig:complete:", "v@:@@", (IMP)BlockSDKSetup, NULL);
-        HookAdClass("ABUAdSDKManager", "setupPangleSDK", "v@:", (IMP)BlockSDKSetup, NULL);
-        HookAdClass("ABUAdSDKManager", "setupAdActionManager", "v@:", (IMP)BlockSDKSetup, NULL);
-        HookAdClass("ABUAdSDKManager", "setupNotifications", "v@:", (IMP)BlockSDKSetup, NULL);
-        
-        // ABUConfigManager - block config loading
-        HookAdClass("ABUConfigManager", "getConfigWithBlock:", "v@:@", (IMP)BlockConfigLoadBlock, NULL);
-        HookAdClass("ABUConfigManager", "loadConfigFromServer", "v@:", (IMP)BlockConfigLoad, NULL);
-        HookAdClass("ABUConfigManager", "loadConfigFromLocalIfNeeded", "v@:", (IMP)BlockConfigLoad, NULL);
-        HookAdClass("ABUConfigManager_V2", "getConfigWithBlock:", "v@:@", (IMP)BlockConfigLoadBlock, NULL);
-        HookAdClass("ABUConfigManager_V2", "loadConfigFromServerIfNeeded", "v@:", (IMP)BlockConfigLoad, NULL);
-        HookAdClass("ABUConfigManager_V2", "_loadConfigFromLocalIfNeeded", "v@:", (IMP)BlockConfigLoad, NULL);
-        
-        // ABUBaseAd - block ad loading
-        HookAdClass("ABUBaseAd", "loadAdData", "v@:", (IMP)BlockLoadAdData, NULL);
-        HookAdClass("ABUBaseAd", "ex_loadAdData", "v@:", (IMP)BlockLoadAdData, NULL);
-        HookAdClass("ABUBaseAd", "preloadByUser", "v@:", (IMP)BlockLoadAdData, NULL);
-        HookAdClass("ABUBaseAd", "loadAdDataWithConfig:", "v@:@", (IMP)BlockLoadAdConfig, NULL);
-        HookAdClass("ABUBaseAd", "loadAdDataWithMediaSlotConfigIDs:sign:", "v@:@@", (IMP)BlockLoadAdData, NULL);
-        
-        // ABUBannerAd
-        HookAdClass("ABUBannerAd", "loadAdData", "v@:", (IMP)BlockLoadAdData, NULL);
-        HookAdClass("ABUBannerAd", "adLoadDidSuccess", "v@:", (IMP)BlockAdLoadSuccess, NULL);
-        HookAdClass("ABUBannerAd", "adLoadDidFailedWithError:", "v@:@", (IMP)BlockAdLoadFail, NULL);
-        
-        // ABUNativeAdsManager
-        HookAdClass("ABUNativeAdsManager", "loadAdData", "v@:", (IMP)BlockLoadAdData, NULL);
-        HookAdClass("ABUNativeAdsManager", "loadAdDataWithCount:", "v@:q", (IMP)BlockLoadAdData, NULL);
-        
-        // ABURewardedVideoAd
-        HookAdClass("ABURewardedVideoAd", "loadAdData", "v@:", (IMP)BlockLoadAdData, NULL);
-        HookAdClass("ABURewardedVideoAd", "showAdFromRootViewController:", "B@:@", (IMP)BlockShowAd, NULL);
-        HookAdClass("ABURewardedVideoAd", "showAdFromRootViewController:extroInfos:", "B@:@@", (IMP)BlockShowAdExtra, NULL);
-        HookAdClass("ABURewardedVideoAd", "showAdFromRootViewController:extraInfos:", "B@:@@", (IMP)BlockShowAdExtra, NULL);
-        HookAdClass("ABURewardedVideoAd", "isReady", "B@:", (IMP)BlockReturnNO, NULL);
-        HookAdClass("ABURewardedVideoAd", "adLoadDidSuccess", "v@:", (IMP)BlockAdLoadSuccess, NULL);
-        
-        // ABUFullscreenVideoAd
-        HookAdClass("ABUFullscreenVideoAd", "loadAdData", "v@:", (IMP)BlockLoadAdData, NULL);
-        HookAdClass("ABUFullscreenVideoAd", "showAdFromRootViewController:", "B@:@", (IMP)BlockShowAd, NULL);
-        HookAdClass("ABUFullscreenVideoAd", "showAdFromRootViewController:extroInfos:", "B@:@@", (IMP)BlockShowAdExtra, NULL);
-        HookAdClass("ABUFullscreenVideoAd", "isReady", "B@:", (IMP)BlockReturnNO, NULL);
-        
-        // ABUInterstitialAd
-        HookAdClass("ABUInterstitialAd", "loadAdData", "v@:", (IMP)BlockLoadAdData, NULL);
-        HookAdClass("ABUInterstitialAd", "showAdFromRootViewController:", "B@:@", (IMP)BlockShowAd, NULL);
-        HookAdClass("ABUInterstitialAd", "isReady", "B@:", (IMP)BlockReturnNO, NULL);
-        
-        // ABUSplashAd
-        HookAdClass("ABUSplashAd", "loadAdData", "v@:", (IMP)BlockLoadAdData, NULL);
-        HookAdClass("ABUSplashAd", "showInWindow:", "B@:@", (IMP)BlockShowInWindow, NULL);
-        HookAdClass("ABUSplashAd", "showInWindowWithBlock:", "v@:@", (IMP)BlockShowSplash, NULL);
-        HookAdClass("ABUSplashAd", "isReady", "B@:", (IMP)BlockReturnNO, NULL);
-        HookAdClass("ABUSplashAd", "adLoadDidSuccess", "v@:", (IMP)BlockAdLoadSuccess, NULL);
-        
-        // ABUNativeAdView / ABUDrawAdView
-        HookAdClass("ABUNativeAdView", "loadAdData", "v@:", (IMP)BlockLoadAdData, NULL);
-        HookAdClass("ABUDrawAdView", "loadAdData", "v@:", (IMP)BlockLoadAdData, NULL);
-        
-        // ABUAdLoader - block all ad loading
-        HookAdClass("ABUAdLoader", "loadAdsWithConfigs:limitSeconds:param:ext:", "v@:@@d@", (IMP)BlockLoadAdData, NULL);
-        HookAdClass("ABUAdLoader", "beginLoadMediaAdIfNeededWithConfig:andParam:loadAction:", "v@:@@@", (IMP)BlockLoadAdData, NULL);
-        
-        // ABUMediationWaterfallIMP - block waterfall requests
-        HookAdClass("ABUMediationWaterfallIMP", "startWaterfallRequestWithParams:adReuseIdentifier:", "v@:@@", (IMP)BlockLoadAdData, NULL);
-        
-        // ================================================================
-        // 2. Block AWM SDK
-        // ================================================================
-        
-        // AWMCSJCustomConfigAdapter - block CSJ init
-        HookAdClass("AWMCSJCustomConfigAdapter", "initializeAdapterWithConfiguration:", "v@:@", (IMP)BlockSDKSetup, NULL);
-        
-        // AWMGDTCustomConfigAdapter - block GDT init
-        HookAdClass("AWMGDTCustomConfigAdapter", "initializeAdapterWithConfiguration:", "v@:@", (IMP)BlockSDKSetup, NULL);
-        
-        // AWMBaiduCustomConfigAdapter - block Baidu init
-        HookAdClass("AWMBaiduCustomConfigAdapter", "initializeAdapterWithConfiguration:", "v@:@", (IMP)BlockSDKSetup, NULL);
-        
-        // AWMGroMoreCustomConfigAdapter - block GroMore init
-        HookAdClass("AWMGroMoreCustomConfigAdapter", "initializeAdapterWithConfiguration:", "v@:@", (IMP)BlockSDKSetup, NULL);
-        
-        // Generic AWM ad loading
-        HookAdClass("AWMCSJCustomBannerAdapter", "loadAdWithPlacementId:parameter:", "v@:@@", (IMP)BlockLoadAdData, NULL);
-        HookAdClass("AWMCSJCustomInterstitialAdapter", "loadAdWithPlacementId:parameter:", "v@:@@", (IMP)BlockLoadAdData, NULL);
-        HookAdClass("AWMCSJCustomRewardedVideoAdapter", "loadAdWithPlacementId:parameter:", "v@:@@", (IMP)BlockLoadAdData, NULL);
-        HookAdClass("AWMCSJCustomSplashAdapter", "loadAdWithPlacementId:parameter:", "v@:@@", (IMP)BlockLoadAdData, NULL);
-        HookAdClass("AWMCSJCustomNativeAdapter", "loadAdWithPlacementId:adSize:parameter:", "v@:@@@", (IMP)BlockLoadAdData, NULL);
-        
-        // AWM show methods
-        HookAdClass("AWMCSJCustomInterstitialAdapter", "showAdFromRootViewController:parameter:", "B@:@@", (IMP)BlockShowAd, NULL);
-        HookAdClass("AWMCSJCustomRewardedVideoAdapter", "showAdFromRootViewController:parameter:", "B@:@@", (IMP)BlockShowAd, NULL);
-        HookAdClass("AWMCSJCustomSplashAdapter", "showSplashAdInWindow:parameter:", "v@:@@", (IMP)BlockShowSplash, NULL);
-        
-        // ================================================================
-        // 3. Block BaiduMobAd SDK
-        // ================================================================
-        
-        // BaiduMobAdExpressFullScreenVideo
-        HookAdClass("BaiduMobAdExpressFullScreenVideo", "load", "v@:", (IMP)BlockLoadAd, NULL);
-        HookAdClass("BaiduMobAdExpressFullScreenVideo", "show", "v@:", (IMP)BlockLoadAd, NULL);
-        HookAdClass("BaiduMobAdExpressFullScreenVideo", "showFromViewController:", "v@:@", (IMP)BlockShowAd, NULL);
-        HookAdClass("BaiduMobAdExpressFullScreenVideo", "isReady", "B@:", (IMP)BlockReturnNO, NULL);
-        
-        // BaiduMobAdExpressInterstitial
-        HookAdClass("BaiduMobAdExpressInterstitial", "load", "v@:", (IMP)BlockLoadAd, NULL);
-        HookAdClass("BaiduMobAdExpressInterstitial", "show", "v@:", (IMP)BlockLoadAd, NULL);
-        HookAdClass("BaiduMobAdExpressInterstitial", "showFromViewController:", "v@:@", (IMP)BlockShowAd, NULL);
-        HookAdClass("BaiduMobAdExpressInterstitial", "isReady", "B@:", (IMP)BlockReturnNO, NULL);
-        
-        // BaiduMobAd bookmark/splash components
-        HookAdClass("BaiduMobAdBookmarkContainerView", "renderBookmarkView", "v@:", (IMP)BlockSDKSetup, NULL);
-        HookAdClass("BaiduMobAdBookmarkContainerView", "showBookmarkAnimation", "v@:", (IMP)BlockSDKSetup, NULL);
-        
-        // BaiduMobAd barrage
-        HookAdClass("BaiduMobAdbarrageView", "showBarrage", "v@:", (IMP)BlockSDKSetup, NULL);
-        
-        // BaiduMobAd CPU (content recommendation)
-        HookAdClass("BaiduMobAdCPUSlot", "loadCPUWithPage:Channels:IsShowAd:", "v@:iiB", (IMP)BlockLoadAdData, NULL);
-        
-        // ================================================================
-        // 4. Block App's Own AD System (ADxxx)
-        // ================================================================
-        
-        // ADInfoManager - block all ad updates
-        HookAdClass("ADInfoManager", "updateAdWithKey:imgSize:", "v@:@@", (IMP)BlockADInfoUpdate, NULL);
-        HookAdClass("ADInfoManager", "updateStartupAD", "v@:", (IMP)BlockSDKSetup, NULL);
-        HookAdClass("ADInfoManager", "updateHotStartupAD", "v@:", (IMP)BlockSDKSetup, NULL);
-        HookAdClass("ADInfoManager", "updateDeviceListAD", "v@:", (IMP)BlockSDKSetup, NULL);
-        HookAdClass("ADInfoManager", "updateDeviceTopAD", "v@:", (IMP)BlockSDKSetup, NULL);
-        HookAdClass("ADInfoManager", "updateDeviceReserveAD", "v@:", (IMP)BlockSDKSetup, NULL);
-        HookAdClass("ADInfoManager", "updateMineReserveAD", "v@:", (IMP)BlockSDKSetup, NULL);
-        HookAdClass("ADInfoManager", "updateClientActivityAD", "v@:", (IMP)BlockSDKSetup, NULL);
-        HookAdClass("ADInfoManager", "updateRemoteEndAD", "v@:", (IMP)BlockSDKSetup, NULL);
-        HookAdClass("ADInfoManager", "updateRemoteEndInsertAD", "v@:", (IMP)BlockSDKSetup, NULL);
-        HookAdClass("ADInfoManager", "getAdModeWithKey:imgSize:complete:", "v@:@@@", (IMP)BlockADInfoUpdate, NULL);
-        
-        // ADFullScreenViewController - block splash/interstitial
-        HookAdClass("ADFullScreenViewController", "initWithADInfo:complete:", "@@:@@", (IMP)BlockADFullScreenInit, NULL);
-        
-        // ADTESTViewController - hide test page
-        HookAdClass("ADTESTViewController", "viewDidLoad", "v@:", (IMP)BlockSDKSetup, NULL);
-        
-        // ================================================================
-        // 5. Block Network Requests (NSURLSession)
-        // ================================================================
-        
-        Class nsurlsession = objc_getClass("NSURLSession");
-        if (nsurlsession) {
-            Method m = class_getInstanceMethod(nsurlsession, sel_registerName("dataTaskWithRequest:"));
-            if (m) {
-                orig_dataTaskWithRequest = method_getImplementation(m);
-                method_setImplementation(m, (IMP)Hook_dataTaskWithRequest);
-                ADLOG(@"Hooked NSURLSession dataTaskWithRequest:");
-            }
-        }
-        
-        // Also hook dataTaskWithURL:
-        Class nsurlsessionCls = objc_getClass("NSURLSession");
-        if (nsurlsessionCls) {
-            Method m2 = class_getInstanceMethod(nsurlsessionCls, sel_registerName("dataTaskWithURL:"));
-            if (m2) {
-                IMP orig = method_getImplementation(m2);
-                method_setImplementation(m2, imp_implementationWithBlock(^NSURLSessionDataTask *(id self, NSURL *url) {
-                    NSString *urlStr = url.absoluteString;
-                    NSArray *adDomains = @[
-                        @"pangolin-sdk-toutiao", @"adkwai", @"baidu.com/mobad",
-                        @"gdtimg.com", @"gdt.qq.com", @"adsrvr",
-                        @"doubleclick", @"googleadservices", @"googlesyndication",
-                        @"facebook.com/tr", @"crashlytics", @"firebase",
-                        @"appsflyer", @"adjust.com", @"umeng",
-                    ];
-                    for (NSString *domain in adDomains) {
-                        if ([urlStr containsString:domain]) {
-                            ADLOG(@"BLOCKED NSURL dataTask: %@", urlStr);
-                            // Return and immediately cancel
-                            NSURLSessionDataTask *task = ((NSURLSessionDataTask * (*)(id, NSURL *))orig)(self, url);
-                            [task cancel];
-                            return task;
+static BOOL __attribute__((optnone)) AdBlockReturnNO(id self, SEL _cmd) {
+    LogAdBlock(@"Runtime blocked %s", sel_getName(_cmd));
+    return NO;
+}
+
+%ctor {
+    LogAdBlock(@"========================================");
+    LogAdBlock(@"百度网盘去广告插件已加载 v1.0.0");
+    LogAdBlock(@"========================================");
+
+    // 运行时动态 hook 兜底 - 针对可能遗漏的类
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        // 通用广告加载方法兜底
+        NSArray *adLoadSelectors = @[@"loadAdData", @"loadAd", @"load", @"loadBiddingAd", @"preloadAdWithType:"];
+        NSArray *adShowSelectors = @[@"showAdFromRootViewController:", @"showInWindow:", @"showInWindowWithBlock:", @"show", @"showFromViewController:", @"showSplashViewInRootViewController:", @"showCardViewInRootViewController:", @"showZoomOutViewInRootViewController:"];
+
+        int hooked = 0;
+        unsigned int classCount = 0;
+        Class *classes = objc_copyClassList(&classCount);
+        for (unsigned int i = 0; i < classCount; i++) {
+            NSString *name = NSStringFromClass(classes[i]);
+            // 拦截所有广告SDK前缀的类
+            if ([name hasPrefix:@"ABU"] || [name hasPrefix:@"CSJ"] || [name hasPrefix:@"BaiduMobAd"] || 
+                [name hasPrefix:@"GDT"] || [name hasPrefix:@"Wind"] || [name hasPrefix:@"Sigmob"] ||
+                [name hasPrefix:@"AWM"] || [name hasPrefix:@"Pangle"]) {
+
+                for (NSString *selStr in adLoadSelectors) {
+                    SEL sel = NSSelectorFromString(selStr);
+                    if ([classes[i] instancesRespondToSelector:sel]) {
+                        Method m = class_getInstanceMethod(classes[i], sel);
+                        if (m) {
+                            method_setImplementation(m, (IMP)AdBlockReturnVoid);
+                            hooked++;
                         }
                     }
-                    return ((NSURLSessionDataTask * (*)(id, NSURL *))orig)(self, url);
-                }));
-                ADLOG(@"Hooked NSURLSession dataTaskWithURL:");
+                }
+
+                for (NSString *selStr in adShowSelectors) {
+                    SEL sel = NSSelectorFromString(selStr);
+                    if ([classes[i] instancesRespondToSelector:sel]) {
+                        Method m = class_getInstanceMethod(classes[i], sel);
+                        if (m) {
+                            method_setImplementation(m, (IMP)AdBlockReturnVoid);
+                            hooked++;
+                        }
+                    }
+                }
             }
         }
-        
-        // ================================================================
-        // 6. Block UIViewController ad presentation
-        // ================================================================
-        
-        // Hook presentViewController to block ad VCs
-        Class vcClass = [UIViewController class];
-        Method presentM = class_getInstanceMethod(vcClass, @selector(presentViewController:animated:completion:));
-        if (presentM) {
-            IMP origPresent = method_getImplementation(presentM);
-            method_setImplementation(presentM, imp_implementationWithBlock(^void(id self, UIViewController *vc, BOOL animated, id completion) {
-                NSString *className = NSStringFromClass([vc class]);
-                NSArray *adVCs = @[
-                    @"ADFullScreenViewController",
-                    @"BaiduMobAdExpressFullScreenVideoViewController",
-                    @"BaiduMobAdExpressIntViewController",
-                    @"ABUSplashAd",
-                    @"ABURewardAgainView",
-                    @"BaiduMobAdActionRootController",
-                    @"BaiduMobAdBookmarkContainerView",
-                ];
-                for (NSString *adVC in adVCs) {
-                    if ([className isEqualToString:adVC] || [className containsString:@"Ad"] || [className containsString:@"AD"]) {
-                        ADLOG(@"BLOCKED presentViewController: %@", className);
-                        if (completion) {
-                            void (^comp)(void) = completion;
-                            comp();
-                        }
-                        return;
-                    }
-                }
-                ((void (*)(id, UIViewController *, BOOL, id))origPresent)(self, vc, animated, completion);
-            }));
-            ADLOG(@"Hooked UIViewController presentViewController:");
-        }
-        
-        // ================================================================
-        // 7. Hide existing ad views
-        // ================================================================
-        
-        // Hook UIView didMoveToSuperview to hide ad views
-        Class uiviewClass = [UIView class];
-        Method didMoveM = class_getInstanceMethod(uiviewClass, @selector(didMoveToSuperview));
-        if (didMoveM) {
-            IMP origDidMove = method_getImplementation(didMoveM);
-            method_setImplementation(didMoveM, imp_implementationWithBlock(^void(id self) {
-                NSString *className = NSStringFromClass([self class]);
-                // Hide known ad view classes
-                if ([className containsString:@"Ad"] || [className containsString:@"AD"] ||
-                    [className containsString:@"Banner"] || [className containsString:@"Splash"] ||
-                    [className containsString:@"Native"] || [className containsString:@"Interstitial"] ||
-                    [className containsString:@"Reward"] || [className containsString:@"Express"]) {
-                    UIView *view = self;
-                    if (view.superview) {
-                        ADLOG(@"HIDING ad view: %@", className);
-                        view.hidden = YES;
-                        view.alpha = 0;
-                        CGRect f = view.frame;
-                        f.size = CGSizeZero;
-                        view.frame = f;
-                    }
-                }
-                ((void (*)(id))origDidMove)(self);
-            }));
-            ADLOG(@"Hooked UIView didMoveToSuperview");
-        }
-        
-        ADLOG(@"=== All hooks installed ===");
+        free(classes);
+        LogAdBlock(@"Runtime兜底hook完成: %d 个方法", hooked);
     });
 }
