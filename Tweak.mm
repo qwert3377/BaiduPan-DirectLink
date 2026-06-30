@@ -1145,7 +1145,7 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
         showToast(@"2. 刷新列表...");
         forceRefreshFileList();
 
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             // Extra reloadData to ensure the list view picks up the new data source
             UIScrollView *listView = findListViewGlobally();
             if ([listView isKindOfClass:[UITableView class]]) {
