@@ -1,11 +1,11 @@
 //
 //  BaiduNetdiskAdBlocker.mm
 //  百度网盘去广告插件 (纯运行时版)
-//  版本: 1.2.3
+//  版本: 1.2.4
 //  编译: Theos / Logos
-//  修复1: %ctor -> __attribute__((constructor)) 避免 Logos 预处理器错误
+//  修复1: 删除 %ctor，改用 +load 方法，避免 Logos 预处理器错误
 //  修复2: 删除未使用的 hooked 变量，避免 -Werror
-//  修复3: 使用 %hook + %ctor 确保在 Runtime 初始化后执行，避免 TrollStore 闪退
+//  修复3: +load 在 Runtime 完全初始化后执行，TrollStore 不闪退
 //
 
 #import <UIKit/UIKit.h>
@@ -19,20 +19,21 @@ static void __attribute__((optnone)) blk_void(id self, SEL _cmd) { }
 static id __attribute__((optnone)) blk_nil(id self, SEL _cmd) { return nil; }
 static BOOL __attribute__((optnone)) blk_no(id self, SEL _cmd) { return NO; }
 
-// 修复3: 使用 %hook 一个系统类，确保 Logos 预处理器正常工作
-// 这样 %ctor 就能在 Runtime 完全初始化后执行，避免 TrollStore 闪退
-%hook NSObject
+// 修复: 使用自定义类的 +load 方法替代 %ctor
+// +load 在 Runtime 完全初始化后自动调用，TrollStore 安全，无需 Logos 预处理
+@interface BaiduNetdiskAdBlocker : NSObject
+@end
 
-// 空的 hook，不做任何事，只为让 Logos 生成正确的 +load 和 %ctor 上下文
+@implementation BaiduNetdiskAdBlocker
+
 + (void)load {
-    %orig;
+    // 延迟一小段时间确保 App 完全启动，避免早期冲突
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self setupAdBlocker];
+    });
 }
 
-%end
-
-// 修复1+3: 使用 %ctor 替代 __attribute__((constructor))
-// Logos 生成的 %ctor 会在 Runtime 初始化完成后执行，TrollStore 安全
-%ctor {
++ (void)setupAdBlocker {
     // 广告SDK类前缀列表
     NSArray *adPrefixes = @[@"ABU", @"CSJ", @"BaiduMobAd", @"GDT", @"Wind", @"Sigmob", @"AWM", @"Pangle"];
 
@@ -165,3 +166,5 @@ static BOOL __attribute__((optnone)) blk_no(id self, SEL _cmd) { return NO; }
     }
     free(classes);
 }
+
+@end
