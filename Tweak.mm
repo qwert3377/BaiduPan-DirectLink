@@ -721,6 +721,78 @@ static void executeRestoreWithoutRefresh(void (^completion)(BOOL success)) {
     });
 }
 
+
+#pragma mark - Cell Finding & Tapping Helpers
+
+static UIView * findVisibleCellWithName(NSString *name, UIScrollView *sv) {
+    if (!name || !sv) return nil;
+    if ([sv isKindOfClass:[UITableView class]]) {
+        UITableView *tv = (UITableView *)sv;
+        NSArray *visiblePaths = [tv indexPathsForVisibleRows];
+        for (NSIndexPath *ip in visiblePaths) {
+            @try {
+                UITableViewCell *cell = [tv cellForRowAtIndexPath:ip];
+                if (cell && viewContainsText(cell, name)) {
+                    DLog(@"Found visible cell at row %ld", (long)ip.row);
+                    return cell;
+                }
+            } @catch (NSException *e) {}
+        }
+    } else if ([sv isKindOfClass:[UICollectionView class]]) {
+        UICollectionView *cv = (UICollectionView *)sv;
+        NSArray *visiblePaths = [cv indexPathsForVisibleItems];
+        for (NSIndexPath *ip in visiblePaths) {
+            @try {
+                UICollectionViewCell *cell = [cv cellForItemAtIndexPath:ip];
+                if (cell && viewContainsText(cell, name)) {
+                    DLog(@"Found visible collection cell at item %ld", (long)ip.item);
+                    return cell;
+                }
+            } @catch (NSException *e) {}
+        }
+    }
+    return nil;
+}
+
+static void tapOnCell(UIView *cell) {
+    if (!cell) return;
+    DLog(@"Tapping on cell: %@", NSStringFromClass([cell class]));
+
+    if ([cell isKindOfClass:[UIControl class]]) {
+        UIControl *control = (UIControl *)cell;
+        [control sendActionsForControlEvents:UIControlEventTouchUpInside];
+        DLog(@"Sent UIControl action");
+    }
+
+    for (UIGestureRecognizer *gr in cell.gestureRecognizers) {
+        if ([gr isKindOfClass:[UITapGestureRecognizer class]]) {
+            DLog(@"Triggering tap gesture");
+            @try {
+                SEL sel = NSSelectorFromString(@"_touchesEnded:withEvent:");
+                if ([gr respondsToSelector:sel]) {
+                    #pragma clang diagnostic push
+                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                    [gr performSelector:sel withObject:[NSSet set] withObject:nil];
+                    #pragma clang diagnostic pop
+                }
+            } @catch (NSException *e) {}
+        }
+    }
+
+    @try {
+        for (UIView *sub in cell.subviews) {
+            if ([sub isKindOfClass:[UIButton class]]) {
+                UIButton *btn = (UIButton *)sub;
+                [btn sendActionsForControlEvents:UIControlEventTouchUpInside];
+            }
+        }
+    } @catch (NSException *e) {}
+
+    @try {
+        [[UIApplication sharedApplication] sendAction:@selector(touchesEnded:withEvent:) to:cell from:nil forEvent:nil];
+    } @catch (NSException *e) {}
+}
+
 #pragma mark - Open Methods
 
 static void openMethod_delegateCall(NSString *ppName, NSString *filePath) {
@@ -839,116 +911,101 @@ static void openMethod_vcDirectCall(NSString *ppName, NSString *filePath) {
     DLog(@"VC direct call: no matching method found");
 }
 
-static void openMethod_simulateCellTap(NSString *ppName, NSString *filePath) {
-    DLog(@"[Method 3] Trying simulate cell tap for: %@", ppName);
+static void openMethod_visibleCellTap(NSString *ppName, NSString *filePath) {
+    DLog(@"[Method 3] Direct tap on VISIBLE cell: %@", ppName);
     UIViewController *vc = topViewController();
     if (!vc) return;
-
     UIScrollView *sv = findScrollViewInView(vc.view);
-    UIView *targetCell = nil;
+    UIView *cell = findVisibleCellWithName(ppName, sv);
+    if (cell) {
+        tapOnCell(cell);
+        DLog(@"Tapped on visible cell");
+    } else {
+        DLog(@"No visible cell found");
+    }
+}
 
-    if ([sv isKindOfClass:[UITableView class]]) {
-        UITableView *tv = (UITableView *)sv;
-        NSInteger sections = 1;
-        @try { sections = [tv numberOfSections]; } @catch (NSException *e) {}
-        for (NSInteger s = 0; s < sections; s++) {
-            NSInteger rows = 0;
-            @try { rows = [tv numberOfRowsInSection:s]; } @catch (NSException *e) {}
-            for (NSInteger r = 0; r < rows; r++) {
-                NSIndexPath *ip = [NSIndexPath indexPathForRow:r inSection:s];
-                @try {
-                    UITableViewCell *cell = [tv cellForRowAtIndexPath:ip];
-                    if (cell) {
-                        for (UIView *sub in cell.contentView.subviews) {
-                            if ([sub isKindOfClass:[UILabel class]]) {
-                                UILabel *lbl = (UILabel *)sub;
-                                if (lbl.text && [lbl.text containsString:ppName]) {
-                                    targetCell = cell;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                } @catch (NSException *e) {}
-                if (targetCell) break;
-            }
-            if (targetCell) break;
-        }
-    } else if ([sv isKindOfClass:[UICollectionView class]]) {
-        UICollectionView *cv = (UICollectionView *)sv;
-        NSInteger sections = 1;
-        @try { sections = [cv numberOfSections]; } @catch (NSException *e) {}
-        for (NSInteger s = 0; s < sections; s++) {
-            NSInteger items = 0;
-            @try { items = [cv numberOfItemsInSection:s]; } @catch (NSException *e) {}
-            for (NSInteger i = 0; i < items; i++) {
-                NSIndexPath *ip = [NSIndexPath indexPathForItem:i inSection:s];
-                @try {
-                    UICollectionViewCell *cell = [cv cellForItemAtIndexPath:ip];
-                    if (cell) {
-                        for (UIView *sub in cell.contentView.subviews) {
-                            if ([sub isKindOfClass:[UILabel class]]) {
-                                UILabel *lbl = (UILabel *)sub;
-                                if (lbl.text && [lbl.text containsString:ppName]) {
-                                    targetCell = cell;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                } @catch (NSException *e) {}
-                if (targetCell) break;
-            }
-            if (targetCell) break;
-        }
+static void openMethod_scrollTop(NSString *ppName, NSString *filePath) {
+    DLog(@"[Method 4] Scroll to TOP then tap: %@", ppName);
+    UIViewController *vc = topViewController();
+    if (!vc) return;
+    UIScrollView *sv = findScrollViewInView(vc.view);
+    if (sv) [sv setContentOffset:CGPointZero animated:NO];
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIView *cell = findVisibleCellWithName(ppName, findScrollViewInView(topViewController().view));
+        if (cell) tapOnCell(cell);
+    });
+}
+
+static void openMethod_scrollBottom(NSString *ppName, NSString *filePath) {
+    DLog(@"[Method 5] Scroll to BOTTOM then tap: %@", ppName);
+    UIViewController *vc = topViewController();
+    if (!vc) return;
+    UIScrollView *sv = findScrollViewInView(vc.view);
+    if (sv) {
+        CGFloat maxY = sv.contentSize.height - sv.bounds.size.height;
+        if (maxY > 0) [sv setContentOffset:CGPointMake(0, maxY) animated:NO];
     }
 
-    if (!targetCell) {
-        DLog(@"Simulate tap: no visible cell found");
-        return;
-    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIView *cell = findVisibleCellWithName(ppName, findScrollViewInView(topViewController().view));
+        if (cell) tapOnCell(cell);
+    });
+}
 
-    DLog(@"Simulating touch on cell: %@", NSStringFromClass([targetCell class]));
+static void openMethod_urlRoute(NSString *ppName, NSString *filePath) {
+    DLog(@"[Method 6] BaiduPan INTERNAL URL route: %@", ppName);
 
-    if ([targetCell isKindOfClass:[UIControl class]]) {
-        UIControl *control = (UIControl *)targetCell;
-        [control sendActionsForControlEvents:UIControlEventTouchUpInside];
-        DLog(@"Sent UIControl action");
-    }
+    NSString *encodedPath = strictEncodeURIComponent(filePath);
+    NSString *encodedName = strictEncodeURIComponent(ppName);
 
-    for (UIGestureRecognizer *gr in targetCell.gestureRecognizers) {
-        if ([gr isKindOfClass:[UITapGestureRecognizer class]]) {
-            DLog(@"Triggering tap gesture on cell");
-            @try {
-                SEL sel = NSSelectorFromString(@"_touchesEnded:withEvent:");
-                if ([gr respondsToSelector:sel]) {
-                    #pragma clang diagnostic push
-                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                    [gr performSelector:sel withObject:[NSSet set] withObject:nil];
-                    #pragma clang diagnostic pop
-                }
-            } @catch (NSException *e) {
-                DLog(@"Gesture trigger failed: %@", e);
+    NSArray *routes = @[
+        [NSString stringWithFormat:@"baidupan://file/open?path=%@&name=%@", encodedPath, encodedName],
+        [NSString stringWithFormat:@"baidupan://file/preview?path=%@&name=%@", encodedPath, encodedName],
+        [NSString stringWithFormat:@"baidupan://file/detail?path=%@&name=%@", encodedPath, encodedName],
+        [NSString stringWithFormat:@"baidupan://disk/file?path=%@", encodedPath],
+        [NSString stringWithFormat:@"baidupan://disk/preview?path=%@", encodedPath],
+        [NSString stringWithFormat:@"baiduwp://file?path=%@&name=%@", encodedPath, encodedName],
+        [NSString stringWithFormat:@"pan.baidu.com://file?path=%@", encodedPath],
+        [NSString stringWithFormat:@"pan.baidu.com://preview?path=%@", encodedPath],
+    ];
+
+    for (NSString *route in routes) {
+        NSURL *url = [NSURL URLWithString:route];
+        if (url) {
+            DLog(@"Trying route: %@", route);
+            if (@available(iOS 10.0, *)) {
+                [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+            } else {
+                [[UIApplication sharedApplication] openURL:url];
             }
         }
     }
 
-    @try {
-        for (UIView *sub in targetCell.subviews) {
-            if ([sub isKindOfClass:[UIButton class]]) {
-                UIButton *btn = (UIButton *)sub;
-                [btn sendActionsForControlEvents:UIControlEventTouchUpInside];
-                DLog(@"Triggered button inside cell");
+    UIViewController *vc = topViewController();
+    if (vc) {
+        SEL routerSel = NSSelectorFromString(@"handleOpenURL:");
+        if ([vc respondsToSelector:routerSel]) {
+            NSURL *testUrl = [NSURL URLWithString:[NSString stringWithFormat:@"baidupan://file/open?path=%@", encodedPath]];
+            if (testUrl) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                [vc performSelector:routerSel withObject:testUrl];
+                #pragma clang diagnostic pop
+                DLog(@"Called handleOpenURL:");
             }
         }
-    } @catch (NSException *e) {}
 
-    @try {
-        CGPoint center = CGPointMake(targetCell.bounds.size.width / 2.0, targetCell.bounds.size.height / 2.0);
-        CGPoint windowPoint = [targetCell convertPoint:center toView:nil];
-        [[UIApplication sharedApplication] sendAction:@selector(touchesEnded:withEvent:) to:targetCell from:nil forEvent:nil];
-        DLog(@"Sent action via UIApplication");
-    } @catch (NSException *e) {}
+        SEL routeSel = NSSelectorFromString(@"routeToPath:");
+        if ([vc respondsToSelector:routeSel]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [vc performSelector:routeSel withObject:filePath];
+            #pragma clang diagnostic pop
+            DLog(@"Called routeToPath:");
+        }
+    }
 }
 
 static void openMethod_sendAction(NSString *ppName, NSString *filePath) {
@@ -1184,81 +1241,11 @@ static void openMethod_downloadDirect(NSString *ppName, NSString *filePath) {
     showToast(@"方法11: 尝试获取直链...");
 }
 
-static void openMethod_shareSheet(NSString *ppName, NSString *filePath) {
-    DLog(@"[Method 12] Trying share sheet for: %@", ppName);
-    UIViewController *vc = topViewController();
-    if (!vc) return;
 
-    NSURL *fileURL = [NSURL fileURLWithPath:filePath];
-    UIActivityViewController *activityVC = [[UIActivityViewController alloc] initWithActivityItems:@[ppName, fileURL] applicationActivities:nil];
-    if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
-        activityVC.popoverPresentationController.sourceView = vc.view;
-        activityVC.popoverPresentationController.sourceRect = CGRectMake(vc.view.bounds.size.width / 2, vc.view.bounds.size.height / 2, 1, 1);
-    }
-    [vc presentViewController:activityVC animated:YES completion:nil];
-    DLog(@"Presented share sheet");
-}
 
-static void openMethod_quickLook(NSString *ppName, NSString *filePath) {
-    DLog(@"[Method 13] Trying QuickLook for: %@", ppName);
-    Class qlClass = NSClassFromString(@"QLPreviewController");
-    if (!qlClass) {
-        DLog(@"QuickLook: QLPreviewController not available");
-        return;
-    }
-    UIViewController *vc = topViewController();
-    if (!vc) return;
 
-    @try {
-        id previewVC = [[qlClass alloc] init];
-        if (previewVC) {
-            UINavigationController *nav = vc.navigationController;
-            if (nav) {
-                [nav pushViewController:previewVC animated:YES];
-                DLog(@"Pushed QLPreviewController");
-            } else {
-                [vc presentViewController:previewVC animated:YES completion:nil];
-                DLog(@"Presented QLPreviewController");
-            }
-        }
-    } @catch (NSException *e) {
-        DLog(@"QuickLook failed: %@", e);
-    }
-}
 
-static void openMethod_webView(NSString *ppName, NSString *filePath) {
-    DLog(@"[Method 14] Trying WebView for: %@", ppName);
-    UIViewController *vc = topViewController();
-    if (!vc) return;
 
-    Class wkClass = NSClassFromString(@"WKWebView");
-    if (!wkClass) {
-        wkClass = NSClassFromString(@"UIWebView");
-    }
-    if (!wkClass) {
-        DLog(@"WebView: no webview class available");
-        return;
-    }
-
-    @try {
-        UIView *webView = [[wkClass alloc] initWithFrame:vc.view.bounds];
-        if (webView) {
-            NSString *encodedPath = strictEncodeURIComponent(filePath);
-            NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"https://pan.baidu.com/disk/home?path=%@", encodedPath]];
-            if ([webView respondsToSelector:@selector(loadRequest:)]) {
-                NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
-                #pragma clang diagnostic push
-                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                [webView performSelector:@selector(loadRequest:) withObject:req];
-                #pragma clang diagnostic pop
-            }
-            [vc.view addSubview:webView];
-            DLog(@"Added WebView");
-        }
-    } @catch (NSException *e) {
-        DLog(@"WebView failed: %@", e);
-    }
-}
 
 static void openMethod_accessibility(NSString *ppName, NSString *filePath) {
     DLog(@"[Method 15] Trying accessibility for: %@", ppName);
@@ -1527,7 +1514,7 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 8 ? 8 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v11.1"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v11.2"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n新流程：改名->刷新x2->自动测试%ld种打开方法", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing", (long)kTotalMethods]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件"
@@ -1591,7 +1578,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v11.1 loaded - No-Scroll Multi-Method Edition");
+    DLog(@"BaiduPan Troll v11.2 loaded - Visible Cell + Internal URL Route Edition");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
