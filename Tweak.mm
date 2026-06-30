@@ -1,8 +1,7 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.34
-//  Flow: select -> rename to .88888888888888 -> REFRESH ONCE -> scroll to file
-//        -> restore original name -> AUTO CLICK visible cell
-//  CHANGELOG v10.34: Added single refresh after rename to ensure renamed file appears in list
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.35
+//  方案C：改名 -> 篡改内存对象 -> 直接调用内部方法打开 -> 检测进入后恢复原名
+//  全程不刷新、不滚动、不模拟点击
 //
 
 #import <UIKit/UIKit.h>
@@ -70,6 +69,11 @@ static void autoClickVisibleCell(NSString *ppName, UIScrollView *listView);
 static void invokeOpenFileMethodOnVC(UIViewController *vc, NSString *fileName, NSString *filePath);
 static NSString * topVCClassName(void);
 static NSString * topVCTitle(void);
+
+// 方案C新增
+static id findFileModelInVC(UIViewController *vc, NSString *fileId);
+static BOOL mutateFileModel(id fileModel, NSString *newPath, NSString *newName);
+static void openFileDirectly(UIViewController *vc, id fileModel, NSString *filePath, NSString *fileName);
 
 static UIViewController * topViewController(void) {
     UIWindow *window = nil;
@@ -763,11 +767,11 @@ static void autoClickVisibleCell(NSString *ppName, UIScrollView *listView) {
 
     if (!gHasRestored && gPendingRestoreFileId && gPendingRestorePdfPath && gPendingRestoreOriginalName) {
         gHasRestored = YES;
-        showToast(@"4. 恢复原名...");
+        showToast(@"恢复原名...");
         executeRestoreWithoutRefresh(^(BOOL success) {
             if (success) {
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    showToast(@"5. 自动打开文件...");
+                    showToast(@"自动打开文件...");
                     autoClickVisibleCell(ppName, listView);
                 });
             } else {
@@ -853,15 +857,18 @@ static void invokeOpenFileMethodOnVC(UIViewController *vc, NSString *fileName, N
             @try {
                 [vc performSelector:sel withObject:fileName];
                 DLog(@"Called %@ with fileName", selName);
+                #pragma clang diagnostic pop
                 return;
             } @catch (NSException *e) {
                 @try {
                     [vc performSelector:sel withObject:filePath];
                     DLog(@"Called %@ with filePath", selName);
+                    #pragma clang diagnostic pop
                     return;
-                } @catch (NSException *e2) {}
+                } @catch (NSException *e2) {
+                    #pragma clang diagnostic pop
+                }
             }
-            #pragma clang diagnostic pop
         }
     }
 
@@ -939,7 +946,7 @@ static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInt
 
 static void scrollToRenamedFileAndAutoClick(NSString *ppName) {
     if (!ppName) return;
-    DLog(@"v10.34 Scrolling to file and auto-click: %@", ppName);
+    DLog(@"v10.35 Fallback scroll: %@", ppName);
 
     UIScrollView *listView = findListViewGlobally();
     if (!listView) {
@@ -1112,7 +1119,219 @@ static void startTapDetection(void) {
     });
 }
 
-// v10.34: rename -> refresh once -> scroll -> restore -> auto click
+// ========== 方案C 核心函数 ==========
+
+static id findFileModelInVC(UIViewController *vc, NSString *fileId) {
+    if (!vc || !fileId) return nil;
+    NSArray *arrayKeys = @[
+        @"fileList", @"dataSource", @"files", @"items",
+        @"fileModels", @"fileArray", @"listData", @"fileData",
+        @"_fileList", @"_dataSource", @"_files", @"_items",
+        @"_fileModels", @"_fileArray", @"_listData", @"_fileData"
+    ];
+    for (NSString *key in arrayKeys) {
+        @try {
+            id value = [vc valueForKey:key];
+            if ([value isKindOfClass:[NSArray class]]) {
+                NSArray *arr = (NSArray *)value;
+                for (id obj in arr) {
+                    @try {
+                        id fid = [obj valueForKey:@"fs_id"];
+                        NSString *fidStr = [fid isKindOfClass:[NSNumber class]] ? [fid stringValue] : fid;
+                        if ([fidStr isEqualToString:fileId]) {
+                            DLog(@"Found file model in key '%@': %@", key, obj);
+                            return obj;
+                        }
+                    } @catch (NSException *e) {}
+                }
+            }
+        } @catch (NSException *e) {}
+    }
+    DLog(@"File model with fs_id=%@ not found in VC", fileId);
+    return nil;
+}
+
+static BOOL mutateFileModel(id fileModel, NSString *newPath, NSString *newName) {
+    if (!fileModel) return NO;
+    BOOL mutated = NO;
+    @try {
+        [fileModel setValue:newPath forKey:@"path"];
+        mutated = YES;
+        DLog(@"Mutated path -> %@", newPath);
+    } @catch (NSException *e) {
+        DLog(@"Failed to mutate path: %@", e);
+    }
+    @try {
+        [fileModel setValue:newName forKey:@"server_filename"];
+        mutated = YES;
+        DLog(@"Mutated server_filename -> %@", newName);
+    } @catch (NSException *e) {
+        DLog(@"Failed to mutate server_filename: %@", e);
+    }
+    @try {
+        [fileModel setValue:newName forKey:@"filename"];
+        mutated = YES;
+        DLog(@"Mutated filename -> %@", newName);
+    } @catch (NSException *e) {
+        DLog(@"Failed to mutate filename: %@", e);
+    }
+    return mutated;
+}
+
+static void openFileDirectly(UIViewController *vc, id fileModel, NSString *filePath, NSString *fileName) {
+    if (!vc) return;
+
+    // 方式A：直接传篡改后的对象
+    if (fileModel) {
+        NSArray *objSelectors = @[
+            @"openFile:", @"previewFile:", @"didSelectFile:",
+            @"handleFileTap:", @"fileCellClicked:", @"enterFileDetail:",
+            @"showFilePreview:", @"presentFileViewer:", @"routeToFileDetail:",
+            @"openDocument:", @"previewDocument:", @"showPreviewForFile:",
+            @"handleCellTap:", @"didTapFile:", @"onFileSelected:",
+            @"pushFileDetail:", @"presentFileDetail:", @"showFileDetail:"
+        ];
+        for (NSString *selName in objSelectors) {
+            SEL sel = NSSelectorFromString(selName);
+            if ([vc respondsToSelector:sel]) {
+                DLog(@"Trying %@ with mutated object", selName);
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                @try {
+                    [vc performSelector:sel withObject:fileModel];
+                    DLog(@"Success: %@ with object", selName);
+                    #pragma clang diagnostic pop
+                    return;
+                } @catch (NSException *e) {
+                    DLog(@"%@ with object failed: %@", selName, e);
+                }
+                #pragma clang diagnostic pop
+            }
+        }
+    }
+
+    // 方式B：传新路径字符串
+    NSArray *pathSelectors = @[
+        @"openFileWithPath:", @"previewFileWithPath:", @"openFileAtPath:",
+        @"previewDocumentAtPath:", @"showFileAtPath:"
+    ];
+    for (NSString *selName in pathSelectors) {
+        SEL sel = NSSelectorFromString(selName);
+        if ([vc respondsToSelector:sel]) {
+            DLog(@"Trying %@ with path", selName);
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            @try {
+                [vc performSelector:sel withObject:filePath];
+                DLog(@"Success: %@ with path", selName);
+                #pragma clang diagnostic pop
+                return;
+            } @catch (NSException *e) {
+                DLog(@"%@ with path failed: %@", selName, e);
+            }
+            #pragma clang diagnostic pop
+        }
+    }
+
+    // 方式C：篡改 VC 的 selectedFile/currentFile 属性，再调用无参打开方法
+    if (fileModel) {
+        NSArray *propKeys = @[@"selectedFile", @"currentFile", @"fileItem", @"selectedItem", @"currentItem"];
+        NSArray *noArgSelectors = @[
+            @"openCurrentFile", @"previewCurrentFile", @"didTapCurrentFile",
+            @"openSelectedFile", @"previewSelectedFile", @"enterCurrentFile",
+            @"showCurrentFile", @"presentCurrentFile", @"routeToCurrentFile"
+        ];
+        for (NSString *key in propKeys) {
+            @try {
+                [vc setValue:fileModel forKey:key];
+                DLog(@"Set %@ on VC", key);
+                for (NSString *selName in noArgSelectors) {
+                    SEL sel = NSSelectorFromString(selName);
+                    if ([vc respondsToSelector:sel]) {
+                        DLog(@"Trying %@ (no arg)", selName);
+                        #pragma clang diagnostic push
+                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                        @try {
+                            [vc performSelector:sel];
+                            DLog(@"Success: %@ (no arg)", selName);
+                            #pragma clang diagnostic pop
+                            return;
+                        } @catch (NSException *e) {
+                            DLog(@"%@ (no arg) failed: %@", selName, e);
+                        }
+                        #pragma clang diagnostic pop
+                    }
+                }
+            } @catch (NSException *e) {}
+        }
+    }
+
+    // Fallback：方式D 通过代码触发 delegate didSelect，让 delegate 从 dataSource 取已篡改的对象
+    UIScrollView *listView = findListViewGlobally();
+    if (listView) {
+        DLog(@"Trying delegate didSelect fallback");
+        if ([listView isKindOfClass:[UITableView class]]) {
+            UITableView *tv = (UITableView *)listView;
+            NSInteger sections = 1;
+            @try { sections = [tv numberOfSections]; } @catch (NSException *e) {}
+            for (NSInteger s = 0; s < sections; s++) {
+                NSInteger rows = 0;
+                @try { rows = [tv numberOfRowsInSection:s]; } @catch (NSException *e) {}
+                for (NSInteger r = 0; r < rows; r++) {
+                    NSIndexPath *ip = [NSIndexPath indexPathForRow:r inSection:s];
+                    @try {
+                        UITableViewCell *cell = [tv cellForRowAtIndexPath:ip];
+                        if (cell && viewContainsText(cell, fileName)) {
+                            id delegate = tv.delegate;
+                            SEL sel = @selector(tableView:didSelectRowAtIndexPath:);
+                            if (delegate && [delegate respondsToSelector:sel]) {
+                                DLog(@"Triggering tableView:didSelectRowAtIndexPath: at %@", ip);
+                                #pragma clang diagnostic push
+                                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                                [delegate performSelector:sel withObject:tv withObject:ip];
+                                #pragma clang diagnostic pop
+                                return;
+                            }
+                        }
+                    } @catch (NSException *e) {}
+                }
+            }
+        } else if ([listView isKindOfClass:[UICollectionView class]]) {
+            UICollectionView *cv = (UICollectionView *)listView;
+            NSInteger sections = 1;
+            @try { sections = [cv numberOfSections]; } @catch (NSException *e) {}
+            for (NSInteger s = 0; s < sections; s++) {
+                NSInteger items = 0;
+                @try { items = [cv numberOfItemsInSection:s]; } @catch (NSException *e) {}
+                for (NSInteger i = 0; i < items; i++) {
+                    NSIndexPath *ip = [NSIndexPath indexPathForItem:i inSection:s];
+                    @try {
+                        UICollectionViewCell *cell = [cv cellForItemAtIndexPath:ip];
+                        if (cell && viewContainsText(cell, fileName)) {
+                            id delegate = cv.delegate;
+                            SEL sel = @selector(collectionView:didSelectItemAtIndexPath:);
+                            if (delegate && [delegate respondsToSelector:sel]) {
+                                DLog(@"Triggering collectionView:didSelectItemAtIndexPath: at %@", ip);
+                                #pragma clang diagnostic push
+                                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                                [delegate performSelector:sel withObject:cv withObject:ip];
+                                #pragma clang diagnostic pop
+                                return;
+                            }
+                        }
+                    } @catch (NSException *e) {}
+                }
+            }
+        }
+    }
+
+    // 终极 Fallback：滚动+点击旧方案
+    DLog(@"All direct open methods failed, falling back to scroll+click");
+    showToast(@"直接打开失败，尝试滚动定位...");
+    scrollToRenamedFileAndAutoClick([fileName stringByAppendingString:@".8888888888888888"]);
+}
+
+// v10.35 方案C：不刷新、不滚动、不点击，篡改内存对象后直接打开
 static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileId, NSNumber *fileSize) {
     if (fileSize && [fileSize doubleValue] >= 300.0 * 1024.0 * 1024.0) {
         showToast(@"⚠️ 该文件超过300MB，无法下载");
@@ -1145,21 +1364,35 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
         gPendingRestorePdfPath = ppPath;
         gPendingRestoreOriginalName = fileName;
 
-        // v10.34: Refresh once after rename so the renamed file appears in the list
-        showToast(@"2. 刷新列表...");
-        forceRefreshFileList();
+        // 方案C：等待服务端数据库生效，然后篡改内存对象直接打开
+        showToast(@"2. 正在直接打开文件...");
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            // Extra reloadData to ensure the list view picks up the new data source
-            UIScrollView *listView = findListViewGlobally();
-            if ([listView isKindOfClass:[UITableView class]]) {
-                [(UITableView *)listView reloadData];
-            } else if ([listView isKindOfClass:[UICollectionView class]]) {
-                [(UICollectionView *)listView reloadData];
+            UIViewController *vc = topViewController();
+            if (!vc) {
+                showToast(@"未找到当前页面");
+                return;
             }
 
-            showToast(@"3. 滚动到文件...");
-            scrollToRenamedFileAndAutoClick(ppName);
+            // 从内存数据源找到文件对象
+            id fileModel = findFileModelInVC(vc, fileId);
+            BOOL mutated = NO;
+            if (fileModel) {
+                mutated = mutateFileModel(fileModel, ppPath, ppName);
+                if (mutated) {
+                    DLog(@"File model mutated, proceeding with direct open");
+                } else {
+                    DLog(@"Model found but mutation failed, trying path-based open");
+                }
+            } else {
+                DLog(@"Model not found in memory, trying path-based open");
+            }
+
+            // 直接调用内部方法打开（方式A/B/C/D依次尝试）
+            openFileDirectly(vc, fileModel, ppPath, fileName);
+
+            // 启动导航栈检测，进入预览页后自动恢复原名
+            startTapDetection();
         });
     });
 }
@@ -1222,7 +1455,7 @@ static void triggerDownloadFlow(void) {
                                                                style:UIAlertActionStyleCancel
                                                              handler:nil];
         [sheet addAction:cancelAction];
-        
+
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             UIViewController *vc = topViewController();
             if (vc) {
@@ -1247,8 +1480,8 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 8 ? 8 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.34"
-                                                                   message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n快速流程：改名->刷新->滚动->恢复原名->自动点击", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.35"
+                                                                   message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n方案C：改名->篡改内存->直接打开", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件"
                                                              style:UIAlertActionStyleDefault
@@ -1311,7 +1544,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v10.34 loaded - Single Refresh Edition");
+    DLog(@"BaiduPan Troll v10.35 loaded - 方案C Edition");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
