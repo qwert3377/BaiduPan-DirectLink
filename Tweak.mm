@@ -1,7 +1,7 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.37
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.38
 //  Flow: select -> rename -> toast -> 下拉刷新1(等1.5s) -> 下拉刷新2(等2s) -> 查找点击 -> 滚动查找 -> 未找到恢复原名
-//  FIX: simulatePullToRefresh now scrolls to top first, then performs full pull-down sequence with proper NSInvocation for BOOL param
+//  FIX: simulatePullToRefresh uses performSelector with proper casting, avoids NSInvocation type issues
 //
 
 #import <UIKit/UIKit.h>
@@ -515,16 +515,28 @@ static void scrollToRenamedFileAndAutoClick(NSString *ppName) {
     });
 }
 
-static void invokeScrollDelegateMethod(UIScrollView *scrollView, SEL selector, id arg1, id arg2) {
+static void callScrollDelegate(UIScrollView *scrollView, SEL selector) {
     if (!scrollView.delegate || ![scrollView.delegate respondsToSelector:selector]) return;
-    NSMethodSignature *sig = [scrollView.delegate methodSignatureForSelector:selector];
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    [scrollView.delegate performSelector:selector withObject:scrollView];
+    #pragma clang diagnostic pop
+}
+
+static void callScrollDelegateEndDragging(UIScrollView *scrollView, BOOL decelerate) {
+    SEL selector = @selector(scrollViewDidEndDragging:willDecelerate:);
+    if (!scrollView.delegate || ![scrollView.delegate respondsToSelector:selector]) return;
+    // Use NSInvocation with proper casting to NSObject for methodSignatureForSelector
+    NSObject *delegateObj = (NSObject *)scrollView.delegate;
+    NSMethodSignature *sig = [delegateObj methodSignatureForSelector:selector];
     if (!sig) return;
     NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
     [inv setSelector:selector];
-    [inv setTarget:scrollView.delegate];
-    [inv setArgument:&scrollView atIndex:2];
-    if (arg1) [inv setArgument:&arg1 atIndex:3];
-    if (arg2) [inv setArgument:&arg2 atIndex:4];
+    [inv setTarget:delegateObj];
+    // Use __unsafe_unretained to avoid strong pointer issue with setArgument
+    __unsafe_unretained UIScrollView *sv = scrollView;
+    [inv setArgument:&sv atIndex:2];
+    [inv setArgument:&decelerate atIndex:3];
     [inv invoke];
 }
 
@@ -536,32 +548,23 @@ static void simulatePullToRefresh(UIScrollView *scrollView) {
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         // Step 1: begin dragging
-        invokeScrollDelegateMethod(scrollView, @selector(scrollViewWillBeginDragging:), nil, nil);
+        callScrollDelegate(scrollView, @selector(scrollViewWillBeginDragging:));
 
         // Step 2: pull down past threshold (MJRefresh header ~54pt, use -80 to be safe)
         scrollView.contentOffset = CGPointMake(0, -80);
-        invokeScrollDelegateMethod(scrollView, @selector(scrollViewDidScroll:), nil, nil);
+        callScrollDelegate(scrollView, @selector(scrollViewDidScroll:));
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             // Step 3: pull further to "release to refresh" state
             scrollView.contentOffset = CGPointMake(0, -120);
-            invokeScrollDelegateMethod(scrollView, @selector(scrollViewDidScroll:), nil, nil);
+            callScrollDelegate(scrollView, @selector(scrollViewDidScroll:));
 
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 // Step 4: end dragging (release finger) - willDecelerate = NO
-                BOOL decelerate = NO;
-                NSMethodSignature *sig = [scrollView.delegate methodSignatureForSelector:@selector(scrollViewDidEndDragging:willDecelerate:)];
-                if (sig && [scrollView.delegate respondsToSelector:@selector(scrollViewDidEndDragging:willDecelerate:)]) {
-                    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-                    [inv setSelector:@selector(scrollViewDidEndDragging:willDecelerate:)];
-                    [inv setTarget:scrollView.delegate];
-                    [inv setArgument:&scrollView atIndex:2];
-                    [inv setArgument:&decelerate atIndex:3];
-                    [inv invoke];
-                }
+                callScrollDelegateEndDragging(scrollView, NO);
 
                 // Step 5: end decelerating
-                invokeScrollDelegateMethod(scrollView, @selector(scrollViewDidEndDecelerating:), nil, nil);
+                callScrollDelegate(scrollView, @selector(scrollViewDidEndDecelerating:));
 
                 // Step 6: snap back to top after MJRefresh takes over
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -702,7 +705,7 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 8 ? 8 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.37"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.38"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n流程：改名->下拉刷新1(1.5s)->下拉刷新2(2s)->查找->恢复->自动点击", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件"
