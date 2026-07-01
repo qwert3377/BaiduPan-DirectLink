@@ -204,7 +204,7 @@ static void autoDetectPathAndToken(void) {
     // Fallback: scan all defaults but filter out non-token keys
     if (!gBdstoken) {
         NSDictionary *allDefaults = [defaults dictionaryRepresentation];
-        NSArray *blacklistKeys = @[@"password", @"passwd", @"secret", @"credit", @"card", @"phone", @"mobile", @"email", @"address", @"TuringShield", @"CMSBlob", @"MD5"];
+        NSArray *blacklistKeys = @[@"password", @"passwd", @"secret", @"credit", @"card", @"phone", @"mobile", @"email", @"address", @"turing", @"shield", @"cms", @"blob", @"md5", @"sha", @"hash", @"uuid", @"device", @"identifier", @"idfa", @"idfv", @"push", @"firebase", @"crashlytics", @"bugly", @"umeng"];
         for (NSString *key in allDefaults) {
             BOOL isBlacklisted = NO;
             NSString *lowKey = key.lowercaseString;
@@ -331,6 +331,28 @@ static void forceRefreshFileList(void) {
     UIViewController *vc = topViewController();
     if (!vc) { DLog(@"No top VC for refresh"); return; }
     DLog(@"Refreshing top VC: %@", NSStringFromClass([vc class]));
+
+    // Try BaiduPan specific refresh methods first
+    NSArray *baiduRefreshMethods = @[
+        @"refreshFileList", @"reloadFileList", @"updateFileList",
+        @"refreshData", @"reloadData", @"updateData",
+        @"requestFileList", @"fetchFileList", @"loadFileList",
+        @"refresh", @"reload", @"update",
+        @"requestData", @"loadData", @"fetchData",
+        @"beginRefreshing", @"beginRefresh:",
+        @"refreshContent", @"reloadContent", @"updateContent"
+    ];
+    for (NSString *selName in baiduRefreshMethods) {
+        SEL sel = NSSelectorFromString(selName);
+        if ([vc respondsToSelector:sel]) {
+            DLog(@"Calling VC refresh method: %@", selName);
+            _Pragma("clang diagnostic push")
+            _Pragma("clang diagnostic ignored \"-Warc-performSelector-leaks\"")
+            [vc performSelector:sel];
+            _Pragma("clang diagnostic pop")
+            return;
+        }
+    }
 
     // Try reloadData on table/collection view directly
     if ([vc.view isKindOfClass:[UITableView class]]) { [(UITableView *)vc.view reloadData]; return; }
@@ -669,11 +691,17 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
         gPendingRestoreFileId = fileId; gPendingRestorePdfPath = ppPath; gPendingRestoreOriginalName = fileName;
         showToast(@"2. 刷新列表...");
         forceRefreshFileList();
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            // Force reloadData on the list view
             UIScrollView *listView = findListViewGlobally();
-            if ([listView isKindOfClass:[UITableView class]]) [(UITableView *)listView reloadData];
-            else if ([listView isKindOfClass:[UICollectionView class]]) [(UICollectionView *)listView reloadData];
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if ([listView isKindOfClass:[UITableView class]]) {
+                [(UITableView *)listView reloadData];
+                DLog(@"reloadData on UITableView");
+            } else if ([listView isKindOfClass:[UICollectionView class]]) {
+                [(UICollectionView *)listView reloadData];
+                DLog(@"reloadData on UICollectionView");
+            }
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 showToast(@"3. 滚动到文件...");
                 scrollToRenamedFileAndAutoClick(ppName);
             });
