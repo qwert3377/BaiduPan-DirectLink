@@ -1,7 +1,6 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.35
-//  精简版：核心功能 only
-//  Flow: select -> rename -> refresh x2 -> find & click -> scroll find & click -> restore if not found
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.36
+//  Flow: select -> rename -> toast提示 -> 下拉刷新1(等1.5s) -> 下拉刷新2(等2s) -> 查找点击 -> 滚动查找 -> 未找到恢复原名
 //
 
 #import <UIKit/UIKit.h>
@@ -16,6 +15,7 @@ static NSString *gPendingRestorePdfPath = nil;
 static NSString *gPendingRestoreOriginalName = nil;
 
 static UIViewController * topViewController(void);
+static void showToast(NSString *msg);
 static void autoDetectPathAndToken(void);
 static void fetchFileList(void (^completion)(NSArray *files, NSError *err));
 static void renameFile(NSString *fileId, NSString *path, NSString *newName, void (^completion)(BOOL success, NSError *err));
@@ -50,6 +50,39 @@ static UIViewController * topViewController(void) {
         }
     }
     return vc;
+}
+
+static void showToast(NSString *msg) {
+    UIWindow *window = nil;
+    if (@available(iOS 13.0, *)) {
+        for (UIWindowScene *scene in [[UIApplication sharedApplication] connectedScenes]) {
+            if (scene.activationState == UISceneActivationStateForegroundActive) { window = scene.windows.firstObject; break; }
+        }
+    }
+    if (!window) window = [[UIApplication sharedApplication] keyWindow];
+    if (!window) return;
+    for (UIView *sub in window.subviews) {
+        if (sub.tag == 0xBDF0) [sub removeFromSuperview];
+    }
+    UILabel *toast = [[UILabel alloc] init];
+    toast.tag = 0xBDF0;
+    toast.text = msg;
+    toast.textColor = [UIColor whiteColor];
+    toast.backgroundColor = [UIColor colorWithWhite:0 alpha:0.85];
+    toast.textAlignment = NSTextAlignmentCenter;
+    toast.font = [UIFont systemFontOfSize:14];
+    toast.layer.cornerRadius = 16;
+    toast.layer.masksToBounds = YES;
+    toast.numberOfLines = 0;
+    [toast sizeToFit];
+    CGFloat w = MIN(toast.bounds.size.width + 32, window.bounds.size.width - 40);
+    CGFloat h = toast.bounds.size.height + 16;
+    toast.frame = CGRectMake((window.bounds.size.width - w) / 2, window.bounds.size.height - 140, w, h);
+    [window addSubview:toast];
+    toast.alpha = 1;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [toast removeFromSuperview];
+    });
 }
 
 static NSString * strictEncodeURIComponent(NSString *str) {
@@ -365,10 +398,12 @@ static void executeRestoreWithoutRefresh(void (^completion)(BOOL success)) {
         if (completion) completion(NO);
         return;
     }
+    showToast(@"恢复原名...");
     renameFile(gPendingRestoreFileId, gPendingRestorePdfPath, gPendingRestoreOriginalName, ^(BOOL ok, NSError *e) {
         gPendingRestoreFileId = nil;
         gPendingRestorePdfPath = nil;
         gPendingRestoreOriginalName = nil;
+        if (ok) showToast(@"已恢复原名");
         if (completion) completion(ok);
     });
 }
@@ -410,6 +445,7 @@ static void clickCell(NSString *ppName, UIScrollView *listView, NSIndexPath *fou
 
 static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInteger attempt, NSInteger maxAttempts, CGFloat scrollStep) {
     if (attempt >= maxAttempts) {
+        showToast(@"未找到文件，恢复原名");
         executeRestoreWithoutRefresh(nil);
         return;
     }
@@ -421,6 +457,7 @@ static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInt
     if (targetY > maxY) targetY = maxY;
 
     if (targetY <= currentY && attempt > 0) {
+        showToast(@"已滚动到底部，恢复原名");
         executeRestoreWithoutRefresh(nil);
         return;
     }
@@ -435,6 +472,7 @@ static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInt
         }
 
         if (targetY >= maxY && maxY >= 0) {
+            showToast(@"已滚动到底部，恢复原名");
             executeRestoreWithoutRefresh(nil);
             return;
         }
@@ -448,12 +486,14 @@ static void scrollToRenamedFileAndAutoClick(NSString *ppName) {
 
     UIScrollView *listView = findListViewGlobally();
     if (!listView) {
+        showToast(@"未找到文件列表，恢复原名");
         executeRestoreWithoutRefresh(nil);
         return;
     }
 
     NSIndexPath *foundPath = searchInListView(ppName, listView);
     if (foundPath) {
+        showToast(@"找到文件，自动打开...");
         if ([listView isKindOfClass:[UITableView class]]) {
             [(UITableView *)listView scrollToRowAtIndexPath:foundPath atScrollPosition:UITableViewScrollPositionMiddle animated:NO];
         } else if ([listView isKindOfClass:[UICollectionView class]]) {
@@ -465,11 +505,51 @@ static void scrollToRenamedFileAndAutoClick(NSString *ppName) {
         return;
     }
 
+    showToast(@"滚动查找文件...");
     listView.contentOffset = CGPointZero;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         CGFloat scrollStep = listView.bounds.size.height * 0.7;
         if (scrollStep < 100) scrollStep = 100;
         performScrollAttempt(ppName, listView, 0, 15, scrollStep);
+    });
+}
+
+static void simulatePullToRefresh(UIScrollView *scrollView) {
+    if (!scrollView) return;
+    CGPoint originalOffset = scrollView.contentOffset;
+    SEL willBeginDragging = @selector(scrollViewWillBeginDragging:);
+    if (scrollView.delegate && [scrollView.delegate respondsToSelector:willBeginDragging]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        [scrollView.delegate performSelector:willBeginDragging withObject:scrollView];
+        #pragma clang diagnostic pop
+    }
+    scrollView.contentOffset = CGPointMake(originalOffset.x, -150);
+    SEL didScroll = @selector(scrollViewDidScroll:);
+    if (scrollView.delegate && [scrollView.delegate respondsToSelector:didScroll]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        [scrollView.delegate performSelector:didScroll withObject:scrollView];
+        #pragma clang diagnostic pop
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        SEL didEndDragging = @selector(scrollViewDidEndDragging:willDecelerate:);
+        if (scrollView.delegate && [scrollView.delegate respondsToSelector:didEndDragging]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [scrollView.delegate performSelector:didEndDragging withObject:scrollView withObject:@(NO)];
+            #pragma clang diagnostic pop
+        }
+        SEL didEndDecelerating = @selector(scrollViewDidEndDecelerating:);
+        if (scrollView.delegate && [scrollView.delegate respondsToSelector:didEndDecelerating]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [scrollView.delegate performSelector:didEndDecelerating withObject:scrollView];
+            #pragma clang diagnostic pop
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            scrollView.contentOffset = originalOffset;
+        });
     });
 }
 
@@ -484,18 +564,7 @@ static void forceRefreshFileList(void) {
         }
     }
     if (listView) {
-        if ([listView isKindOfClass:[UITableView class]]) {
-            [(UITableView *)listView reloadData];
-        } else if ([listView isKindOfClass:[UICollectionView class]]) {
-            [(UICollectionView *)listView reloadData];
-        }
-        if (listView.refreshControl) {
-            [listView.refreshControl beginRefreshing];
-            listView.contentOffset = CGPointMake(listView.contentOffset.x, -listView.refreshControl.frame.size.height);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                [listView.refreshControl endRefreshing];
-            });
-        }
+        simulatePullToRefresh(listView);
     }
 }
 
@@ -505,24 +574,34 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
     gPendingRestoreOriginalName = nil;
 
     NSString *ext = fileName.pathExtension.lowercaseString;
-    if ([ext isEqualToString:@"88888888888888"]) return;
+    if ([ext isEqualToString:@"88888888888888"]) {
+        showToast(@"文件已是 .88888888888888，无需处理");
+        return;
+    }
 
     NSString *ppName = [fileName stringByAppendingString:@".8888888888888888"];
     NSString *ppPath = [[filePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:ppName];
 
+    showToast(@"1. 重命名...");
     renameFile(fileId, filePath, ppName, ^(BOOL success, NSError *err) {
-        if (!success) return;
+        if (!success) {
+            showToast([NSString stringWithFormat:@"重命名失败: %@", err.localizedDescription]);
+            return;
+        }
 
         gPendingRestoreFileId = fileId;
         gPendingRestorePdfPath = ppPath;
         gPendingRestoreOriginalName = fileName;
 
+        showToast(@"2. 下拉刷新1...");
         forceRefreshFileList();
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            showToast(@"3. 下拉刷新2...");
             forceRefreshFileList();
 
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                showToast(@"4. 查找并打开...");
                 scrollToRenamedFileAndAutoClick(ppName);
             });
         });
@@ -531,17 +610,31 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
 
 static void triggerDownloadFlow(void) {
     autoDetectPathAndToken();
-    if (!gBdstoken) return;
+    if (!gBdstoken) {
+        showToast(@"未检测到登录状态");
+        return;
+    }
+    showToast(@"正在获取文件列表...");
     fetchFileList(^(NSArray *files, NSError *err) {
-        if (err || !files || files.count == 0) return;
+        if (err) {
+            showToast([NSString stringWithFormat:@"获取失败: %@", err.localizedDescription]);
+            return;
+        }
+        if (!files || files.count == 0) {
+            showToast(@"文件夹为空");
+            return;
+        }
         NSMutableArray *fileItems = [NSMutableArray array];
         for (NSDictionary *file in files) {
             NSNumber *isdir = file[@"isdir"];
             if (!isdir || [isdir integerValue] == 0) [fileItems addObject:file];
         }
-        if (fileItems.count == 0) return;
+        if (fileItems.count == 0) {
+            showToast(@"当前文件夹没有可下载的文件");
+            return;
+        }
         UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"选择文件"
-                                                                       message:nil
+                                                                       message:@"选择后自动重命名并快速打开"
                                                                 preferredStyle:UIAlertControllerStyleActionSheet];
         for (NSDictionary *file in fileItems) {
             NSString *name = file[@"server_filename"];
@@ -575,6 +668,8 @@ static void triggerDownloadFlow(void) {
                     sheet.popoverPresentationController.sourceRect = CGRectMake(vc.view.bounds.size.width / 2, vc.view.bounds.size.height / 2, 1, 1);
                 }
                 [vc presentViewController:sheet animated:YES completion:nil];
+            } else {
+                showToast(@"无法弹出选择界面");
             }
         });
     });
@@ -582,8 +677,14 @@ static void triggerDownloadFlow(void) {
 
 static void onFloatButtonTap(void) {
     autoDetectPathAndToken();
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.35"
-                                                                   message:@"选择文件开始下载"
+    NSString *tokenInfo = @"missing";
+    if (gBdstoken) {
+        NSUInteger len = gBdstoken.length;
+        NSUInteger previewLen = len > 8 ? 8 : len;
+        tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
+    }
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.36"
+                                                                   message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n流程：改名->下拉刷新1(1.5s)->下拉刷新2(2s)->查找->恢复->自动点击", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件"
                                                              style:UIAlertActionStyleDefault
