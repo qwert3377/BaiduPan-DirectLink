@@ -1,12 +1,10 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.41
-//  Debug: Fixed string escaping in renameFile to compile with -Werror
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.42
+//  Log to /var/mobile/Documents/baidupan_troll.log for easy debugging
 //
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
-
-#define DLog(fmt, ...) NSLog(@"[BaiduPanTroll] " fmt, ##__VA_ARGS__)
 
 static NSString *gCurrentPath = nil;
 static NSString *gBdstoken = nil;
@@ -26,6 +24,24 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
 static void triggerDownloadFlow(void);
 static void onFloatButtonTap(void);
 static void showFloatButton(void);
+
+static void DLog(NSString *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
+    va_end(args);
+    NSString *timestamp = [NSDateFormatter localizedStringFromDate:[NSDate date] dateStyle:NSDateFormatterNoStyle timeStyle:NSDateFormatterMediumStyle];
+    NSString *line = [NSString stringWithFormat:@"[%@] %@\n", timestamp, msg];
+    NSString *logPath = @"/var/mobile/Documents/baidupan_troll.log";
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
+    if (fh) {
+        [fh seekToEndOfFile];
+        [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+        [fh closeFile];
+    } else {
+        [line writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
+}
 
 static UIViewController * topViewController(void) {
     UIWindow *window = nil;
@@ -281,7 +297,6 @@ static void renameFile(NSString *fileId, NSString *path, NSString *newName, void
     }
     NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/filemanager?async=2&onnest=fail&opera=rename&clienttype=0&app_id=250528&web=1&bdstoken=%@", gBdstoken];
 
-    // Build JSON filelist with proper escaping using NSJSONSerialization
     NSDictionary *fileDict = @{
         @"id": fileId,
         @"path": path,
@@ -724,7 +739,7 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 8 ? 8 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.41"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.42"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n流程：改名->下拉刷新1(1.5s)->下拉刷新2(2s)->查找->恢复->自动点击", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件"
@@ -787,7 +802,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v10.41 loaded");
+    DLog(@"BaiduPan Troll v10.42 loaded");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
