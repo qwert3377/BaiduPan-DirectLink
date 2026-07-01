@@ -893,29 +893,59 @@ static void showLogViewer(void) {
         content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil] ?: @"";
     }
     if (content.length == 0) content = @"暂无日志";
-    if (content.length > 5000) {
-        content = [[content substringFromIndex:content.length - 5000] stringByAppendingString:@"\n\n[... earlier logs truncated ...]"];
-    }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"运行日志" message:content preferredStyle:UIAlertControllerStyleAlert];
-    UIAlertAction *copyAction = [UIAlertAction actionWithTitle:@"复制全部" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        NSString *full = @"";
-        if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
-            full = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil] ?: @"";
-        }
-        [[UIPasteboard generalPasteboard] setString:full];
-        showToast(@"日志已复制到剪贴板");
-    }];
-    UIAlertAction *clearAction = [UIAlertAction actionWithTitle:@"清空日志" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
-        [@"" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
-        showToast(@"日志已清空");
-    }];
-    UIAlertAction *okAction = [UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil];
-    [alert addAction:copyAction];
-    [alert addAction:clearAction];
-    [alert addAction:okAction];
+
+    // 创建自定义日志查看控制器（带导航栏，可滚动）
+    BDTLogViewController *logVC = [[BDTLogViewController alloc] init];
+    logVC.title = @"运行日志";
+    logVC.logContent = content;
+
+    // 包装在 UINavigationController 中
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:logVC];
+
     UIViewController *vc = topViewController();
-    if (vc) [vc presentViewController:alert animated:YES completion:nil];
+    if (vc) [vc presentViewController:nav animated:YES completion:nil];
 }
+
+@interface BDTLogViewController : UIViewController
+@property (nonatomic, copy) NSString *logContent;
+@end
+
+@implementation BDTLogViewController
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor whiteColor];
+
+    // 创建 UITextView 显示日志（可滚动）
+    UITextView *textView = [[UITextView alloc] initWithFrame:self.view.bounds];
+    textView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    textView.editable = NO;
+    textView.font = [UIFont fontWithName:@"Menlo" size:11] ?: [UIFont systemFontOfSize:11];
+    textView.text = self.logContent;
+    textView.textContainerInset = UIEdgeInsetsMake(8, 8, 8, 8);
+    [self.view addSubview:textView];
+
+    // 创建导航栏按钮
+    UIBarButtonItem *copyItem = [[UIBarButtonItem alloc] initWithTitle:@"复制全部" style:UIBarButtonItemStylePlain target:self action:@selector(copyLogTapped:)];
+    UIBarButtonItem *clearItem = [[UIBarButtonItem alloc] initWithTitle:@"清空" style:UIBarButtonItemStylePlain target:self action:@selector(clearLogTapped:)];
+    self.navigationItem.leftBarButtonItem = copyItem;
+    self.navigationItem.rightBarButtonItems = @[clearItem];
+}
+- (void)copyLogTapped:(id)sender {
+    NSString *path = logFilePath();
+    NSString *full = @"";
+    if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        full = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil] ?: @"";
+    }
+    [[UIPasteboard generalPasteboard] setString:full];
+    showToast(@"日志已复制到剪贴板");
+}
+- (void)clearLogTapped:(id)sender {
+    NSString *path = logFilePath();
+    [@"" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    showToast(@"日志已清空");
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+@end
 
 // ===== FLOAT BUTTON =====
 
