@@ -1,6 +1,7 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.36
-//  Flow: select -> rename -> toast提示 -> 下拉刷新1(等1.5s) -> 下拉刷新2(等2s) -> 查找点击 -> 滚动查找 -> 未找到恢复原名
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.37
+//  Flow: select -> rename -> toast -> 下拉刷新1(等1.5s) -> 下拉刷新2(等2s) -> 查找点击 -> 滚动查找 -> 未找到恢复原名
+//  FIX: simulatePullToRefresh now scrolls to top first, then performs full pull-down sequence with proper NSInvocation for BOOL param
 //
 
 #import <UIKit/UIKit.h>
@@ -514,41 +515,59 @@ static void scrollToRenamedFileAndAutoClick(NSString *ppName) {
     });
 }
 
+static void invokeScrollDelegateMethod(UIScrollView *scrollView, SEL selector, id arg1, id arg2) {
+    if (!scrollView.delegate || ![scrollView.delegate respondsToSelector:selector]) return;
+    NSMethodSignature *sig = [scrollView.delegate methodSignatureForSelector:selector];
+    if (!sig) return;
+    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+    [inv setSelector:selector];
+    [inv setTarget:scrollView.delegate];
+    [inv setArgument:&scrollView atIndex:2];
+    if (arg1) [inv setArgument:&arg1 atIndex:3];
+    if (arg2) [inv setArgument:&arg2 atIndex:4];
+    [inv invoke];
+}
+
 static void simulatePullToRefresh(UIScrollView *scrollView) {
     if (!scrollView) return;
-    CGPoint originalOffset = scrollView.contentOffset;
-    SEL willBeginDragging = @selector(scrollViewWillBeginDragging:);
-    if (scrollView.delegate && [scrollView.delegate respondsToSelector:willBeginDragging]) {
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        [scrollView.delegate performSelector:willBeginDragging withObject:scrollView];
-        #pragma clang diagnostic pop
-    }
-    scrollView.contentOffset = CGPointMake(originalOffset.x, -150);
-    SEL didScroll = @selector(scrollViewDidScroll:);
-    if (scrollView.delegate && [scrollView.delegate respondsToSelector:didScroll]) {
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        [scrollView.delegate performSelector:didScroll withObject:scrollView];
-        #pragma clang diagnostic pop
-    }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        SEL didEndDragging = @selector(scrollViewDidEndDragging:willDecelerate:);
-        if (scrollView.delegate && [scrollView.delegate respondsToSelector:didEndDragging]) {
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            [scrollView.delegate performSelector:didEndDragging withObject:scrollView withObject:@(NO)];
-            #pragma clang diagnostic pop
-        }
-        SEL didEndDecelerating = @selector(scrollViewDidEndDecelerating:);
-        if (scrollView.delegate && [scrollView.delegate respondsToSelector:didEndDecelerating]) {
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            [scrollView.delegate performSelector:didEndDecelerating withObject:scrollView];
-            #pragma clang diagnostic pop
-        }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            scrollView.contentOffset = originalOffset;
+
+    // Step 0: scroll to top so MJRefresh header is visible
+    scrollView.contentOffset = CGPointZero;
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        // Step 1: begin dragging
+        invokeScrollDelegateMethod(scrollView, @selector(scrollViewWillBeginDragging:), nil, nil);
+
+        // Step 2: pull down past threshold (MJRefresh header ~54pt, use -80 to be safe)
+        scrollView.contentOffset = CGPointMake(0, -80);
+        invokeScrollDelegateMethod(scrollView, @selector(scrollViewDidScroll:), nil, nil);
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            // Step 3: pull further to "release to refresh" state
+            scrollView.contentOffset = CGPointMake(0, -120);
+            invokeScrollDelegateMethod(scrollView, @selector(scrollViewDidScroll:), nil, nil);
+
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                // Step 4: end dragging (release finger) - willDecelerate = NO
+                BOOL decelerate = NO;
+                NSMethodSignature *sig = [scrollView.delegate methodSignatureForSelector:@selector(scrollViewDidEndDragging:willDecelerate:)];
+                if (sig && [scrollView.delegate respondsToSelector:@selector(scrollViewDidEndDragging:willDecelerate:)]) {
+                    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                    [inv setSelector:@selector(scrollViewDidEndDragging:willDecelerate:)];
+                    [inv setTarget:scrollView.delegate];
+                    [inv setArgument:&scrollView atIndex:2];
+                    [inv setArgument:&decelerate atIndex:3];
+                    [inv invoke];
+                }
+
+                // Step 5: end decelerating
+                invokeScrollDelegateMethod(scrollView, @selector(scrollViewDidEndDecelerating:), nil, nil);
+
+                // Step 6: snap back to top after MJRefresh takes over
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    scrollView.contentOffset = CGPointZero;
+                });
+            });
         });
     });
 }
@@ -683,7 +702,7 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 8 ? 8 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.36"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.37"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n流程：改名->下拉刷新1(1.5s)->下拉刷新2(2s)->查找->恢复->自动点击", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件"
