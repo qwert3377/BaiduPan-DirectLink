@@ -88,7 +88,6 @@ static NSString * scanMemoryForBdstoken(void) {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSDictionary *allDefaults = [defaults dictionaryRepresentation];
     NSString *bestToken = nil;
-    NSString *bestKey = nil;
 
     NSArray *preferredKeys = @[@"bdstoken", @"BDSTOKEN", @"token", @"TOKEN",
                                 @"access_token", @"bd_token", @"pan_token", @"panToken",
@@ -126,16 +125,12 @@ static NSString * scanMemoryForBdstoken(void) {
                 NSRegularExpression *letterRegex = [NSRegularExpression regularExpressionWithPattern:@"[a-fA-F]" options:0 error:nil];
                 if ([letterRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, str.length)] > 0) {
                     if (str.length == 32) return str;
-                    if (str.length == 16 && !bestToken) {
-                        bestToken = str;
-                        bestKey = key;
-                    }
+                    if (str.length == 16 && !bestToken) bestToken = str;
                 }
             }
         }
     }
-    if (bestToken) return bestToken;
-    return nil;
+    return bestToken;
 }
 
 static NSString * extractPathFromVC(UIViewController *vc) {
