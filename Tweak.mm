@@ -1,7 +1,7 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.38
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.39
 //  Flow: select -> rename -> toast -> 下拉刷新1(等1.5s) -> 下拉刷新2(等2s) -> 查找点击 -> 滚动查找 -> 未找到恢复原名
-//  FIX: simulatePullToRefresh uses performSelector with proper casting, avoids NSInvocation type issues
+//  FIX: simulatePullToRefresh scrolls to actual top (accounting for contentInset) before pulling down
 //
 
 #import <UIKit/UIKit.h>
@@ -526,14 +526,12 @@ static void callScrollDelegate(UIScrollView *scrollView, SEL selector) {
 static void callScrollDelegateEndDragging(UIScrollView *scrollView, BOOL decelerate) {
     SEL selector = @selector(scrollViewDidEndDragging:willDecelerate:);
     if (!scrollView.delegate || ![scrollView.delegate respondsToSelector:selector]) return;
-    // Use NSInvocation with proper casting to NSObject for methodSignatureForSelector
     NSObject *delegateObj = (NSObject *)scrollView.delegate;
     NSMethodSignature *sig = [delegateObj methodSignatureForSelector:selector];
     if (!sig) return;
     NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
     [inv setSelector:selector];
     [inv setTarget:delegateObj];
-    // Use __unsafe_unretained to avoid strong pointer issue with setArgument
     __unsafe_unretained UIScrollView *sv = scrollView;
     [inv setArgument:&sv atIndex:2];
     [inv setArgument:&decelerate atIndex:3];
@@ -543,20 +541,22 @@ static void callScrollDelegateEndDragging(UIScrollView *scrollView, BOOL deceler
 static void simulatePullToRefresh(UIScrollView *scrollView) {
     if (!scrollView) return;
 
-    // Step 0: scroll to top so MJRefresh header is visible
-    scrollView.contentOffset = CGPointZero;
+    // Step 0: scroll to actual top, accounting for contentInset
+    CGFloat topInset = scrollView.contentInset.top;
+    CGPoint topOffset = CGPointMake(0, -topInset);
+    [scrollView setContentOffset:topOffset animated:NO];
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         // Step 1: begin dragging
         callScrollDelegate(scrollView, @selector(scrollViewWillBeginDragging:));
 
-        // Step 2: pull down past threshold (MJRefresh header ~54pt, use -80 to be safe)
-        scrollView.contentOffset = CGPointMake(0, -80);
+        // Step 2: pull down past threshold (MJRefresh header ~54pt, pull to -80 below top)
+        scrollView.contentOffset = CGPointMake(0, topInset > 0 ? -(topInset + 80) : -80);
         callScrollDelegate(scrollView, @selector(scrollViewDidScroll:));
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             // Step 3: pull further to "release to refresh" state
-            scrollView.contentOffset = CGPointMake(0, -120);
+            scrollView.contentOffset = CGPointMake(0, topInset > 0 ? -(topInset + 120) : -120);
             callScrollDelegate(scrollView, @selector(scrollViewDidScroll:));
 
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -566,9 +566,9 @@ static void simulatePullToRefresh(UIScrollView *scrollView) {
                 // Step 5: end decelerating
                 callScrollDelegate(scrollView, @selector(scrollViewDidEndDecelerating:));
 
-                // Step 6: snap back to top after MJRefresh takes over
+                // Step 6: snap back to actual top
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    scrollView.contentOffset = CGPointZero;
+                    scrollView.contentOffset = topOffset;
                 });
             });
         });
@@ -705,7 +705,7 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 8 ? 8 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.38"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.39"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n流程：改名->下拉刷新1(1.5s)->下拉刷新2(2s)->查找->恢复->自动点击", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件"
