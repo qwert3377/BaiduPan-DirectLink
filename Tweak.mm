@@ -1,11 +1,12 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.39
-//  Flow: select -> rename -> toast -> 下拉刷新1(等1.5s) -> 下拉刷新2(等2s) -> 查找点击 -> 滚动查找 -> 未找到恢复原名
-//  FIX: simulatePullToRefresh scrolls to actual top (accounting for contentInset) before pulling down
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.40
+//  Debug: Added logging to rename API to diagnose why file name doesn't change after refresh
 //
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+
+#define DLog(fmt, ...) NSLog(@"[BaiduPanTroll] " fmt, ##__VA_ARGS__)
 
 static NSString *gCurrentPath = nil;
 static NSString *gBdstoken = nil;
@@ -107,11 +108,14 @@ static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *header
     if (headers) [allHeaders addEntriesFromDictionary:headers];
     req.allHTTPHeaderFields = allHeaders;
     if (body) req.HTTPBody = [body dataUsingEncoding:NSUTF8StringEncoding];
+    DLog(@"REQUEST %@ %@", method ?: @"GET", url);
+    if (body) DLog(@"BODY: %@", body);
     NSURLSession *session = [NSURLSession sharedSession];
     NSURLSessionDataTask *task = [session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (error) { handler(nil, error); return; }
+            if (error) { DLog(@"NETWORK ERROR: %@", error); handler(nil, error); return; }
             id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            DLog(@"RESPONSE: %@", json);
             handler(json, nil);
         });
     }];
@@ -243,6 +247,7 @@ static void autoDetectPathAndToken(void) {
     if (!gBDUSS) gBDUSS = [defaults objectForKey:@"BDUSS"];
     gCurrentPath = buildPathFromNavStack();
     if (!gCurrentPath) gCurrentPath = @"/";
+    DLog(@"Auto-detect: path=%@ token=%@ bduss=%@", gCurrentPath, gBdstoken ? @"OK" : @"NO", gBDUSS ? @"OK" : @"NO");
 }
 
 static void fetchFileList(void (^completion)(NSArray *files, NSError *err)) {
@@ -275,19 +280,36 @@ static void renameFile(NSString *fileId, NSString *path, NSString *newName, void
         return;
     }
     NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/filemanager?async=2&onnest=fail&opera=rename&clienttype=0&app_id=250528&web=1&bdstoken=%@", gBdstoken];
-    NSString *filelist = [NSString stringWithFormat:@"[{\"id\":%@,\"path\":\"%@\",\"newname\":\"%@\"}]", fileId, path, newName];
+
+    // FIX: Use proper JSON escaping. The path and newName need to have backslashes and quotes escaped.
+    NSString *escapedPath = [path stringByReplacingOccurrencesOfString:@"\" withString:@"\\"];
+    escapedPath = [escapedPath stringByReplacingOccurrencesOfString:@""" withString:@"\""];
+    NSString *escapedNewName = [newName stringByReplacingOccurrencesOfString:@"\" withString:@"\\"];
+    escapedNewName = [escapedNewName stringByReplacingOccurrencesOfString:@""" withString:@"\""];
+
+    NSString *filelist = [NSString stringWithFormat:@"[{\"id\":%@,\"path\":\"%@\",\"newname\":\"%@\"}]", fileId, escapedPath, escapedNewName];
     NSString *body = [NSString stringWithFormat:@"filelist=%@", strictEncodeURIComponent(filelist)];
+
+    DLog(@"RENAME filelist raw: %@", filelist);
+    DLog(@"RENAME body: %@", body);
+
     NSDictionary *headers = @{
         @"Content-Type": @"application/x-www-form-urlencoded; charset=UTF-8",
         @"X-Requested-With": @"XMLHttpRequest"
     };
     bdAsyncRequest(url, @"POST", headers, body, ^(id json, NSError *err) {
-        if (err) { completion(NO, err); return; }
+        if (err) { 
+            DLog(@"RENAME network error: %@", err);
+            completion(NO, err); 
+            return; 
+        }
+        DLog(@"RENAME response: %@", json);
         NSNumber *errnoNum = json[@"errno"];
         if (errnoNum && [errnoNum integerValue] == 0) {
             completion(YES, nil);
         } else {
             NSString *msg = json[@"show_msg"] ?: json[@"errmsg"] ?: @"Unknown";
+            DLog(@"RENAME failed: errno=%@ msg=%@", errnoNum, msg);
             completion(NO, [NSError errorWithDomain:@"BaiduPanTroll" code:[errnoNum integerValue] userInfo:@{NSLocalizedDescriptionKey: msg}]);
         }
     });
@@ -541,32 +563,24 @@ static void callScrollDelegateEndDragging(UIScrollView *scrollView, BOOL deceler
 static void simulatePullToRefresh(UIScrollView *scrollView) {
     if (!scrollView) return;
 
-    // Step 0: scroll to actual top, accounting for contentInset
     CGFloat topInset = scrollView.contentInset.top;
     CGPoint topOffset = CGPointMake(0, -topInset);
     [scrollView setContentOffset:topOffset animated:NO];
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        // Step 1: begin dragging
         callScrollDelegate(scrollView, @selector(scrollViewWillBeginDragging:));
 
-        // Step 2: pull down past threshold (MJRefresh header ~54pt, pull to -80 below top)
         scrollView.contentOffset = CGPointMake(0, topInset > 0 ? -(topInset + 80) : -80);
         callScrollDelegate(scrollView, @selector(scrollViewDidScroll:));
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            // Step 3: pull further to "release to refresh" state
             scrollView.contentOffset = CGPointMake(0, topInset > 0 ? -(topInset + 120) : -120);
             callScrollDelegate(scrollView, @selector(scrollViewDidScroll:));
 
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                // Step 4: end dragging (release finger) - willDecelerate = NO
                 callScrollDelegateEndDragging(scrollView, NO);
-
-                // Step 5: end decelerating
                 callScrollDelegate(scrollView, @selector(scrollViewDidEndDecelerating:));
 
-                // Step 6: snap back to actual top
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     scrollView.contentOffset = topOffset;
                 });
@@ -604,12 +618,15 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
     NSString *ppName = [fileName stringByAppendingString:@".8888888888888888"];
     NSString *ppPath = [[filePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:ppName];
 
+    DLog(@"runSmartFlow: file=%@ path=%@ id=%@ newName=%@ newPath=%@", fileName, filePath, fileId, ppName, ppPath);
     showToast(@"1. 重命名...");
     renameFile(fileId, filePath, ppName, ^(BOOL success, NSError *err) {
         if (!success) {
+            DLog(@"RENAME FAILED: %@", err);
             showToast([NSString stringWithFormat:@"重命名失败: %@", err.localizedDescription]);
             return;
         }
+        DLog(@"RENAME SUCCESS");
 
         gPendingRestoreFileId = fileId;
         gPendingRestorePdfPath = ppPath;
@@ -705,7 +722,7 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 8 ? 8 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.39"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.40"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n流程：改名->下拉刷新1(1.5s)->下拉刷新2(2s)->查找->恢复->自动点击", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件"
@@ -768,6 +785,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
+    DLog(@"BaiduPan Troll v10.40 loaded");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
