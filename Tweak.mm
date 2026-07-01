@@ -1,6 +1,6 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.36
-//  CHANGELOG v10.36: Removed dead code based on runtime logs
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.37
+//  CHANGELOG v10.37: Fixed path detection + UICollectionView cell visibility + reload timing
 //
 
 #import <UIKit/UIKit.h>
@@ -62,7 +62,6 @@ static void fetchFileList(void (^completion)(NSArray *files, NSError *err));
 static void renameFile(NSString *fileId, NSString *path, NSString *newName, void (^completion)(BOOL success, NSError *err));
 static void showToast(NSString *msg);
 static void forceRefreshFileList(void);
-static void refreshVC(UIViewController *vc);
 static void startTapDetection(void);
 static void stopTapDetection(void);
 static void checkIfFileOpened(void);
@@ -84,6 +83,7 @@ static void scrollToRenamedFileAndAutoClick(NSString *ppName);
 static void autoClickVisibleCell(NSString *ppName, UIScrollView *listView);
 static NSString * topVCClassName(void);
 static NSString * topVCTitle(void);
+static NSString * detectCurrentPathFromVC(UIViewController *vc);
 
 // ===== WINDOW / NAV HELPERS =====
 
@@ -172,14 +172,79 @@ static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *header
     [task resume];
 }
 
+// ===== PATH DETECTION from VC =====
+
+static NSString * detectCurrentPathFromVC(UIViewController *vc) {
+    if (!vc) return @"/";
+
+    // Try to read path from VC properties
+    NSArray *pathKeys = @[@"currentPath", @"path", @"dirPath", @"folderPath", @"currentDir", @"currentFolder"];
+    for (NSString *key in pathKeys) {
+        @try {
+            id val = [vc valueForKey:key];
+            if ([val isKindOfClass:[NSString class]] && [(NSString *)val length] > 0) {
+                DLog(@"Detected path from VC.%@: %@", key, val);
+                return val;
+            }
+        } @catch (NSException *e) {}
+    }
+
+    // Try to get from navigation item title (folder name)
+    NSString *title = vc.title ?: vc.navigationItem.title;
+    if (title && title.length > 0 && ![title isEqualToString:@"文件"]) {
+        DLog(@"Using nav title as path hint: %@", title);
+    }
+
+    // Try to get from VC's data model
+    @try {
+        id fileListModel = [vc valueForKey:@"fileListModel"];
+        if (fileListModel) {
+            id path = [fileListModel valueForKey:@"path"];
+            if ([path isKindOfClass:[NSString class]] && [(NSString *)path length] > 0) {
+                DLog(@"Detected path from fileListModel.path: %@", path);
+                return path;
+            }
+        }
+    } @catch (NSException *e) {}
+
+    @try {
+        id viewModel = [vc valueForKey:@"viewModel"];
+        if (viewModel) {
+            id path = [viewModel valueForKey:@"path"];
+            if ([path isKindOfClass:[NSString class]] && [(NSString *)path length] > 0) {
+                DLog(@"Detected path from viewModel.path: %@", path);
+                return path;
+            }
+        }
+    } @catch (NSException *e) {}
+
+    // Try to get from NSUserDefaults known path keys
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSArray *defaultsPathKeys = @[@"current_path", @"currentPath", @"last_path", @"lastPath", @"pan_current_path"];
+    for (NSString *key in defaultsPathKeys) {
+        id val = [defaults objectForKey:key];
+        if ([val isKindOfClass:[NSString class]] && [(NSString *)val length] > 0) {
+            DLog(@"Detected path from NSUserDefaults.%@: %@", key, val);
+            return val;
+        }
+    }
+
+    return @"/";
+}
+
 // ===== TOKEN / PATH DETECTION (with caching) =====
 
 static void autoDetectPathAndToken(void) {
+    // Always re-detect path, but cache token
+    UIViewController *vc = topViewController();
+    NSString *detectedPath = detectCurrentPathFromVC(vc);
+    if (detectedPath) gCurrentPath = detectedPath;
+
     if (gBdstoken && gBDUSS) {
-        DLog(@"Using cached token and BDUSS");
+        DLog(@"Using cached token and BDUSS, path=%@", gCurrentPath);
         return;
     }
-    DLog(@"Starting auto-detection...");
+    DLog(@"Starting auto-detection... path=%@", gCurrentPath);
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
 
     // Try known keys first
@@ -237,7 +302,6 @@ static void autoDetectPathAndToken(void) {
     }
     if (!gBDUSS) { gBDUSS = [defaults objectForKey:@"BDUSS"]; if (gBDUSS) DLog(@"Got BDUSS from NSUserDefaults"); }
 
-    gCurrentPath = @"/";
     NSString *tokenPreview = gBdstoken ? [gBdstoken substringToIndex:MIN(8, gBdstoken.length)] : @"missing";
     DLog(@"Path: %@ | Token: %@ | BDUSS: %@", gCurrentPath, tokenPreview, gBDUSS ? @"OK" : @"missing");
 }
@@ -325,7 +389,7 @@ static void showToast(NSString *msg) {
     });
 }
 
-// ===== REFRESH SYSTEM (simplified - only reloadData + UIRefreshControl) =====
+// ===== REFRESH SYSTEM =====
 
 static void forceRefreshFileList(void) {
     UIViewController *vc = topViewController();
@@ -448,6 +512,8 @@ static NSIndexPath * searchFileInListView(NSString *targetName, UIScrollView *li
             @try { items = [cv numberOfItemsInSection:section]; } @catch (NSException *e) {}
             for (NSInteger item = items - 1; item >= 0; item--) {
                 NSIndexPath *ip = [NSIndexPath indexPathForItem:item inSection:section];
+                // For UICollectionView, cellForItemAtIndexPath only returns VISIBLE cells
+                // We need to check visible cells instead
                 @try {
                     UICollectionViewCell *cell = [cv cellForItemAtIndexPath:ip];
                     if (cell && viewContainsText(cell, targetName)) {
@@ -455,6 +521,14 @@ static NSIndexPath * searchFileInListView(NSString *targetName, UIScrollView *li
                         return ip;
                     }
                 } @catch (NSException *e) {}
+            }
+            // Also check all visible cells for this section
+            for (UICollectionViewCell *cell in [cv visibleCells]) {
+                NSIndexPath *vip = [cv indexPathForCell:cell];
+                if (vip && vip.section == section && viewContainsText(cell, targetName)) {
+                    DLog(@"Found visible collection cell [%ld,%ld]", (long)vip.item, (long)vip.section);
+                    return vip;
+                }
             }
         }
     }
@@ -465,7 +539,10 @@ static UIView * cellAtIndexPath(UIScrollView *listView, NSIndexPath *path) {
     if ([listView isKindOfClass:[UITableView class]]) {
         return [(UITableView *)listView cellForRowAtIndexPath:path];
     } else if ([listView isKindOfClass:[UICollectionView class]]) {
-        return [(UICollectionView *)listView cellForItemAtIndexPath:path];
+        UICollectionView *cv = (UICollectionView *)listView;
+        // cellForItemAtIndexPath only returns visible cells for UICollectionView
+        // We need to scroll first to make it visible
+        return [cv cellForItemAtIndexPath:path];
     }
     return nil;
 }
@@ -504,7 +581,24 @@ static void selectIndexPath(UIScrollView *listView, NSIndexPath *path) {
 
 static void autoClickVisibleCell(NSString *ppName, UIScrollView *listView) {
     if (!ppName || !listView) return;
-    NSIndexPath *foundPath = searchFileInListView(ppName, listView);
+
+    // For UICollectionView, we need to check visible cells first
+    NSIndexPath *foundPath = nil;
+    if ([listView isKindOfClass:[UICollectionView class]]) {
+        UICollectionView *cv = (UICollectionView *)listView;
+        for (UICollectionViewCell *cell in [cv visibleCells]) {
+            if (viewContainsText(cell, ppName)) {
+                foundPath = [cv indexPathForCell:cell];
+                DLog(@"Found visible UICollectionViewCell at [%ld,%ld]", (long)foundPath.item, (long)foundPath.section);
+                break;
+            }
+        }
+    }
+
+    if (!foundPath) {
+        foundPath = searchFileInListView(ppName, listView);
+    }
+
     if (!foundPath) { DLog(@"Cell not visible, will retry..."); return; }
 
     if (!gHasRestored && gPendingRestoreFileId && gPendingRestorePdfPath && gPendingRestoreOriginalName) {
@@ -512,7 +606,7 @@ static void autoClickVisibleCell(NSString *ppName, UIScrollView *listView) {
         showToast(@"4. 恢复原名...");
         executeRestoreWithoutRefresh(^(BOOL success) {
             if (success) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     showToast(@"5. 自动打开文件...");
                     autoClickVisibleCell(ppName, listView);
                 });
@@ -527,14 +621,17 @@ static void autoClickVisibleCell(NSString *ppName, UIScrollView *listView) {
     gHasClicked = YES;
 
     UIView *visibleCell = cellAtIndexPath(listView, foundPath);
-    if (!visibleCell) { DLog(@"Cell at %@ not visible", foundPath); gHasClicked = NO; return; }
+    if (!visibleCell) { 
+        DLog(@"Cell at %@ not visible yet, will retry", foundPath); 
+        gHasClicked = NO; 
+        return; 
+    }
 
     DLog(@"Cell VISIBLE, auto-clicking...");
     showToast(@"正在自动打开文件...");
     selectIndexPath(listView, foundPath);
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        // Only method that worked in logs: UIApplication sendAction
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try {
             [[UIApplication sharedApplication] sendAction:@selector(touchesEnded:withEvent:) to:visibleCell from:nil forEvent:nil];
             DLog(@"Sent action via UIApplication");
@@ -552,9 +649,23 @@ static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInt
     DLog(@"Scroll %ld: %.0f -> %.0f (max %.0f)", (long)attempt, currentY, targetY, maxY);
     if (targetY <= currentY && attempt > 0) { DLog(@"At bottom, stopping"); showToast(@"已滚动到底部，未找到文件"); return; }
     listView.contentOffset = CGPointMake(0, targetY);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+
+    // Wait longer for UICollectionView to layout cells
+    CGFloat delay = [listView isKindOfClass:[UICollectionView class]] ? 0.5 : 0.2;
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         autoClickVisibleCell(ppName, listView);
-        NSIndexPath *foundPath = searchFileInListView(ppName, listView);
+        NSIndexPath *foundPath = nil;
+        if ([listView isKindOfClass:[UICollectionView class]]) {
+            UICollectionView *cv = (UICollectionView *)listView;
+            for (UICollectionViewCell *cell in [cv visibleCells]) {
+                if (viewContainsText(cell, ppName)) {
+                    foundPath = [cv indexPathForCell:cell];
+                    break;
+                }
+            }
+        }
+        if (!foundPath) foundPath = searchFileInListView(ppName, listView);
         if (foundPath) { DLog(@"File found at attempt %ld", (long)attempt); return; }
         if (targetY >= maxY && maxY >= 0) { showToast(@"已滚动到底部，未找到文件"); return; }
         showToast([NSString stringWithFormat:@"继续查找... (%ld/%ld)", (long)(attempt + 1), (long)maxAttempts]);
@@ -564,15 +675,32 @@ static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInt
 
 static void scrollToRenamedFileAndAutoClick(NSString *ppName) {
     if (!ppName) return;
-    DLog(@"v10.36 Scrolling to: %@", ppName);
+    DLog(@"v10.37 Scrolling to: %@", ppName);
     UIScrollView *listView = findListViewGlobally();
     if (!listView) { DLog(@"No list view found"); showToast(@"未找到文件列表"); return; }
     DLog(@"Found list: %@", NSStringFromClass([listView class]));
-    NSIndexPath *foundPath = searchFileInListView(ppName, listView);
+
+    // First try to find in visible cells (especially for UICollectionView)
+    NSIndexPath *foundPath = nil;
+    if ([listView isKindOfClass:[UICollectionView class]]) {
+        UICollectionView *cv = (UICollectionView *)listView;
+        for (UICollectionViewCell *cell in [cv visibleCells]) {
+            if (viewContainsText(cell, ppName)) {
+                foundPath = [cv indexPathForCell:cell];
+                DLog(@"Found in visible UICollectionViewCell at [%ld,%ld]", (long)foundPath.item, (long)foundPath.section);
+                break;
+            }
+        }
+    }
+
+    if (!foundPath) {
+        foundPath = searchFileInListView(ppName, listView);
+    }
+
     if (foundPath) {
         DLog(@"File visible, scrolling to position...");
         scrollToIndexPath(listView, foundPath);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             autoClickVisibleCell(ppName, listView);
         });
         return;
@@ -580,8 +708,8 @@ static void scrollToRenamedFileAndAutoClick(NSString *ppName) {
     DLog(@"File not visible, starting scroll search...");
     showToast(@"正在查找并自动打开文件...");
     listView.contentOffset = CGPointZero;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        performScrollAttempt(ppName, listView, 0, 15, MAX(listView.bounds.size.height * 0.7, 100));
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        performScrollAttempt(ppName, listView, 0, 20, MAX(listView.bounds.size.height * 0.5, 80));
     });
 }
 
@@ -665,7 +793,7 @@ static void startTapDetection(void) {
                                                           selector:@selector(main)
                                                           userInfo:nil
                                                            repeats:YES];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (gIsWaitingForTap) {
             DLog(@"Tap detection timeout");
             stopTapDetection();
@@ -691,8 +819,9 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
         gPendingRestoreFileId = fileId; gPendingRestorePdfPath = ppPath; gPendingRestoreOriginalName = fileName;
         showToast(@"2. 刷新列表...");
         forceRefreshFileList();
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            // Force reloadData on the list view
+
+        // For UICollectionView, need longer wait for layout
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             UIScrollView *listView = findListViewGlobally();
             if ([listView isKindOfClass:[UITableView class]]) {
                 [(UITableView *)listView reloadData];
@@ -701,6 +830,7 @@ static void runSmartFlow(NSString *fileName, NSString *filePath, NSString *fileI
                 [(UICollectionView *)listView reloadData];
                 DLog(@"reloadData on UICollectionView");
             }
+
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 showToast(@"3. 滚动到文件...");
                 scrollToRenamedFileAndAutoClick(ppName);
@@ -796,7 +926,7 @@ static void onFloatButtonTap(void) {
         NSUInteger len = gBdstoken.length, previewLen = MIN(8, len);
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.36"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.37"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n快速流程：改名->刷新->滚动->恢复原名->自动点击", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
@@ -850,7 +980,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v10.36 loaded - Dead code removed");
+    DLog(@"BaiduPan Troll v10.37 loaded - Path detection + UICollectionView fix");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
