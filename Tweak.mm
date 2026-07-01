@@ -1,6 +1,6 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.40
-//  Debug: Added logging to rename API to diagnose why file name doesn't change after refresh
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.41
+//  Debug: Fixed string escaping in renameFile to compile with -Werror
 //
 
 #import <UIKit/UIKit.h>
@@ -281,16 +281,18 @@ static void renameFile(NSString *fileId, NSString *path, NSString *newName, void
     }
     NSString *url = [NSString stringWithFormat:@"https://pan.baidu.com/api/filemanager?async=2&onnest=fail&opera=rename&clienttype=0&app_id=250528&web=1&bdstoken=%@", gBdstoken];
 
-    // FIX: Use proper JSON escaping. The path and newName need to have backslashes and quotes escaped.
-    NSString *escapedPath = [path stringByReplacingOccurrencesOfString:@"\" withString:@"\\"];
-    escapedPath = [escapedPath stringByReplacingOccurrencesOfString:@""" withString:@"\""];
-    NSString *escapedNewName = [newName stringByReplacingOccurrencesOfString:@"\" withString:@"\\"];
-    escapedNewName = [escapedNewName stringByReplacingOccurrencesOfString:@""" withString:@"\""];
+    // Build JSON filelist with proper escaping using NSJSONSerialization
+    NSDictionary *fileDict = @{
+        @"id": fileId,
+        @"path": path,
+        @"newname": newName
+    };
+    NSArray *filelistArray = @[fileDict];
+    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:filelistArray options:0 error:nil];
+    NSString *filelistJson = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+    NSString *body = [NSString stringWithFormat:@"filelist=%@", strictEncodeURIComponent(filelistJson)];
 
-    NSString *filelist = [NSString stringWithFormat:@"[{\"id\":%@,\"path\":\"%@\",\"newname\":\"%@\"}]", fileId, escapedPath, escapedNewName];
-    NSString *body = [NSString stringWithFormat:@"filelist=%@", strictEncodeURIComponent(filelist)];
-
-    DLog(@"RENAME filelist raw: %@", filelist);
+    DLog(@"RENAME filelist JSON: %@", filelistJson);
     DLog(@"RENAME body: %@", body);
 
     NSDictionary *headers = @{
@@ -722,7 +724,7 @@ static void onFloatButtonTap(void) {
         NSUInteger previewLen = len > 8 ? 8 : len;
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.40"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.41"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n流程：改名->下拉刷新1(1.5s)->下拉刷新2(2s)->查找->恢复->自动点击", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件"
@@ -785,7 +787,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v10.40 loaded");
+    DLog(@"BaiduPan Troll v10.41 loaded");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
