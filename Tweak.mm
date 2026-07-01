@@ -200,13 +200,14 @@ static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *header
     if (headers) [allHeaders addEntriesFromDictionary:headers];
     req.allHTTPHeaderFields = allHeaders;
     if (body) req.HTTPBody = [body dataUsingEncoding:NSUTF8StringEncoding];
-    [[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (error) { handler(nil, error); return; }
             id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
             handler(json, nil);
         });
-    }].resume;
+    }];
+    [task resume];
 }
 
 // ===== TOKEN / PATH DETECTION =====
