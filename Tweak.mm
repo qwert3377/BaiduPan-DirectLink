@@ -1,6 +1,6 @@
 //
 //  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.43
-//  Log to /tmp/baidupan_troll.log (more reliable write permission)
+//  Log to /var/mobile/Documents/baidupan_troll.log for easy debugging
 //
 
 #import <UIKit/UIKit.h>
@@ -32,7 +32,7 @@ static void DLog(NSString *fmt, ...) {
     va_end(args);
     NSString *timestamp = [NSDateFormatter localizedStringFromDate:[NSDate date] dateStyle:NSDateFormatterNoStyle timeStyle:NSDateFormatterMediumStyle];
     NSString *line = [NSString stringWithFormat:@"[%@] %@\n", timestamp, msg];
-    NSString *logPath = @"/tmp/baidupan_troll.log";
+    NSString *logPath = [[NSHomeDirectory() stringByAppendingPathComponent:@"Documents"] stringByAppendingPathComponent:@"baidupan_troll.log"];
     NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
     if (fh) {
         [fh seekToEndOfFile];
