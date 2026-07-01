@@ -1,8 +1,6 @@
 //
-//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.35
-//  Flow: select -> rename to .88888888888888 -> REFRESH ONCE -> scroll to file
-//        -> restore original name -> AUTO CLICK visible cell
-//  CHANGELOG v10.35: Logs to app Documents, unified list view API, streamlined
+//  BaiduPan SVIP Direct Link Helper - TrollStore Edition v10.36
+//  CHANGELOG v10.36: Removed dead code based on runtime logs
 //
 
 #import <UIKit/UIKit.h>
@@ -43,28 +41,6 @@ static void writeLogToFile(NSString *msg) {
     writeLogToFile(_msg); \
 } while(0)
 
-// ===== PERFORM SELECTOR HELPERS =====
-#define PERFORM0(t, s) do { \
-    _Pragma("clang diagnostic push") \
-    _Pragma("clang diagnostic ignored \"-Warc-performSelector-leaks\"") \
-    [t performSelector:s]; \
-    _Pragma("clang diagnostic pop") \
-} while(0)
-
-#define PERFORM1(t, s, a) do { \
-    _Pragma("clang diagnostic push") \
-    _Pragma("clang diagnostic ignored \"-Warc-performSelector-leaks\"") \
-    [t performSelector:s withObject:a]; \
-    _Pragma("clang diagnostic pop") \
-} while(0)
-
-#define PERFORM2(t, s, a, b) do { \
-    _Pragma("clang diagnostic push") \
-    _Pragma("clang diagnostic ignored \"-Warc-performSelector-leaks\"") \
-    [t performSelector:s withObject:a withObject:b]; \
-    _Pragma("clang diagnostic pop") \
-} while(0)
-
 // ===== GLOBAL STATE =====
 static NSString *gCurrentPath = nil, *gBdstoken = nil, *gBDUSS = nil;
 static UIButton *gFloatButton = nil;
@@ -81,23 +57,12 @@ static UIViewController * topViewController(void);
 static NSInteger currentNavStackCount(void);
 static NSString * strictEncodeURIComponent(NSString *str);
 static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *headers, NSString *body, void (^handler)(id json, NSError *err));
-static NSString * scanMemoryForBdstoken(void);
-static NSString * extractPathFromVC(UIViewController *vc);
-static NSString * buildPathFromNavStack(void);
 static void autoDetectPathAndToken(void);
 static void fetchFileList(void (^completion)(NSArray *files, NSError *err));
 static void renameFile(NSString *fileId, NSString *path, NSString *newName, void (^completion)(BOOL success, NSError *err));
 static void showToast(NSString *msg);
 static void forceRefreshFileList(void);
 static void refreshVC(UIViewController *vc);
-static UIScrollView * findScrollViewInView(UIView *view);
-static void simulatePullToRefreshOnScrollView(UIScrollView *scrollView);
-static void tryRefreshOnScrollView(UIScrollView *scrollView);
-static void triggerMJRefresh(id headerOrFooter);
-static void triggerNotificationFallback(void);
-static void triggerEGORefresh(UIView *subview, UIScrollView *scrollView);
-static void triggerBDWalletRefresh(UIView *subview, UIScrollView *scrollView);
-static BOOL viewContainsText(UIView *view, NSString *text);
 static void startTapDetection(void);
 static void stopTapDetection(void);
 static void checkIfFileOpened(void);
@@ -109,7 +74,6 @@ static void onFloatButtonTap(void);
 static void showFloatButton(void);
 static void showLogViewer(void);
 
-static UIScrollView * findListViewInHierarchy(UIView *root);
 static UIScrollView * findListViewGlobally(void);
 static NSIndexPath * searchFileInListView(NSString *targetName, UIScrollView *listView);
 static UIView * cellAtIndexPath(UIScrollView *listView, NSIndexPath *path);
@@ -117,9 +81,7 @@ static void scrollToIndexPath(UIScrollView *listView, NSIndexPath *path);
 static void selectIndexPath(UIScrollView *listView, NSIndexPath *path);
 static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInteger attempt, NSInteger maxAttempts, CGFloat scrollStep);
 static void scrollToRenamedFileAndAutoClick(NSString *ppName);
-static void simulateTouchOnCell(UIView *cell);
 static void autoClickVisibleCell(NSString *ppName, UIScrollView *listView);
-static void invokeOpenFileMethodOnVC(UIViewController *vc, NSString *fileName, NSString *filePath);
 static NSString * topVCClassName(void);
 static NSString * topVCTitle(void);
 
@@ -210,17 +172,19 @@ static void bdAsyncRequest(NSString *url, NSString *method, NSDictionary *header
     [task resume];
 }
 
-// ===== TOKEN / PATH DETECTION =====
+// ===== TOKEN / PATH DETECTION (with caching) =====
 
-static NSString * scanMemoryForBdstoken(void) {
+static void autoDetectPathAndToken(void) {
+    if (gBdstoken && gBDUSS) {
+        DLog(@"Using cached token and BDUSS");
+        return;
+    }
+    DLog(@"Starting auto-detection...");
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    NSDictionary *allDefaults = [defaults dictionaryRepresentation];
-    NSString *bestToken = nil, *bestKey = nil;
 
-    NSArray *preferredKeys = @[@"bdstoken", @"BDSTOKEN", @"token", @"TOKEN",
-                                @"access_token", @"bd_token", @"pan_token", @"panToken",
-                                @"user_token", @"auth_token"];
-    for (NSString *key in preferredKeys) {
+    // Try known keys first
+    NSArray *tokenKeys = @[@"bdstoken", @"BDSTOKEN", @"token", @"TOKEN", @"access_token", @"bd_token", @"pan_token"];
+    for (NSString *key in tokenKeys) {
         id value = [defaults objectForKey:key];
         if ([value isKindOfClass:[NSString class]]) {
             NSString *str = value;
@@ -229,114 +193,51 @@ static NSString * scanMemoryForBdstoken(void) {
                 NSRegularExpression *letterRegex = [NSRegularExpression regularExpressionWithPattern:@"[a-fA-F]" options:0 error:nil];
                 if ([hexRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, 32)] == 1 &&
                     [letterRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, 32)] > 0) {
-                    DLog(@"Found 32-bit token in '%@': %@...", key, [str substringToIndex:8]);
-                    return str;
+                    gBdstoken = str;
+                    DLog(@"Got bdstoken from key: %@", key);
+                    break;
                 }
             }
         }
     }
 
-    NSArray *blacklistKeys = @[@"password", @"passwd", @"secret", @"credit", @"card", @"phone", @"mobile", @"email", @"address"];
-    for (NSString *key in allDefaults) {
-        BOOL isBlacklisted = NO;
-        for (NSString *bk in blacklistKeys) {
-            if ([key.lowercaseString containsString:bk]) { isBlacklisted = YES; break; }
-        }
-        if (isBlacklisted) continue;
-
-        id value = allDefaults[key];
-        if ([value isKindOfClass:[NSString class]]) {
-            NSString *str = value;
-            NSRegularExpression *hexRegex = [NSRegularExpression regularExpressionWithPattern:@"^[a-fA-F0-9]+$" options:0 error:nil];
-            NSRegularExpression *letterRegex = [NSRegularExpression regularExpressionWithPattern:@"[a-fA-F]" options:0 error:nil];
-            if ([hexRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, str.length)] == 1 &&
-                [letterRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, str.length)] > 0) {
+    // Fallback: scan all defaults but filter out non-token keys
+    if (!gBdstoken) {
+        NSDictionary *allDefaults = [defaults dictionaryRepresentation];
+        NSArray *blacklistKeys = @[@"password", @"passwd", @"secret", @"credit", @"card", @"phone", @"mobile", @"email", @"address", @"TuringShield", @"CMSBlob", @"MD5"];
+        for (NSString *key in allDefaults) {
+            BOOL isBlacklisted = NO;
+            NSString *lowKey = key.lowercaseString;
+            for (NSString *bk in blacklistKeys) {
+                if ([lowKey containsString:bk]) { isBlacklisted = YES; break; }
+            }
+            if (isBlacklisted) continue;
+            id value = allDefaults[key];
+            if ([value isKindOfClass:[NSString class]]) {
+                NSString *str = value;
                 if (str.length == 32) {
-                    DLog(@"Found 32-bit token in '%@': %@...", key, [str substringToIndex:8]);
-                    return str;
+                    NSRegularExpression *hexRegex = [NSRegularExpression regularExpressionWithPattern:@"^[a-fA-F0-9]+$" options:0 error:nil];
+                    NSRegularExpression *letterRegex = [NSRegularExpression regularExpressionWithPattern:@"[a-fA-F]" options:0 error:nil];
+                    if ([hexRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, 32)] == 1 &&
+                        [letterRegex numberOfMatchesInString:str options:0 range:NSMakeRange(0, 32)] > 0) {
+                        gBdstoken = str;
+                        DLog(@"Found bdstoken in '%@': %@...", key, [str substringToIndex:8]);
+                        break;
+                    }
                 }
-                if (str.length == 16 && !bestToken) { bestToken = str; bestKey = key; }
             }
         }
     }
-    if (bestToken) {
-        DLog(@"Only found 16-bit token in '%@': %@...", bestKey, [bestToken substringToIndex:8]);
-        return bestToken;
-    }
-    return nil;
-}
 
-static NSString * extractPathFromVC(UIViewController *vc) {
-    if (!vc) return nil;
-    NSArray *pathKeys = @[@"path", @"currentPath", @"filePath", @"dirPath", @"currentDir",
-                          @"_path", @"_currentPath", @"directory", @"folderPath", @"currentFolder",
-                          @"mPath", @"_mPath", @"fileListPath", @"currentDirectory", @"directoryPath",
-                          @"currentDirPath", @"_directory", @"_dirPath"];
-    for (NSString *key in pathKeys) {
-        @try {
-            id value = [vc valueForKey:key];
-            if ([value isKindOfClass:[NSString class]] && [value length] > 0) {
-                NSString *path = (NSString *)value;
-                if (![path hasPrefix:@"/"]) path = [@"/" stringByAppendingString:path];
-                return path;
-            }
-        } @catch (NSException *e) {}
-    }
-    return nil;
-}
-
-static NSString * buildPathFromNavStack(void) {
-    UIViewController *vc = topViewController();
-    if (!vc) return nil;
-    NSString *path = extractPathFromVC(vc);
-    if (path && path.length > 0 && ![path isEqualToString:@"/"]) return path;
-    UINavigationController *nav = findNavController(vc);
-    if (!nav) return nil;
-    UIViewController *topVC = nav.topViewController;
-    NSString *topPath = extractPathFromVC(topVC);
-    if (topPath && topPath.length > 0 && ![topPath isEqualToString:@"/"]) return topPath;
-    NSArray *vcs = nav.viewControllers;
-    for (NSInteger i = vcs.count - 1; i >= 0; i--) {
-        NSString *p = extractPathFromVC(vcs[i]);
-        if (p && p.length > 0 && ![p isEqualToString:@"/"]) return p;
-    }
-    NSMutableArray *components = [NSMutableArray array];
-    for (UIViewController *controller in vcs) {
-        NSString *title = controller.title;
-        if (!title || title.length == 0) title = controller.navigationItem.title;
-        if (title && title.length > 0
-            && ![title isEqualToString:@"百度网盘"]
-            && ![title isEqualToString:@"文件"]
-            && ![title isEqualToString:@"首页"]) {
-            if (components.count == 0 || ![components.lastObject isEqualToString:title]) {
-                [components addObject:title];
-            }
-        }
-    }
-    if (components.count > 0) {
-        NSString *fullPath = [components componentsJoinedByString:@"/"];
-        if (![fullPath hasPrefix:@"/"]) fullPath = [@"/" stringByAppendingString:fullPath];
-        return fullPath;
-    }
-    return nil;
-}
-
-static void autoDetectPathAndToken(void) {
-    DLog(@"Starting auto-detection...");
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    NSArray *tokenKeys = @[@"bdstoken", @"BDSTOKEN", @"token", @"TOKEN", @"access_token", @"bd_token", @"pan_token"];
-    for (NSString *key in tokenKeys) {
-        gBdstoken = [defaults objectForKey:key];
-        if (gBdstoken) { DLog(@"Got bdstoken from key: %@", key); break; }
-    }
-    if (!gBdstoken) gBdstoken = scanMemoryForBdstoken();
     if (!gBdstoken) DLog(@"WARNING: No token detected");
+
     NSHTTPCookieStorage *cookieStorage = [NSHTTPCookieStorage sharedHTTPCookieStorage];
     for (NSHTTPCookie *cookie in [cookieStorage cookies]) {
         if ([cookie.name isEqualToString:@"BDUSS"]) { gBDUSS = cookie.value; DLog(@"Got BDUSS from cookie"); break; }
     }
     if (!gBDUSS) { gBDUSS = [defaults objectForKey:@"BDUSS"]; if (gBDUSS) DLog(@"Got BDUSS from NSUserDefaults"); }
-    gCurrentPath = buildPathFromNavStack() ?: @"/";
+
+    gCurrentPath = @"/";
     NSString *tokenPreview = gBdstoken ? [gBdstoken substringToIndex:MIN(8, gBdstoken.length)] : @"missing";
     DLog(@"Path: %@ | Token: %@ | BDUSS: %@", gCurrentPath, tokenPreview, gBDUSS ? @"OK" : @"missing");
 }
@@ -424,164 +325,33 @@ static void showToast(NSString *msg) {
     });
 }
 
-// ===== REFRESH SYSTEM =====
-
-static UIScrollView * findScrollViewInView(UIView *view) {
-    if ([view isKindOfClass:[UIScrollView class]]) return (UIScrollView *)view;
-    for (UIView *subview in view.subviews) {
-        UIScrollView *found = findScrollViewInView(subview);
-        if (found) return found;
-    }
-    return nil;
-}
-
-static void triggerMJRefresh(id headerOrFooter) {
-    if (!headerOrFooter) return;
-    SEL beginSel = NSSelectorFromString(@"beginRefreshing");
-    SEL executeSel = NSSelectorFromString(@"executeRefreshingCallback");
-    if ([headerOrFooter respondsToSelector:beginSel]) PERFORM0(headerOrFooter, beginSel);
-    if ([headerOrFooter respondsToSelector:executeSel]) PERFORM0(headerOrFooter, executeSel);
-}
-
-static void triggerNotificationFallback(void) {
-    NSArray *notifNames = @[
-        @"BDPanRefreshFileListNotification", @"BDPanReloadFileListNotification",
-        @"kRefreshFileListNotification", @"kReloadDataNotification",
-        @"RefreshFileListNotification", @"com.baidu.pan.refreshFileList",
-        @"BDPanFileListDidChangeNotification", @"BDPanFileListNeedRefreshNotification"
-    ];
-    for (NSString *name in notifNames) {
-        [[NSNotificationCenter defaultCenter] postNotificationName:name object:nil userInfo:@{@"path": gCurrentPath ?: @"/"}];
-    }
-}
-
-static void triggerEGORefresh(UIView *subview, UIScrollView *scrollView) {
-    SEL egoScrollSel = NSSelectorFromString(@"egoRefreshScrollViewDidScroll:");
-    SEL egoDragSel = NSSelectorFromString(@"egoRefreshScrollViewDidEndDragging:");
-    if ([subview respondsToSelector:egoScrollSel]) {
-        PERFORM1(subview, egoScrollSel, scrollView);
-        if ([subview respondsToSelector:egoDragSel]) PERFORM1(subview, egoDragSel, scrollView);
-    }
-}
-
-static void triggerBDWalletRefresh(UIView *subview, UIScrollView *scrollView) {
-    SEL bdScrollSel = NSSelectorFromString(@"BDWalletRefreshScrollViewDidScroll:");
-    SEL bdDragSel = NSSelectorFromString(@"BDWalletRefreshScrollViewDidEndDragging:");
-    if ([subview respondsToSelector:bdScrollSel]) {
-        PERFORM1(subview, bdScrollSel, scrollView);
-        if ([subview respondsToSelector:bdDragSel]) PERFORM1(subview, bdDragSel, scrollView);
-    }
-}
-
-static void simulatePullToRefreshOnScrollView(UIScrollView *scrollView) {
-    if (!scrollView) return;
-    DLog(@"Simulating pull-to-refresh");
-    CGPoint originalOffset = scrollView.contentOffset;
-    SEL willBeginDragging = @selector(scrollViewWillBeginDragging:);
-    if (scrollView.delegate && [scrollView.delegate respondsToSelector:willBeginDragging]) {
-        PERFORM1(scrollView.delegate, willBeginDragging, scrollView);
-    }
-    scrollView.contentOffset = CGPointMake(originalOffset.x, -150);
-    SEL didScroll = @selector(scrollViewDidScroll:);
-    if (scrollView.delegate && [scrollView.delegate respondsToSelector:didScroll]) {
-        PERFORM1(scrollView.delegate, didScroll, scrollView);
-    }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        SEL didEndDragging = @selector(scrollViewDidEndDragging:willDecelerate:);
-        if (scrollView.delegate && [scrollView.delegate respondsToSelector:didEndDragging]) {
-            PERFORM2(scrollView.delegate, didEndDragging, scrollView, @(NO));
-        }
-        SEL didEndDecelerating = @selector(scrollViewDidEndDecelerating:);
-        if (scrollView.delegate && [scrollView.delegate respondsToSelector:didEndDecelerating]) {
-            PERFORM1(scrollView.delegate, didEndDecelerating, scrollView);
-        }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            scrollView.contentOffset = originalOffset;
-        });
-    });
-}
-
-static void tryRefreshOnScrollView(UIScrollView *scrollView) {
-    if (!scrollView) return;
-    if (scrollView.refreshControl) {
-        DLog(@"Triggering UIRefreshControl");
-        [scrollView.refreshControl beginRefreshing];
-        scrollView.contentOffset = CGPointMake(scrollView.contentOffset.x, -scrollView.refreshControl.frame.size.height);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [scrollView.refreshControl endRefreshing];
-        });
-        return;
-    }
-    id mjHeader = nil, mjFooter = nil;
-    @try {
-        mjHeader = [scrollView valueForKey:@"mj_header"];
-        mjFooter = [scrollView valueForKey:@"mj_footer"];
-    } @catch (NSException *e) {}
-    if (mjHeader) { triggerMJRefresh(mjHeader); return; }
-    if (mjFooter) { triggerMJRefresh(mjFooter); return; }
-    simulatePullToRefreshOnScrollView(scrollView);
-    for (UIView *subview in scrollView.subviews) {
-        NSString *className = NSStringFromClass([subview class]);
-        if ([className containsString:@"RefreshHeader"] ||
-            [className containsString:@"EGORefresh"] ||
-            [className containsString:@"BDWalletRefresh"] ||
-            [className containsString:@"BDPanRefresh"] ||
-            [className containsString:@"RadarRefresh"] ||
-            [className containsString:@"DimeCircleRefresh"]) {
-            DLog(@"Found refresh component: %@", className);
-            if ([subview respondsToSelector:@selector(beginRefreshing)]) {
-                PERFORM0(subview, @selector(beginRefreshing));
-                return;
-            }
-            triggerEGORefresh(subview, scrollView);
-            triggerBDWalletRefresh(subview, scrollView);
-        }
-    }
-}
-
-static void refreshVC(UIViewController *vc) {
-    if (!vc) return;
-    NSArray *baiduSelectors = @[
-        @"refreshFileList", @"reloadFileList", @"updateFileList",
-        @"refreshData", @"reloadData", @"updateData",
-        @"refreshContent", @"reloadContent", @"updateContent",
-        @"requestFileList", @"fetchFileList", @"loadFileList",
-        @"beginRefreshing", @"beginRefresh:", @"refresh", @"reload", @"update",
-        @"requestData", @"loadData", @"fetchData"
-    ];
-    for (NSString *selName in baiduSelectors) {
-        SEL sel = NSSelectorFromString(selName);
-        if ([vc respondsToSelector:sel]) {
-            DLog(@"Calling VC refresh: %@ on %@", selName, NSStringFromClass([vc class]));
-            PERFORM0(vc, sel);
-            return;
-        }
-    }
-    if ([vc.view isKindOfClass:[UITableView class]]) { [(UITableView *)vc.view reloadData]; return; }
-    if ([vc.view isKindOfClass:[UICollectionView class]]) { [(UICollectionView *)vc.view reloadData]; return; }
-    UIScrollView *sv = findScrollViewInView(vc.view);
-    if (sv) { tryRefreshOnScrollView(sv); return; }
-    if ([vc isKindOfClass:[UINavigationController class]]) {
-        for (UIViewController *child in [(UINavigationController *)vc viewControllers]) refreshVC(child);
-    } else if ([vc isKindOfClass:[UITabBarController class]]) {
-        for (UIViewController *child in [(UITabBarController *)vc viewControllers]) refreshVC(child);
-    } else if ([vc isKindOfClass:[UISplitViewController class]]) {
-        for (UIViewController *child in [(UISplitViewController *)vc viewControllers]) refreshVC(child);
-    }
-    refreshVC(vc.presentedViewController);
-}
+// ===== REFRESH SYSTEM (simplified - only reloadData + UIRefreshControl) =====
 
 static void forceRefreshFileList(void) {
     UIViewController *vc = topViewController();
     if (!vc) { DLog(@"No top VC for refresh"); return; }
     DLog(@"Refreshing top VC: %@", NSStringFromClass([vc class]));
-    refreshVC(vc);
-    for (UIWindow *window in [[UIApplication sharedApplication] windows]) {
-        if (window.rootViewController && window.rootViewController != vc) {
-            refreshVC(window.rootViewController);
-        }
+
+    // Try reloadData on table/collection view directly
+    if ([vc.view isKindOfClass:[UITableView class]]) { [(UITableView *)vc.view reloadData]; return; }
+    if ([vc.view isKindOfClass:[UICollectionView class]]) { [(UICollectionView *)vc.view reloadData]; return; }
+
+    // Search subviews for list view
+    UIScrollView *listView = findListViewGlobally();
+    if ([listView isKindOfClass:[UITableView class]]) { [(UITableView *)listView reloadData]; return; }
+    if ([listView isKindOfClass:[UICollectionView class]]) { [(UICollectionView *)listView reloadData]; return; }
+
+    // Try UIRefreshControl
+    if (listView && listView.refreshControl) {
+        [listView.refreshControl beginRefreshing];
+        listView.contentOffset = CGPointMake(listView.contentOffset.x, -listView.refreshControl.frame.size.height);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [listView.refreshControl endRefreshing];
+        });
+        return;
     }
-    triggerNotificationFallback();
+
+    DLog(@"No refresh method found");
 }
 
 // ===== LIST VIEW OPERATIONS =====
@@ -630,10 +400,8 @@ static UIScrollView * findListViewGlobally(void) {
 static NSIndexPath * searchFileInListView(NSString *targetName, UIScrollView *listView) {
     if (!targetName || !listView) return nil;
     NSInteger totalSections = 1;
-    BOOL isTableView = [listView isKindOfClass:[UITableView class]];
-    BOOL isCollectionView = [listView isKindOfClass:[UICollectionView class]];
 
-    if (isTableView) {
+    if ([listView isKindOfClass:[UITableView class]]) {
         UITableView *tv = (UITableView *)listView;
         @try { totalSections = [tv numberOfSections]; } @catch (NSException *e) {}
         for (NSInteger section = 0; section < totalSections; section++) {
@@ -650,7 +418,7 @@ static NSIndexPath * searchFileInListView(NSString *targetName, UIScrollView *li
                 } @catch (NSException *e) {}
             }
         }
-    } else if (isCollectionView) {
+    } else if ([listView isKindOfClass:[UICollectionView class]]) {
         UICollectionView *cv = (UICollectionView *)listView;
         @try { totalSections = [cv numberOfSections]; } @catch (NSException *e) {}
         for (NSInteger section = 0; section < totalSections; section++) {
@@ -694,46 +462,22 @@ static void selectIndexPath(UIScrollView *listView, NSIndexPath *path) {
         SEL didSelect = @selector(tableView:didSelectRowAtIndexPath:);
         if (delegate && [delegate respondsToSelector:didSelect]) {
             DLog(@"Calling tableView:didSelectRowAtIndexPath:");
-            PERFORM2(delegate, didSelect, listView, path);
+            _Pragma("clang diagnostic push")
+            _Pragma("clang diagnostic ignored \"-Warc-performSelector-leaks\"")
+            [delegate performSelector:didSelect withObject:listView withObject:path];
+            _Pragma("clang diagnostic pop")
         }
     } else if ([listView isKindOfClass:[UICollectionView class]]) {
         id delegate = [(UICollectionView *)listView delegate];
         SEL didSelect = @selector(collectionView:didSelectItemAtIndexPath:);
         if (delegate && [delegate respondsToSelector:didSelect]) {
             DLog(@"Calling collectionView:didSelectItemAtIndexPath:");
-            PERFORM2(delegate, didSelect, listView, path);
+            _Pragma("clang diagnostic push")
+            _Pragma("clang diagnostic ignored \"-Warc-performSelector-leaks\"")
+            [delegate performSelector:didSelect withObject:listView withObject:path];
+            _Pragma("clang diagnostic pop")
         }
     }
-}
-
-static void simulateTouchOnCell(UIView *cell) {
-    if (!cell) return;
-    DLog(@"Simulating touch on: %@", NSStringFromClass([cell class]));
-    if ([cell isKindOfClass:[UIControl class]]) {
-        [(UIControl *)cell sendActionsForControlEvents:UIControlEventTouchUpInside];
-        DLog(@"Sent UIControl action");
-    }
-    for (UIGestureRecognizer *gr in cell.gestureRecognizers) {
-        if ([gr isKindOfClass:[UITapGestureRecognizer class]]) {
-            DLog(@"Triggering tap gesture");
-            @try {
-                SEL sel = NSSelectorFromString(@"_touchesEnded:withEvent:");
-                if ([gr respondsToSelector:sel]) PERFORM2(gr, sel, [NSSet set], nil);
-            } @catch (NSException *e) { DLog(@"Gesture trigger failed: %@", e); }
-        }
-    }
-    @try {
-        for (UIView *sub in cell.subviews) {
-            if ([sub isKindOfClass:[UIButton class]]) {
-                [(UIButton *)sub sendActionsForControlEvents:UIControlEventTouchUpInside];
-                DLog(@"Triggered button inside cell");
-            }
-        }
-    } @catch (NSException *e) {}
-    @try {
-        [[UIApplication sharedApplication] sendAction:@selector(touchesEnded:withEvent:) to:cell from:nil forEvent:nil];
-        DLog(@"Sent action via UIApplication");
-    } @catch (NSException *e) {}
 }
 
 static void autoClickVisibleCell(NSString *ppName, UIScrollView *listView) {
@@ -768,55 +512,12 @@ static void autoClickVisibleCell(NSString *ppName, UIScrollView *listView) {
     selectIndexPath(listView, foundPath);
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        simulateTouchOnCell(visibleCell);
-    });
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        invokeOpenFileMethodOnVC(topViewController(), ppName, gPendingRestorePdfPath);
-    });
-}
-
-static void invokeOpenFileMethodOnVC(UIViewController *vc, NSString *fileName, NSString *filePath) {
-    if (!vc) return;
-    NSArray *possibleSelectors = @[
-        @"openFile:", @"openFileWithId:", @"previewFile:", @"previewFileWithPath:",
-        @"didSelectFile:", @"handleFileTap:", @"fileCellClicked:", @"enterFileDetail:",
-        @"showFilePreview:", @"presentFileViewer:", @"routeToFileDetail:",
-        @"openDocument:", @"previewDocument:", @"showPreviewForFile:",
-        @"handleCellTap:", @"didTapFile:", @"onFileSelected:",
-        @"pushFileDetail:", @"presentFileDetail:", @"showFileDetail:"
-    ];
-    for (NSString *selName in possibleSelectors) {
-        SEL sel = NSSelectorFromString(selName);
-        if ([vc respondsToSelector:sel]) {
-            DLog(@"Found method: %@ on %@", selName, NSStringFromClass([vc class]));
-            @try {
-                PERFORM1(vc, sel, fileName);
-                DLog(@"Called %@ with fileName", selName); return;
-            } @catch (NSException *e) {
-                @try {
-                    PERFORM1(vc, sel, filePath);
-                    DLog(@"Called %@ with filePath", selName); return;
-                } @catch (NSException *e2) {}
-            }
-        }
-    }
-    NSArray *filePropKeys = @[@"selectedFile", @"currentFile", @"fileItem", @"fileModel",
-                               @"selectedItem", @"currentItem", @"fileInfo", @"document"];
-    for (NSString *key in filePropKeys) {
+        // Only method that worked in logs: UIApplication sendAction
         @try {
-            id fileObj = [vc valueForKey:key];
-            if (fileObj) {
-                for (NSString *selName in possibleSelectors) {
-                    SEL sel = NSSelectorFromString(selName);
-                    if ([vc respondsToSelector:sel]) {
-                        DLog(@"Calling %@ with %@", selName, key);
-                        PERFORM1(vc, sel, fileObj); return;
-                    }
-                }
-            }
+            [[UIApplication sharedApplication] sendAction:@selector(touchesEnded:withEvent:) to:visibleCell from:nil forEvent:nil];
+            DLog(@"Sent action via UIApplication");
         } @catch (NSException *e) {}
-    }
-    DLog(@"No open file method on %@", NSStringFromClass([vc class]));
+    });
 }
 
 static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInteger attempt, NSInteger maxAttempts, CGFloat scrollStep) {
@@ -841,7 +542,7 @@ static void performScrollAttempt(NSString *ppName, UIScrollView *listView, NSInt
 
 static void scrollToRenamedFileAndAutoClick(NSString *ppName) {
     if (!ppName) return;
-    DLog(@"v10.35 Scrolling to: %@", ppName);
+    DLog(@"v10.36 Scrolling to: %@", ppName);
     UIScrollView *listView = findListViewGlobally();
     if (!listView) { DLog(@"No list view found"); showToast(@"未找到文件列表"); return; }
     DLog(@"Found list: %@", NSStringFromClass([listView class]));
@@ -1067,7 +768,7 @@ static void onFloatButtonTap(void) {
         NSUInteger len = gBdstoken.length, previewLen = MIN(8, len);
         tokenInfo = [NSString stringWithFormat:@"%@ (%lu位)", [gBdstoken substringToIndex:previewLen], (unsigned long)len];
     }
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.35"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"BaiduPan Troll v10.36"
                                                                    message:[NSString stringWithFormat:@"Path: %@\nToken: %@\nBDUSS: %@\n\n快速流程：改名->刷新->滚动->恢复原名->自动点击", gCurrentPath, tokenInfo, gBDUSS ? @"OK" : @"missing"]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *downloadAction = [UIAlertAction actionWithTitle:@"选择文件" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
@@ -1121,7 +822,7 @@ static void showFloatButton(void) {
 
 __attribute__((constructor))
 static void baiduPanTrollInit(void) {
-    DLog(@"BaiduPan Troll v10.35 loaded - Log to Documents");
+    DLog(@"BaiduPan Troll v10.36 loaded - Dead code removed");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         showFloatButton();
         autoDetectPathAndToken();
